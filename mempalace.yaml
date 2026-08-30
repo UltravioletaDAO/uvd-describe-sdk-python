@@ -1,0 +1,8 @@
+wing: uvd_describe_sdk_python
+rooms:
+  - name: sdk
+    description: SDK source - client, models, caveats, payment seam
+  - name: tests
+    description: Test files
+  - name: general
+    description: All other project files

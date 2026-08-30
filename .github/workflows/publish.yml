@@ -1,0 +1,93 @@
+name: Publish to PyPI
+
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ 🔴 LEER ANTES DEL PRIMER TAG — este workflow NO tiene token y es a      │
+# │    propósito. Publica por OIDC trusted publishing, y eso exige UN paso  │
+# │    manual en pypi.org que NO se puede hacer desde el repo:              │
+# │                                                                        │
+# │      pypi.org → el proyecto (o "Publishing" si todavía no existe) →     │
+# │      Add a trusted publisher → GitHub                                   │
+# │        Owner:         UltravioletaDAO                                   │
+# │        Repository:    uvd-describe-sdk-python                           │
+# │        Workflow name: publish.yml                                       │
+# │        Environment:   (vacío)                                           │
+# │                                                                        │
+# │    Sin ese paso, el job FALLA al subir con un 403 del índice. Falla     │
+# │    fuerte y con un mensaje que se explica solo, que es exactamente lo   │
+# │    que se quiere: nadie publica creyendo que publicó.                   │
+# └────────────────────────────────────────────────────────────────────────┘
+#
+# POR QUÉ NO HAY `secrets.PYPI_TOKEN` ACÁ, Y LA DEUDA QUE ESTO SALDA
+# ------------------------------------------------------------------
+# El molde de la casa (`uvd-x402-sdk-python/.github/workflows/publish.yml`)
+# tiene un comentario que dice:
+#
+#     "This one already uses OIDC trusted publishing, so there is no token to
+#      steal"
+#
+# …y tres líneas más abajo el paso usa `TWINE_USERNAME: __token__` +
+# `TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}`. **El comentario miente sobre su
+# propio código.** Un repo nuevo que copie el molde hereda las dos cosas: el
+# token Y la afirmación falsa que dice que no hay token.
+#
+# Acá se eligió la otra salida: hacer verdadera la afirmación. No hay ninguna
+# credencial de larga vida en este repo — el token de OIDC lo emite GitHub por
+# ejecución, dura minutos y está atado a ESTE workflow de ESTE repo. Un token
+# de PyPI robado publica cualquier versión de cualquier proyecto que alcance,
+# desde cualquier lado, hasta que alguien lo rote.
+#
+# ⚠️ Y esto se REPORTÓ para el molde: el comentario de allá hay que corregirlo
+# o migrarlo. No se toca desde este repo.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lo único que hace posible el trusted publishing. Sin esto, GitHub no
+      # emite el token OIDC y el upload no tiene con qué autenticarse.
+      id-token: write
+    steps:
+      # Pinneadas por SHA y no por tag: un tag es mutable, y quien controle el
+      # repo de la action puede cambiar qué corre adentro de un workflow que
+      # tiene permiso de publicar. Vale igual sin token: `id-token: write` es
+      # una credencial.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build package
+        run: python -m build
+
+      # El tag TIENE que coincidir con `version.__version__`. Sin este chequeo,
+      # un `git tag v0.2.0` sobre un árbol que todavía dice `0.1.0` publica
+      # 0.1.0 con éxito y en silencio — y ese número ya está quemado en PyPI
+      # para siempre. Es la versión CI de la regla de la casa: la versión se
+      # define una vez y todo lo demás la lee.
+      - name: El tag coincide con la versión del código
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER="$(python -c 'import sys; sys.path.insert(0, "src"); from uvd_describe_sdk.version import __version__; print(__version__)')"
+          echo "tag=$TAG  version.py=$VER"
+          if [ "$TAG" != "$VER" ]; then
+            echo "::error::el tag ($TAG) no coincide con version.__version__ ($VER)"
+            exit 1
+          fi
+        if: startsWith(github.ref, 'refs/tags/v')
+
+      - name: Los artefactos están bien formados
+        run: python -m twine check dist/*
+
+      - name: Publish to PyPI (OIDC trusted publishing — sin token)
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

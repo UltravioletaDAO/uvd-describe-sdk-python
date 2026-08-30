@@ -1,0 +1,13 @@
+# Normaliza todo texto a LF en el repo (setup cross-platform estandar).
+# Evita el churn CRLF/LF al editar en Windows/WSL.
+* text=auto eol=lf
+
+# Binarios explicitos (nunca se normalizan).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text eol=lf
+*.whl binary
+*.gz binary

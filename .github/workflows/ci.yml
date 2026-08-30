@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 está acá porque `requires-python = ">=3.9"` lo promete y **mypy no
+        # lo puede verificar**: mypy >= 2.0 rehúsa analizar contra 3.9. O sea que
+        # la única evidencia de que el paquete corre en 3.9 es esta fila
+        # corriendo la suite ahí. Sacarla convierte una promesa medida en una
+        # promesa escrita.
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        # `[dev]` arrastra `uvd-x402-sdk` a propósito: `payment.chain_name_for`
+        # le pregunta a SU registro de redes cuál es el nombre de `eip155:8453`,
+        # y sin él instalado ese test se saltea — un mapeo roto pasaría en verde.
+        # Mismo criterio que el `ci.yml` del molde deja escrito para
+        # `dx402`/`escrow`.
+        run: pip install -e ".[dev]"
+
+      - name: El SDK de pagos está de verdad (si no, el test de redes miente)
+        run: python -c "import uvd_x402_sdk, uvd_x402_sdk.networks.base; print('uvd-x402-sdk OK')"
+
+      - name: Test
+        # La suite NO toca la red. Si algún día un test empieza a fallar acá y
+        # pasa en local, sospechá de un fixture que quedó pidiendo internet, no
+        # del CI.
+        run: python -m pytest
+
+  lint:
+    name: Lint + tipos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: python -m ruff check src tests
+      - run: python -m mypy src/uvd_describe_sdk
+
+  # El chequeo que la suite mockeada NO puede hacer, y es el que atrapa el modo
+  # de falla real de un cliente: **la API agrega o renombra un campo y el SDK lo
+  # descarta en silencio**, con un 200 verde. Un mock sólo prueba que el SDK lee
+  # bien lo que YO creo que manda el servicio.
+  #
+  # Es el patrón de `scripts/test_sdk_paridad.py` del servicio con el eje
+  # girado: allá es vendorizado-vs-instalado, acá es SDK-vs-API-desplegada.
+  #
+  # `continue-on-error`: el índice es un servicio externo con arranque en frío
+  # medido de 15,2 s. Que se caiga NO puede bloquear un PR de este repo — pero
+  # tiene que quedar VISIBLE, que es justo lo que hace un job amarillo.
+  # 🔴 Sólo rutas GRATIS. Un job de CI que gasta USDC en cada push es un job
+  # que alguien apaga.
+  contra-la-api-viva:
+    name: Smoke contra api.describe.net (sólo rutas gratis)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "."
+      - run: python examples/smoke_gratis.py

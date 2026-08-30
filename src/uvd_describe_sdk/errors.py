@@ -1,0 +1,175 @@
+"""La taxonomía de fallas — y la línea que separa «no pude leer» de «no hay dato».
+
+REGLA R4 DEL CONTRATO NÚCLEO, y es la razón de que este módulo exista:
+**se lanza una excepción SÓLO por transporte o protocolo** (timeout, 5xx, JSON
+inválido, un cuerpo que no tiene la forma prometida). **Nunca por «no hay
+datos».** Una wallet sin calificar es una RESPUESTA — la puerta A2A del servicio
+lo dice con todas las letras: *«That is an answer, not an error»*.
+
+Por qué importa, medido: el 2026-08-28 en KarmaKadabra un fallo de lectura se
+reportó como si fuera el dato («no pude leer» leído como «no tiene reputación»)
+y costó un reporte equivocado en el gate que decide con quién se comercia
+(`karmakadabra/lib/reputation_scan.py:110-118`, escrito por ese incidente). Esa
+confusión es exactamente lo que esta taxonomía existe para hacer imposible.
+
+────────────────────────────────────────────────────────────────────────────
+DE DÓNDE SALEN ESTOS NOMBRES, Y QUÉ CAMBIÓ RESPECTO DE LA REFERENCIA
+────────────────────────────────────────────────────────────────────────────
+La implementación de referencia es
+`execution-market/mcp_server/integrations/describenet/types.py:37-95` (578
+líneas en total con su cliente, el lector HTTP más completo de los tres
+consumidores medidos). Su taxonomía se ABSORBE casi entera:
+
+    DescribeNetError → Timeout | HTTPError | Unreachable | Unparseable
+                     | PartialIndex
+
+y sobre todo se absorbe el mecanismo que la hace útil: **un atributo `kind`
+estable sobre el que se ramifica, nunca el texto del mensaje** — el mismo
+principio que el servicio aplica a `caveats[].code` vs `caveats[].text`.
+
+Dos diferencias, declaradas acá porque quien venga de EM las va a notar y
+merece encontrar la razón en vez de una sorpresa:
+
+1. **`kind = "http_5xx"` se renombra a `"http_error"`.** En EM el bucket se
+   llama `http_5xx` y su propio docstring aclara que ahí caen también el 422 y
+   el 429 «porque todo consumidor trata cualquier non-2xx igual»
+   (`types.py:56-60`). Un nombre que hay que desmentir en su propio docstring es
+   un nombre mal puesto. `status_code` sigue viajando, que es lo que se lee.
+   👉 El `kind` de EM se conserva como alias legible en `HTTP_5XX_LEGACY_KIND`
+   para quien esté migrando un `if err.kind == "http_5xx"`.
+
+2. **`PartialIndex` NO se porta.** En EM el cliente «nunca la lanza»
+   (`types.py:84-89`): existe para que capas superiores clasifiquen una
+   cobertura parcial dentro de la misma taxonomía. Un índice parcial se sirve
+   como un 200 cuyo `chains[]` simplemente no trae la fila — o sea, es un DATO,
+   y por R4 un dato no puede ser una excepción. Portarla acá sería publicar una
+   excepción que el SDK jamás levanta, invitando a un `except` muerto.
+
+────────────────────────────────────────────────────────────────────────────
+LO QUE EL FAIL-OPEN **NO** TAPA
+────────────────────────────────────────────────────────────────────────────
+`PaymentRequiredError` y `DoNotPayError` heredan de `DescribeError` pero
+`DescribeClient` NO las traga nunca, ni con `fail_open=True`. El fail-open
+existe para la DISPONIBILIDAD del índice («poné un fallback si describe está
+caído» — Saul, 2026-08-28), no para la configuración de quien llama. Tragarlas
+convertiría «te olvidaste de configurar el pago» en «esta wallet no tiene
+reputación», que es la misma mentira que R1 existe para impedir.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+#: El `kind` que usa `execution-market` para el mismo bucket. Se publica para
+#: que una migración pueda comparar contra los dos sin adivinar.
+HTTP_5XX_LEGACY_KIND = "http_5xx"
+
+
+class DescribeError(Exception):
+    """Base de toda falla de transporte o protocolo contra describe.
+
+    `kind` es el contrato: se ramifica por ahí (o por la subclase), **jamás por
+    el texto del mensaje**. Los mensajes se reescriben; los `kind` no.
+    """
+
+    kind: str = "unreachable"
+
+
+class DescribeTimeout(DescribeError):
+    """La request superó el timeout del cliente.
+
+    Incluye el arranque en frío del proveedor: su Lambda midió **15,2 s** de
+    cold start (INC-2026-08-19, citado en `client.py:19-23` de EM). Un timeout
+    corto convierte cada arranque en frío en un falso «no hay datos» — por eso
+    el default de este SDK son 30 s (R7) y no 8 s, que ya rompió una
+    integración real.
+    """
+
+    kind = "timeout"
+
+
+class DescribeHTTPError(DescribeError):
+    """describe contestó con un status no-2xx.
+
+    El 422 (dirección inválida) y el 429 (rate limit compartido de 20 rps) caen
+    acá junto con los 5xx: todo consumidor los trata igual —«no hay respuesta
+    usable»— y lo que se lee para distinguirlos es `status_code`, no el bucket.
+    """
+
+    kind = "http_error"
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class DescribeUnreachable(DescribeError):
+    """Falla de transporte antes de cualquier status HTTP (DNS, connect, reset)."""
+
+    kind = "unreachable"
+
+
+class DescribeUnparseable(DescribeError):
+    """La respuesta llegó pero no se pudo leer con la forma prometida.
+
+    Es protocolo, no dato: un `chains: []` es una forma válida que dice «no hay
+    nada», y **no** pasa por acá. Sólo pasa un cuerpo que no es JSON o al que le
+    falta la clave esencial que la ruta promete en su schema.
+    """
+
+    kind = "unparseable"
+
+
+class PaymentRequiredError(DescribeError):
+    """Una ruta medida contestó 402 y este cliente no tiene con qué pagar.
+
+    **No la traga el fail-open.** Que falte un `payer` es configuración de quien
+    llama, no una caída del índice: degradarla a `None` escondería un error de
+    programación detrás del mismo valor que significa «no hay evidencia».
+
+    `challenge` trae el 402 crudo tal cual llegó — `amount`, `token`,
+    `recipient`, `accepts[]`, `free_preview`, `pricing`. Se guarda entero a
+    propósito: la guía publicada manda tomar los valores del challenge y
+    **nunca de una tabla cacheada** (docs.describe.net, «Paying with x402»,
+    paso 1), así que el SDK no se queda con un resumen suyo.
+    """
+
+    kind = "payment_required"
+
+    def __init__(
+        self,
+        message: str,
+        challenge: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.challenge: Dict[str, Any] = challenge or {}
+
+    @property
+    def price_usd(self) -> Optional[str]:
+        """El precio como STRING, tal cual lo mandó el servidor.
+
+        String y no float a propósito: el precio es plata y un `float("0.01")`
+        ya no es 0,01. Quien vaya a firmar lo pasa a `Decimal`, nunca a `float`.
+        """
+        value = self.challenge.get("price_usd") or self.challenge.get("amount")
+        return str(value) if value is not None else None
+
+
+class DoNotPayError(DescribeError):
+    """El 402 pide que se pague a una dirección que NO es la tesorería pinneada.
+
+    **Es `DO_NOT_PAY`, no un retry, y no la traga el fail-open.** Regla 4 de
+    `F0-describe-sdk.md:192-205` y paso 2 de la guía publicada: *«If the
+    challenge names another address, do not pay: either it did not come from
+    describe, or the treasury changed and the server did not find out.»*
+
+    Reintentar acá es lo peor que puede hacer un cliente: convierte un desvío
+    de fondos en un desvío de fondos con reintentos.
+    """
+
+    kind = "do_not_pay"
+
+    def __init__(self, message: str, expected: str, offered: str) -> None:
+        super().__init__(message)
+        self.expected = expected
+        self.offered = offered

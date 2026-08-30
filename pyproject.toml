@@ -1,0 +1,136 @@
+[build-system]
+requires = ["setuptools>=61.0,<70.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uvd-describe-sdk"
+# La version NO se escribe aca. Vive en `src/uvd_describe_sdk/version.py` y de
+# ahi la lee tanto el paquete como el User-Agent. Un numero escrito en dos
+# superficies se bumpea en una sola: es la regla de configuracion centralizada
+# de la casa, aplicada al caso mas barato de contraer.
+dynamic = ["version"]
+description = "Cliente Python del indice de reputacion ERC-8004 de describe (api.describe.net): null nunca cero, todo resultado con su policy_version y sus caveats, pago x402 delegado al uvd-x402-sdk"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Ultravioleta DAO", email = "dev@ultravioletadao.xyz" }]
+keywords = [
+    "describe",
+    "erc-8004",
+    "reputation",
+    "trustless-agents",
+    "x402",
+    "agents",
+    "web3",
+    "onchain-reputation",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# Una sola dependencia base, y es el transporte. Nada de criptografia en el
+# camino gratis: quien solo lee `wallet()` / `leaderboard()` / `health()` no
+# arrastra `eth-account` ni nada que pueda firmar.
+dependencies = ["httpx>=0.24.0"]
+
+[project.optional-dependencies]
+# El pago x402. Extra y no dependencia base a proposito: es la unica caseta de
+# peaje (R6) y solo hace falta para las dos rutas medidas.
+x402 = ["uvd-x402-sdk>=0.70.0", "eth-account>=0.11.0"]
+dev = [
+    "pytest>=7.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+    # El SDK de pagos NO es opcional para el TEST run, sea lo que sea para un
+    # consumidor: `payment.chain_name_for` le pregunta a SU registro de redes
+    # cual es el nombre de `eip155:8453`, y sin el instalado ese test no prueba
+    # nada — se saltea, y un mapeo roto pasa en verde. Es el mismo criterio que
+    # el `ci.yml` del molde deja escrito para `dx402`/`escrow`.
+    "uvd-x402-sdk>=0.70.0",
+]
+
+[project.urls]
+Homepage = "https://describe.net"
+Documentation = "https://docs.describe.net"
+API = "https://api.describe.net/docs"
+Repository = "https://github.com/UltravioletaDAO/uvd-describe-sdk-python"
+Issues = "https://github.com/UltravioletaDAO/uvd-describe-sdk-python/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "uvd_describe_sdk.version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# `py.typed` no es un .py, y sin esta linea la autodeteccion de setuptools NO lo
+# mete en la rueda: mypy del consumidor trata el paquete como sin tipos, en
+# verde y en silencio. Mismo modo de falla que el `package-data` del molde
+# (`uvd-x402-sdk-python/pyproject.toml:125-129`): funciona desde el checkout y
+# se rompe desde el paquete instalado, que es el unico que ve el usuario.
+[tool.setuptools.package-data]
+uvd_describe_sdk = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `-q` y nada mas: la suite no toca la red, no necesita marcadores ni plugins.
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    # PEP 604 (`X | None`) y PEP 585 (`list[str]`) en vez de `Optional`/`List`.
+    # NO se adoptan mientras `requires-python` diga >=3.9, y no por gusto: la
+    # implementacion de referencia que este SDK absorbe
+    # (`execution-market/.../describenet/types.py`) usa `Optional[...]`, y que
+    # los dos se lean igual es lo que hace que migrar de aquella a este sea un
+    # diff mecanico en vez de una lectura. Se re-habilitan el dia que el piso
+    # suba a 3.10.
+    "UP006",
+    "UP035",
+    "UP045",
+    # `DescribeTimeout` / `DescribeUnreachable` / `DescribeUnparseable` no
+    # terminan en `Error` A PROPOSITO: calcan los nombres de la taxonomia de
+    # Execution Market (`DescribeNetTimeout`, ...) para que quien venga de ahi
+    # los reconozca. El nombre que se ENTIENDE gana sobre el que cumple la
+    # convencion.
+    "N818",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# En los tests el nombre ES la afirmacion, y las mayusculas son enfasis
+# deliberado (`..._do_not_pay_y_NO_se_firma`). Es lo unico que se lee cuando la
+# suite se pone roja en un CI.
+"tests/*" = ["N802"]
+
+[tool.mypy]
+# 3.10 y no 3.9 aunque `requires-python` diga >=3.9: mypy >= 2.0 REHUSA
+# analizar contra 3.9 ("Python 3.9 is not supported (must be 3.10 or higher)")
+# y el chequeo entero no corre. La compatibilidad con 3.9 la garantiza el CI
+# corriendo la SUITE en 3.9, que es evidencia de ejecucion; el type check corre
+# contra el piso que la herramienta acepta. Medido el 2026-08-30 con mypy 2.3.1.
+python_version = "3.10"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+
+# HUECO UPSTREAM MEDIDO (2026-08-30, uvd-x402-sdk 0.70.0): el SDK de pagos NO
+# publica `py.typed`, asi que mypy lo trata como sin tipos y cualquier consumidor
+# tipado pierde su firma entera. No se arregla aca —seria una copia que se
+# pudre— sino que se reporta upstream. Mientras tanto se declara el hueco en vez
+# de sembrar `# type: ignore` sueltos, que envejecen peor.
+[[tool.mypy.overrides]]
+module = ["uvd_x402_sdk.*"]
+ignore_missing_imports = true
