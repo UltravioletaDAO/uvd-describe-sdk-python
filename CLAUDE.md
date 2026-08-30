@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 105 tests, ~0,3 s, SIN RED
+.venv/Scripts/python -m pytest                     # 125 tests, ~0,4 s, SIN RED
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -88,6 +88,36 @@ nunca por el texto. **Límite conocido**: `payment_sent` prueba que la credencia
 salió, no que el settlement ocurrió — eso sólo lo prueba un `transaction_hash`
 presente, y un transporte caído no trae ninguno.
 
+### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
+
+`partner.py` + `partner=` del constructor. Entrar a las rutas medidas sin pagar,
+firmando ERC-8128 con una wallet que describe tenga en su allowlist. Se agregó
+el 2026-08-30 y **no entra a la tabla de arriba a propósito**: las ocho reglas
+son el contrato núcleo compartido con el gemelo TypeScript; esto es un riel de
+acceso que los dos implementan igual pero que no cambia ninguna de las ocho.
+
+Lo que hay que saber antes de tocarlo (el porqué completo, en `partner.py`):
+
+1. 🔴 **Acá no vive ninguna clave, y no puede empezar a vivir.** `partner=`
+   recibe un OBJETO (`PartnerSigner`: `get_address()` + `sign_message()`). Ni
+   env var, ni parámetro, ni default. Hay un test que falla si aparece un
+   parámetro con «key» o «secret» en el nombre de `DescribeClient.__init__`.
+2. **La firma la hace el `uvd-x402-sdk`** (`erc8128.sign_request`). Medido el
+   2026-08-30: el primitivo YA existía en 0.70.0, así que no hubo nada que subir
+   upstream. No lo reimplementes acá.
+3. **Un riel roto LEVANTA, no degrada.** `PartnerSigningError` (el firmante
+   falló, antes de la primera request) y `PartnerRejectedError` (402 pese a
+   firmar). Las dos con `payment_sent is False`, y **el `payer` no se usa aunque
+   esté configurado**. Es la decisión entera: un partner que cae al camino de
+   pago en silencio no se entera hasta la factura.
+4. **Se firma la URL que `httpx` construyó**, no una rearmada. La base cubre
+   `@query` cuando existe, y firmar otra URL da un 402 que nadie entiende.
+5. **Sólo las rutas medidas.** `paywall.py:772` del servicio decide «gratis»
+   ANTES de mirar el partner (:794): firmar `/health` no cambia nada, y con un
+   firmante remoto costaría una ida al KMS por cada lectura gratis.
+6. **El riel NO mueve R5.** Que una ruta paga te salga gratis no la convierte en
+   gratis: sigue levantando. El criterio es si hubo dinero de por medio.
+
 ### 🔴 Las tres que más fácil se rompen
 
 1. **R5 se rompe rompiendo R1.** Un fail-open que devuelva `None` sin más hace
@@ -119,9 +149,21 @@ Corolario que ya se aplicó: **no hay una tabla `nombre de red → chain id` en
 este repo**. La traducción se le pregunta a `uvd_x402_sdk.networks.base`, que es
 su dueño. Una tabla local sería una copia que se pudre.
 
+Segundo corolario, 2026-08-30: **la firma ERC-8128 del riel de partner tampoco
+se escribe acá.** `uvd_x402_sdk.erc8128.sign_request` ya la hace, con los
+vectores dorados de la flota de EM adentro del paquete. La regla se cumplió
+midiendo ANTES de escribir: el mejor desenlace de upstream-first es descubrir
+que el primitivo ya estaba.
+
 **Huecos abiertos upstream (reportar, no parchear):**
 - `uvd-x402-sdk` 0.70.0 **no publica `py.typed`** (medido 2026-08-30). Todo
   consumidor tipado pierde su firma. Declarado en un override de mypy.
+- **Lo que NO es un hueco, y se anota para no volver a medirlo:** 0.70.0 firma
+  ERC-8128 con `DEFAULT_CHAIN_ID = 8453` y `DEFAULT_VALIDITY_SEC = 300`, o sea
+  exactamente lo que el gate del servicio exige (`describenet/partner.py`:
+  `CHAIN_ID = 8453`, `MAX_VALIDITY_SEC = 300`). El `chain_id` se pasa EXPLÍCITO
+  igual: heredar un default ajeno para un valor que el servidor compara es
+  firmar contra lo que otro repo decida mañana.
 
 ---
 
@@ -159,6 +201,10 @@ docstrings:
 | **C.** `return []` en vez de `return None` en el `except` de `leaderboard()` | **4 rojos**, incluido `assert [] is None` en `test_un_fallo_de_leaderboard_NUNCA_devuelve_una_lista_vacia` |
 | **D.** marcar TODO `_paid` y no sólo el tramo posterior a la firma | **1 rojo**: `test_un_timeout_ANTES_de_firmar_NO_marca_ningun_pago` (`assert True is False`) — y el de DESPUÉS quedó verde |
 | **E.** sacar `mark_payment_sent()` (excepción pelada) | **7 rojos**: los 4 de `payment_sent` + los 3 de rutas pagas — y el de ANTES quedó verde |
+| **F.** 🔴 sacar la rama de `PartnerRejectedError` (el partner cae al camino de pago) | **5 rojos**, y el que importa falla DENTRO del payer: `AssertionError: EL CLIENTE PAGÓ`, con `amount_usd=Decimal('0.01')` en el traceback |
+| **G.** firmar una URL rearmada a mano (`f"{base}{path}"`, sin la query) | **1 rojo**: `assert None == '?snapshot=true'` — la línea `@query` de la base firmada contra la que salió |
+| **H.** firmar también las rutas GRATIS («por simetría») | **3 rojos**: los 3 casos de `test_las_rutas_GRATIS_no_se_firman` |
+| **I.** que `sign_partner_headers` devuelva headers vacíos en vez de levantar | **1 rojo**: `DID NOT RAISE PartnerSigningError` |
 
 **A y B son el par que sostiene la R5 corregida**, uno por borde: A se pone rojo
 si alguien mete las pagas adentro, B si alguien saca a las gratis. **D y E son el
@@ -166,6 +212,15 @@ par que sostiene `payment_sent`**: el mismo timeout, el mismo cliente, y la úni
 diferencia es de qué lado de la firma ocurre — cada mutación pone rojo un lado y
 deja verde el otro, que es lo que prueba que la distinción existe y no es
 decorativa.
+
+**F es la que justifica el archivo entero del riel de partner**, y su rojo lo
+dice mejor que cualquier docstring: sin esa rama el cliente no falla, no avisa y
+no rompe nada — **paga**, y el traceback muestra el `Decimal('0.01')` que estaba
+por gastar. Un test que sólo mirara «el partner recibe su breakdown» habría
+quedado verde con el bug adentro, porque un cliente que paga religiosamente
+también devuelve el breakdown. **F y H son el par por borde**, igual que A y B:
+F se pone roja si el riel deja de proteger las rutas donde hay plata, H si
+alguien lo extiende a las rutas donde no la hay.
 
 ⚠️ **B no pone rojo el test de firmas** (`test_la_tabla_de_nullabilidad_...`),
 porque quitar el `except` no toca la anotación. Está anotado porque es la clase
@@ -185,7 +240,15 @@ publicada mienta.
 - **No reintenta un pago.** El nonce se consume en el settlement: reenviar la
   misma credencial no vuelve a pagar. Un `retries=` quemaría credenciales.
 - **No lee env vars.** Todo entra por constructor. Es lo que lo hace testeable
-  sin entorno y embebible en cualquier proceso.
+  sin entorno y embebible en cualquier proceso. **El riel de partner no es una
+  excepción**: recibe un objeto que firma, no una clave ni el nombre de la
+  variable donde vive.
+- **No custodia ninguna clave.** ⚠️ Corregido el 2026-08-30 y se deja escrito:
+  hasta hoy esto se decía como «no firma», y con el riel de partner eso ya no es
+  exacto — el SDK **sí produce una firma ERC-8128**. Lo que la frase quería
+  decir sigue intacto y es lo que importa: la firma la hace el `uvd-x402-sdk`
+  con un objeto que inyecta el consumidor, y acá no vive, no se lee y no se
+  guarda ninguna clave privada.
 
 ---
 
@@ -198,10 +261,27 @@ publicada mienta.
 
 ### Preguntas abiertas — NO las resuelvas por tu cuenta
 
-1. **El «riel gratis» para los productos propios** (EM / mesh / KK) que Saul
-   pidió el 2026-08-14. El servicio no tiene cuentas ni API keys —«el pago es la
-   autenticación»— así que no hay forma obvia de distinguirlos. **No inventes un
-   header de partner.**
+1. ~~**El «riel gratis» para los productos propios** (EM / mesh / KK) que Saul
+   pidió el 2026-08-14. (…) **No inventes un header de partner.**~~
+   **RESUELTO el 2026-08-30** — ver §«El riel de PARTNER» arriba y
+   `src/uvd_describe_sdk/partner.py`.
+
+   ⚠️ **Se deja tachado y no borrado, y esta corrección enseña algo.** La
+   entrada vieja razonaba: *el servicio no tiene cuentas ni API keys, así que no
+   hay forma obvia de distinguirlos* ⇒ «no inventes un header de partner». **La
+   premisa era correcta y la orden también** —inventar un header habría sido el
+   error— **pero la conclusión implícita, que no había forma, era falsa**: la
+   forma existía y no era un token sino una **firma con la wallet**, el mismo
+   primitivo de identidad que la cara paga ya usaba; divergen sólo en política
+   (allowlist contra pago), no en mecanismo. Lo que salvó a este repo fue el «no
+   lo decidas solo», y lo que lo resolvió fue que **el servicio lo construyó
+   primero** (`describe-net/describenet/partner.py`, 2026-08-28): este SDK sólo
+   lo habla.
+
+   Y lo que SIGUE abierto del hilo, que es la parte que no le toca a este repo:
+   **quién entra en la allowlist lo decide Saul.** Acá no hay ninguna lista, ni
+   puede haberla — al 2026-08-30 Execution Market está dado de alta; KK y mesh
+   NO.
 2. ~~**El alcance de R5.**~~ **RESUELTO el 2026-08-30** — ver §«R5, el alcance»
    arriba: gratis degradan, pagas levantan. Se deja tachado y no borrado: quien
    vuelva con la pregunta merece encontrar la respuesta donde la dejó.

@@ -67,6 +67,18 @@ cual no es suerte sino el mismo ecosistema: `DEFAULT_CHAIN_ID = 8453` (Base),
 `DEFAULT_VALIDITY_SEC = 300`, `alg="eip191"`, keyid en minúsculas. El
 `chain_id` se pasa igual EXPLÍCITO (ver `PARTNER_CHAIN_ID`).
 
+El bucle se cerró entero el mismo día: un `DescribeClient` real, con firma de
+`eth_account` de verdad, contra el `PartnerGate` real del servicio — lo único
+simulado fue el transporte. Es la evidencia que la suite de este repo NO puede
+dar, porque corre sin criptografía a propósito:
+
+    [A] wallet EN la allowlist -> el gate contesta partner='meshrelay'
+        wallet_breakdown -> Breakdown(final_score=86.653045), UNA sola
+        request, y el payer nunca se tocó
+    [B] wallet FUERA (el estado real de KK y mesh hoy) -> el gate cobra
+        -> PartnerRejectedError · payment_sent=False · wallet=0xC259…861c
+           · price_usd='0.01'  ← lo que el riel roto iba a costar
+
 ════════════════════════════════════════════════════════════════════════════
 🔴 SE FIRMA LO QUE SE MANDA, BYTE A BYTE — INCLUIDA LA QUERY
 ════════════════════════════════════════════════════════════════════════════

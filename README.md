@@ -5,6 +5,7 @@ Cliente Python del índice de reputación ERC-8004 de **describe** — `api.desc
 ```bash
 pip install uvd-describe-sdk            # el camino gratis: una sola dependencia (httpx)
 pip install "uvd-describe-sdk[x402]"    # + pagar las rutas medidas
+pip install "uvd-describe-sdk[partner]" # + el riel de partner (firma, no paga)
 ```
 
 ```python
@@ -85,6 +86,9 @@ igual llega entero y hay que mostrarlo.
 
 **Las tres gratis son nullables; las dos pagas no lo son nunca.** No es un
 accidente de la tabla: es la regla del fallback, abajo.
+
+**Y si describe dio de alta tu wallet, las dos pagas te salen $0** sin dejar de
+ser «pagas» para todo lo demás. Es el riel de partner, abajo.
 
 **Gratis primero, y no por cortesía.** El propio 402 lo dice en su
 `free_preview`: *«Si no hay reputación ahí, este cobro no devuelve nada.»*
@@ -217,6 +221,84 @@ diferencia entre «pagué» y «puedo probar que pagué».
 
 ---
 
+## El riel de partner — entrar a las medidas sin gastar un centavo
+
+Si describe dio de alta tu wallet, las rutas medidas dejan de cobrarte. **No es
+un token: es una firma.**
+
+```python
+from uvd_x402_sdk.wallet import EnvKeyAdapter    # lee WALLET_PRIVATE_KEY
+from uvd_describe_sdk import DescribeClient
+
+with DescribeClient(product="meshrelay", partner=EnvKeyAdapter()) as describe:
+    br = describe.wallet_breakdown("0x97cd…0996")   # $0,01 para un tercero, $0 acá
+```
+
+### Por qué una firma y no una API key
+
+describe **no custodia ningún secreto tuyo**. Su allowlist son DIRECCIONES
+PÚBLICAS —se pueden commitear, loguear y publicar sin filtrar nada— y vos
+firmás cada request con una wallet dedicada. **Una brecha de describe no
+compromete tu acceso**, porque allá no vive ninguna credencial tuya.
+
+Y el default es cobrar, estructuralmente, del lado del servidor: env ausente,
+vacía o con JSON inválido ⇒ allowlist vacía ⇒ 402 para todos. Ninguna
+configuración rota significa «pasa todo».
+
+### 🔴 Este SDK sigue sin tocar tu clave
+
+`partner=` recibe un **objeto que firma**, no una clave: dos métodos,
+`get_address()` y `sign_message()`. Es el mismo par que el `WalletAdapter` del
+`uvd-x402-sdk`, así que entra su `EnvKeyAdapter` (la clave en **tu** entorno),
+un KMS, un HSM o una Ledger, sin heredar nada de este paquete.
+
+Usá una wallet **dedicada y sin fondos**: lo único que hace es firmar. Eso es lo
+que hace barato el peor caso — una firma filtrada sirve contra el mismo método y
+la misma URL, y sólo por 300 segundos. No es una credencial permanente y no
+puede mover plata.
+
+> **Nunca** escribas una private key en un archivo, ni «temporalmente». Hay bots
+> barriendo GitHub por `0x`+64 hex que drenan en minutos.
+
+### Si el riel se cae, el cliente LEVANTA — no paga
+
+| Qué pasó | Qué sale | ¿Gastaste? |
+|---|---|---|
+| el firmante rompe (KMS caído, extra sin instalar) | `PartnerSigningError`, **antes de la primera request** | no, y es afirmación fuerte |
+| describe contesta 402 pese a la firma | `PartnerRejectedError` (hereda de `PaymentRequiredError`) | no: **el `payer` no se usa aunque esté** |
+
+Es la decisión entera del modo. Un partner con `payer=` y el riel caído tiene un
+camino obvio y silencioso —pagar— y ahí el bug no se ve nunca: la respuesta
+llega igual, el código funciona, y la factura de USDC aparece semanas después.
+Las dos excepciones salen con **`payment_sent is False`**: te enterás de que
+perdiste el riel gratis **sin haber gastado** el USDC que el riel te ahorraba.
+Si de verdad querés pagar, construí el cliente **sin** `partner=`.
+
+Las cuatro causas de un `PartnerRejectedError`, todas fail-closed del lado del
+servicio: la wallet no está en la allowlist · firmaste contra otro host (tu
+`base_url` no es `api.describe.net`) · el reloj se corrió más de 300 s · la
+firma no cubría la URL que salió. La excepción trae `wallet` — la dirección
+pública con la que firmaste, que es lo que hay que citarle a describe.
+
+### Dos detalles que se pagan caro
+
+- **Se firma lo que se manda, byte a byte, incluida la query.** La base cubre
+  `@query` sólo cuando la URL tiene una, así que firmar una URL rearmada a mano
+  y mandar otra da un 402 que nadie entiende. El SDK firma la URL que `httpx` ya
+  construyó: son la misma cadena **por construcción**.
+- **Sólo se firman las rutas medidas.** Está medido del otro lado: el paywall
+  decide «gratis» *antes* de mirar el partner, así que una firma en `/health` no
+  cambia nada — y con un firmante remoto costaría una ida al KMS por cada
+  lectura. La atribución de consumo, que es lo otro que un partner debe, sale
+  del User-Agent: pasá `product=`.
+
+**El riel no mueve la regla R5.** Que `wallet_breakdown()` te salga gratis no la
+convierte en ruta gratis: sigue levantando ante cualquier fallo, con
+`fail_open=True` explícito incluido. El criterio nunca fue el precio que pagaste
+sino si hubo dinero de por medio.
+
+---
+
 ## Mostrar un score (R8)
 
 ```python
@@ -264,6 +346,7 @@ DescribeClient(
     payer=None,            # sólo para las rutas medidas
     pay_network="base",
     treasury=TREASURY_EVM,
+    partner=None,          # el firmante del riel — un OBJETO, nunca una clave
     transport=None,        # httpx.MockTransport, para tests
 )
 ```
@@ -283,7 +366,13 @@ free-riding.
 ## Lo que este SDK NO hace
 
 - No escribe en ninguna cadena ni emite calificaciones. Es un **lector**.
-- No firma, no custodia claves, no implementa EIP-3009.
+- **No custodia claves ni implementa criptografía.** ⚠️ Corregido el
+  2026-08-30, y la corrección se deja escrita porque la línea vieja —«no
+  firma»— ya no es exacta: con el riel de partner el SDK **sí produce una firma
+  ERC-8128**, pero la hace el `uvd-x402-sdk` con un objeto firmante que le
+  inyecta el consumidor. Lo que nunca cambió, y es lo que la frase quería
+  decir, es que **acá no vive ninguna clave**: ni en un default, ni en una env
+  var, ni en un parámetro. Tampoco implementa EIP-3009, RFC 9421 ni EIP-191.
 - No cachea. Es una decisión, no un olvido: el TTL correcto depende de para qué
   se lee (mesh usa 12 min para un canal; un perfil quiere el valor caliente) y un
   caché adentro del SDK con un default equivocado es peor que ninguno. La
@@ -305,6 +394,15 @@ free-riding.
 - **`uvd-x402-sdk` no publica `py.typed`** (medido en 0.70.0, 2026-08-30): mypy
   lo trata como sin tipos y todo consumidor tipado pierde su firma entera. Acá se
   declara el hueco en un override de mypy, no se parchea — se arregla upstream.
+- **Y lo que NO le faltaba**, medido antes de escribir una línea del riel de
+  partner: `uvd-x402-sdk` 0.70.0 **ya firma ERC-8128**
+  (`uvd_x402_sdk.erc8128.sign_request`, con los vectores dorados de la flota de
+  EM adentro del paquete), con `DEFAULT_CHAIN_ID = 8453` y
+  `DEFAULT_VALIDITY_SEC = 300` — o sea justo lo que el gate del servicio exige.
+  No hubo nada que subir upstream: la regla *upstream-first* se cumplió
+  midiendo y encontrando el primitivo ya hecho, que es el mejor de sus
+  desenlaces. Se anota igual porque la próxima vez la pregunta se contesta
+  leyendo esto en vez de volviendo a medir.
 
 ### Riesgos y preguntas abiertas
 
@@ -312,10 +410,19 @@ free-riding.
   adoptarlo, EM tendría que envolverlo en un thread. Es la pregunta de adopción
   más concreta que queda; un `aio.py` de transporte fino (reusando estos parsers,
   sin duplicar política) sería la salida, y no se escribió todavía.
-- **El «riel gratis» para los productos propios** (EM / mesh / KK) que Saul pidió
-  el 2026-08-14 **no está resuelto y no se inventó acá**. El servicio no tiene
-  cuentas ni API keys —*«el pago es la autenticación»*— así que no hay forma
-  obvia de distinguirlos. Es pregunta para Saul, no una decisión de este repo.
+- ~~**El «riel gratis» para los productos propios** (EM / mesh / KK) que Saul
+  pidió el 2026-08-14 no está resuelto y no se inventó acá.~~ **RESUELTO el
+  2026-08-30** — ver §«El riel de partner» arriba. Se deja tachado y no borrado
+  porque la corrección enseña algo: la línea vieja decía que *«el servicio no
+  tiene cuentas ni API keys, así que no hay forma obvia de distinguirlos»* y de
+  ahí sacaba «no inventes un header de partner». La premisa era correcta y la
+  conclusión no: la forma existía y no era un header inventado sino **una firma
+  con la wallet**, que es el mismo primitivo de identidad que la cara paga ya
+  usaba — divergen sólo en política (allowlist contra pago), no en mecanismo. Lo
+  que salvó a este repo de inventar algo peor fue el «no lo decidas solo», y lo
+  que lo resolvió fue que el servicio lo construyó primero: este SDK sólo lo
+  habla. **La decisión de quién entra en la allowlist sigue siendo de Saul**, y
+  eso no cambió: acá no hay ninguna lista.
 - ~~El alcance del fail-open~~ **resuelto el 2026-08-30** (arriba): las gratis
   degradan, las pagas levantan. Se deja tachado y no borrado: quien recuerde la
   pregunta merece encontrar la respuesta donde la dejó.
@@ -335,7 +442,7 @@ free-riding.
 
 ```bash
 python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
-.venv/Scripts/python -m pytest        # 105 tests, ~0,3 s, SIN RED
+.venv/Scripts/python -m pytest        # 125 tests, ~0,4 s, SIN RED
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python examples/smoke_gratis.py   # esto SÍ toca la API viva
