@@ -77,11 +77,14 @@ igual llega entero y hay que mostrarlo.
 | Método | Precio | Ruta |
 |---|---|---|
 | `wallet(address)` → `WalletReputation \| None` | **gratis** | `GET /wallets/{w}/chains` |
-| `leaderboard()` → `list[LeaderboardRow]` | **gratis** | `GET /leaderboard` |
-| `health()` → `IndexHealth` | **gratis** | `GET /health` |
+| `leaderboard()` → `list[LeaderboardRow] \| None` | **gratis** | `GET /leaderboard` |
+| `health()` → `IndexHealth \| None` | **gratis** | `GET /health` |
 | `badge_url(address)` → `str` | **sin red** | construye la URL, no la pide |
 | `wallet_breakdown(address)` → `Breakdown` | $0,01 ($0,05 con `snapshot=True`) | `GET /reputation/wallet/{w}` |
 | `agent(network, agent_id)` → `AgentReputation` | $0,02 | `GET /reputation/agent/{n}/{id}` |
+
+**Las tres gratis son nullables; las dos pagas no lo son nunca.** No es un
+accidente de la tabla: es la regla del fallback, abajo.
 
 **Gratis primero, y no por cortesía.** El propio 402 lo dice en su
 `free_preview`: *«Si no hay reputación ahí, este cobro no devuelve nada.»*
@@ -119,11 +122,65 @@ DescribeClient(product="mi-app", on_error=a_mi_metrica)
 para la *disponibilidad del índice*, no para tu configuración ni para un desvío
 de fondos.
 
-> ⚠️ **Pregunta abierta del contrato, no resuelta acá.** La regla dice «ante
-> fallo devuelve `null`» sin acotar; la tabla de tipos marca `| null` **sólo** en
-> `wallet()`. Se implementó la tabla —es la afirmación más específica— y
-> `leaderboard()` / `health()` levantan. Si el veredicto cambia, cambia en los
-> tres frentes a la vez.
+### 🔴 Qué cubre y qué no — la línea es si hubo dinero de por medio
+
+| Ruta | Precio | Ante un fallo de servicio |
+|---|---|---|
+| `wallet()` · `leaderboard()` · `health()` | gratis | `None`, siempre observado. **Nunca `[]`.** |
+| `wallet_breakdown()` · `agent()` | $0,01 / $0,02 | **LEVANTAN. Siempre.** |
+
+Las pagas levantan **incluso con `fail_open=True` explícito**, y la razón es
+dinero, no simetría: entre firmar el sobre x402 y recibir la respuesta hay una
+ventana en la que el USDC ya se movió. Devolver `None` ahí te oculta que
+gastaste — es una credencial gastada sin recibo, y nada distingue *«pagué y se
+cayó»* de *«no había nada que traer»*. Un fallo ruidoso después de pagar es
+recuperable (reintentás, registrás, reclamás); un `None` silencioso no lo es.
+No es una preferencia tuya: es una propiedad del método. Un flag de
+disponibilidad no puede comprar el derecho a tragar un recibo.
+
+Y las gratis sí, las **tres** — no sólo `wallet()`: un fallo ruidoso en algo
+gratis te obliga a escribir tu propio `try/except` para algo que el SDK ya sabe
+hacer, que es justo la duplicación que este SDK viene a borrar.
+
+`None` y **nunca** `[]`: una lista vacía afirma que *el índice está vacío*, que
+es una afirmación falsa sobre el mundo. `None` dice *no pude preguntar*.
+
+### Si una ruta paga falla, ¿gastaste?
+
+```python
+try:
+    br = describe.wallet_breakdown("0x97cd…0996")
+except DescribeError as err:
+    if err.payment_sent:
+        # La autorización EIP-3009 ya estaba firmada y despachada: el USDC PUDO
+        # haberse movido. Te toca reconciliar.
+        reconciliar(err.payment)   # amount_usd, network, resource, transaction_hash
+    else:
+        # Se cayó antes de firmar. No salió una credencial, no gastaste nada.
+        reintentar()
+```
+
+**Se ramifica por el atributo, nunca por el texto** — igual que `err.kind` y que
+`caveats[].code`. El mensaje también lo dice, porque quien lee un traceback en un
+log a las 3 AM no tiene el objeto a mano; pero el texto es para leer y el
+atributo es para decidir.
+
+⚠️ **Límite conocido, y está escrito porque importa:** `payment_sent=True`
+prueba que la credencial **salió**, no que el settlement ocurrió. Lo segundo sólo
+se prueba si `payment["transaction_hash"]` viene lleno — o sea, si el servidor
+alcanzó a contestar con su `X-Payment-Receipt`. Cuando se cae el transporte no
+hay forma, desde el cliente, de saber si el facilitator liquidó: haría falta
+consultarlo a él o a la cadena, y este SDK es un lector del índice, no del
+settlement. `payment_sent=False`, en cambio, **sí** es una afirmación fuerte: no
+se firmó nada.
+
+> ✅ **La ambigüedad del contrato quedó resuelta el 2026-08-30.** R5 decía «ante
+> fallo devuelve `null`» sin acotar y la tabla de tipos acotaba a `wallet()`;
+> este SDK había seguido la tabla y el gemelo TypeScript había seguido la regla,
+> terminando con **fail-open en las rutas pagas** — `null` tras un timeout
+> posterior al settlement. La regla corregida de arriba es canon y los dos SDK la
+> implementan igual. De la versión vieja sobrevivió la observación de que una
+> lista vacía se lee como un índice vacío: por eso el contrato dice «nunca `[]`».
 
 ---
 
@@ -259,9 +316,18 @@ free-riding.
   el 2026-08-14 **no está resuelto y no se inventó acá**. El servicio no tiene
   cuentas ni API keys —*«el pago es la autenticación»*— así que no hay forma
   obvia de distinguirlos. Es pregunta para Saul, no una decisión de este repo.
-- **El alcance del fail-open** (arriba): ambigüedad del contrato, reportada.
+- ~~El alcance del fail-open~~ **resuelto el 2026-08-30** (arriba): las gratis
+  degradan, las pagas levantan. Se deja tachado y no borrado: quien recuerde la
+  pregunta merece encontrar la respuesta donde la dejó.
+- **No se puede confirmar un settlement desde el cliente.** `payment_sent` dice
+  que la credencial salió; sólo un `X-Payment-Receipt` prueba que se liquidó, y
+  un transporte caído no trae ninguno. Cerrar ese hueco pide consultarle al
+  facilitator o a la cadena, y eso es otra dependencia y otro producto.
 - El SDK se probó contra la API viva sólo en sus **rutas gratis**. Las pagas se
-  ejercitan con un payer mockeado; nunca se gastó un centavo de USDC.
+  ejercitan con un payer mockeado; nunca se gastó un centavo de USDC. **Por eso
+  el fallo posterior a la firma está probado con un transporte de mentira y no
+  con un pago real**: se sabe que el SDK marca la excepción, no se midió una
+  liquidación de verdad interrumpida.
 
 ---
 
@@ -269,7 +335,7 @@ free-riding.
 
 ```bash
 python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
-.venv/Scripts/python -m pytest        # 88 tests, ~0,3 s, SIN RED
+.venv/Scripts/python -m pytest        # 105 tests, ~0,3 s, SIN RED
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python examples/smoke_gratis.py   # esto SÍ toca la API viva

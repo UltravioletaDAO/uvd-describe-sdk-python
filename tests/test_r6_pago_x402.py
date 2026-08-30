@@ -22,6 +22,8 @@ import pytest
 from uvd_describe_sdk import (
     TREASURY_EVM,
     DescribeHTTPError,
+    DescribeTimeout,
+    DescribeUnparseable,
     DoNotPayError,
     PaymentRequiredError,
     build_payment_header,
@@ -348,3 +350,157 @@ def test_no_hay_reintento_automatico(make_client) -> None:
         with pytest.raises(DescribeHTTPError):
             c.wallet_breakdown("0xdead")
     assert len(intentos) == 2  # uno sin header, uno con. Y se acabó.
+
+
+# ---------------------------------------------------------------------------
+# 🔴 `payment_sent` — la excepción tiene que decir si ya había plata en el aire
+# ---------------------------------------------------------------------------
+#
+# Un `DescribeTimeout` pelado no distingue «se cayó antes de pagar» (no gastaste)
+# de «se cayó después» (pudiste haber gastado). Levantar en las rutas pagas
+# —R5 corregida, 2026-08-30— resuelve la mitad del problema: el llamador se
+# entera de que algo falló. La otra mitad es que se entere de QUÉ falló, porque
+# sólo uno de los dos casos le pide reconciliar.
+#
+# Los dos tests de abajo son un par discriminante: el MISMO fallo (un timeout),
+# el MISMO cliente, y la única diferencia es de qué lado de la firma ocurre.
+
+
+def test_un_timeout_ANTES_de_firmar_NO_marca_ningun_pago(make_client) -> None:
+    """La mitad barata del par, y sin ella la otra no prueba nada.
+
+    El primer request —el que pide el challenge— es GRATIS: preguntar no cuesta.
+    Si se cae ahí, no se firmó nada y no se gastó un centavo, y decir lo
+    contrario mandaría a reconciliar un pago que no existe.
+
+    Si alguien marcara todo el método en vez del tramo posterior a la firma,
+    este test se pone rojo y el de abajo seguiría verde.
+    """
+
+    def timeout_en_el_primero(_r: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("se cayó pidiendo el challenge")
+
+    with make_client(timeout_en_el_primero, payer=PayerEspia()) as c:
+        with pytest.raises(DescribeTimeout) as exc:
+            c.wallet_breakdown("0xdead")
+
+    assert exc.value.payment_sent is False
+    assert exc.value.payment is None
+    assert "CREDENCIAL" not in str(exc.value)
+
+
+def test_un_timeout_DESPUES_de_firmar_dice_que_la_credencial_ya_salio(
+    make_client,
+) -> None:
+    """🔴 El caso que vale plata: el sobre ya se firmó y se despachó.
+
+    La excepción viaja con el monto que se firmó y la red — lo que hace falta
+    para ir a mirar la cadena. Y se ramifica por el ATRIBUTO, no por el texto:
+    los mensajes se reescriben, los atributos no.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "X-PAYMENT" not in request.headers:
+            return json_response(CHALLENGE_402, status=402)
+        raise httpx.ReadTimeout("el settlement tardó más que el cliente")
+
+    with make_client(handler, payer=PayerEspia(), pay_network="base") as c:
+        with pytest.raises(DescribeTimeout) as exc:
+            c.wallet_breakdown("0x97cd97cfe21799bacbf39d0a53469e5f82f30996")
+
+    assert exc.value.payment_sent is True
+    assert exc.value.payment is not None
+    # STRING y no float: es plata. Y es el monto que `_amount_usd` reconcilió
+    # contra `accepts[].amount` antes de dejar firmar.
+    assert exc.value.payment["amount_usd"] == "0.01"
+    assert exc.value.payment["network"] == "base"
+    assert "/reputation/wallet/" in exc.value.payment["resource"]
+    # Y el aviso está también en el texto: quien lee un traceback en un log a las
+    # 3 AM no tiene el objeto a mano, tiene una línea.
+    assert "CREDENCIAL" in str(exc.value)
+    # 🔴 El límite conocido, escrito como assert: sin recibo no se puede afirmar
+    # que el USDC se movió. El SDK dice «pudo», no «se liquidó».
+    assert exc.value.payment["transaction_hash"] is None
+    assert "no hay prueba en ninguno de los dos sentidos" in str(exc.value)
+
+
+def test_un_4xx_despues_de_pagar_tambien_sale_marcado(make_client) -> None:
+    """El 409 «nonce spent» ya decía «DESPUÉS de pagar» en su TEXTO. Ahora lo
+    dice en un atributo, que es sobre lo que se puede ramificar."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "X-PAYMENT" not in request.headers:
+            return json_response(CHALLENGE_402, status=402)
+        return json_response({"detail": "nonce spent"}, status=409)
+
+    with make_client(handler, payer=PayerEspia()) as c:
+        with pytest.raises(DescribeHTTPError) as exc:
+            c.wallet_breakdown("0xdead")
+
+    assert exc.value.status_code == 409
+    assert exc.value.payment_sent is True
+
+
+def test_un_recibo_en_el_fallo_convierte_el_quizas_en_certeza(make_client) -> None:
+    """El único caso en que el SDK SÍ puede afirmar que se liquidó.
+
+    Si el servidor alcanzó a contestar con `X-Payment-Receipt`, el settlement
+    ocurrió y hay un hash citable — aunque después el status sea 4xx. Es la
+    diferencia entre «puede que haya pagado» y «pagué, acá está la prueba», y no
+    se puede fabricar: o llegó la cabecera o no llegó.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "X-PAYMENT" not in request.headers:
+            return json_response(CHALLENGE_402, status=402)
+        return json_response(
+            {"detail": "el índice se cayó DESPUÉS de cobrar"},
+            status=500,
+            headers={"X-Payment-Receipt": "0xdeadbeef"},
+        )
+
+    with make_client(handler, payer=PayerEspia()) as c:
+        with pytest.raises(DescribeHTTPError) as exc:
+            c.wallet_breakdown("0xdead")
+
+    assert exc.value.payment_sent is True
+    assert exc.value.payment is not None
+    assert exc.value.payment["transaction_hash"] == "0xdeadbeef"
+    assert "el settlement ocurrió" in str(exc.value)
+
+
+def test_un_cuerpo_ILEGIBLE_despues_de_pagar_tambien_sale_marcado(make_client) -> None:
+    """🔴 El caso que obligó a meter el parseo adentro de `_paid`.
+
+    Un 200 pagado con un cuerpo que no es JSON —el HTML de un balanceador, por
+    ejemplo— produce `DescribeUnparseable`. Si el parseo viviera en el método
+    público, esa excepción saldría SIN marca: indistinguible de un cuerpo roto
+    que no costó nada. Y es el caso más traicionero de todos, porque el pago sí
+    se liquidó y la respuesta se perdió.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "X-PAYMENT" not in request.headers:
+            return json_response(CHALLENGE_402, status=402)
+        return httpx.Response(200, content=b"<html>502 bad gateway</html>")
+
+    with make_client(handler, payer=PayerEspia()) as c:
+        with pytest.raises(DescribeUnparseable) as exc:
+            c.wallet_breakdown("0xdead")
+
+    assert exc.value.payment_sent is True
+    assert exc.value.payment is not None and exc.value.payment["amount_usd"] == "0.01"
+
+
+def test_el_402_sin_payer_no_marca_un_pago_que_nunca_ocurrio(make_client) -> None:
+    """`PaymentRequiredError` es config de quien llama, no un gasto.
+
+    Marcarla sería decirle que reconcilie por un sobre que nunca se firmó — es
+    la misma clase de mentira que R1 impide, en el plano del dinero.
+    """
+    with make_client(lambda _r: json_response(CHALLENGE_402, status=402)) as c:
+        with pytest.raises(PaymentRequiredError) as exc:
+            c.wallet_breakdown("0xdead")
+
+    assert exc.value.payment_sent is False
+    assert exc.value.payment is None

@@ -48,24 +48,71 @@ El fail-open es para la DISPONIBILIDAD del índice, no para la configuración de
 quien llama ni para un desvío de fondos.
 
 ════════════════════════════════════════════════════════════════════════════
-QUÉ MÉTODO ES «NULLABLE» — se sigue el contrato núcleo AL PIE DE LA LETRA
+QUÉ MÉTODO ES «NULLABLE» — LA LÍNEA ES SI HUBO DINERO DE POR MEDIO
 ════════════════════════════════════════════════════════════════════════════
-La tabla del contrato v0.1 marca `wallet(address) -> WalletReputation | null` y
-**sólo esa**: `leaderboard() -> LeaderboardRow[]`, `health() -> IndexHealth`,
-`walletBreakdown -> Breakdown`, `agent -> AgentReputation`, sin `| null`.
+**R5 corregida, 2026-08-30. Es canon del contrato núcleo y los dos SDK
+—Python y TypeScript— la implementan IGUAL.**
 
-Así está implementado, y la razón por la que se lee coherente: `wallet()` es la
-que se dibuja al lado de un nombre en un perfil —el caso de Saul, KK y EM— y
-ahí un hueco es un render degradado aceptable. `leaderboard()` y `health()` son
+    RUTAS GRATIS      wallet() · leaderboard() · health()
+                      Ante un fallo DE SERVICIO (timeout, unreachable, 5xx,
+                      cuerpo ilegible) con `fail_open=True` devuelven `None`,
+                      SIEMPRE observado (`on_error` + WARNING).
+                      🔴 Nunca `[]`. Una lista vacía se lee como «el índice
+                      está vacío», que es una afirmación FALSA sobre el mundo.
+                      `None` se lee como «no pude preguntar».
+
+    RUTAS PAGAS       wallet_breakdown() · agent()
+                      LEVANTAN SIEMPRE. Incluso con `fail_open=True` explícito.
+
+**Por qué las pagas no, y la razón es dinero y no simetría:** entre firmar el
+sobre x402 y recibir la respuesta hay una ventana en la que el USDC ya se
+movió. Devolver `None` ahí le oculta al llamador que gastó — es una credencial
+gastada sin recibo, y nada distingue «pagué y se cayó» de «no había nada que
+traer». Un fallo ruidoso después de pagar es recuperable (se reintenta, se
+registra, se reclama); un `None` silencioso no lo es. Por eso no es una
+preferencia del llamador sino una **propiedad del método**: un flag de
+disponibilidad no puede comprar el derecho a tragar un recibo. Y para que
+«ruidoso» sea además informativo, la excepción del tramo pagado sale marcada
+con `payment_sent=True` (ver `errors.py`).
+
+**Por qué las gratis sí, y no sólo `wallet()`:** `leaderboard()` y `health()`
+son gratis. Un fallo ruidoso ahí obliga a cada consumidor a escribir su propio
+`try/except` para algo que el SDK ya sabe hacer — que es justo la duplicación
+que este SDK viene a borrar.
+
+────────────────────────────────────────────────────────────────────────────
+LO QUE ESTE BLOQUE DECÍA HASTA EL 2026-08-30, Y QUÉ SOBREVIVIÓ DE ESO
+────────────────────────────────────────────────────────────────────────────
+Se deja escrito, no se borra: es la convención de la casa, y acá se aplica al
+propio razonamiento de este archivo.
+
+La versión vieja decía que la tabla de tipos del contrato v0.1 marcaba `| null`
+**sólo** en `wallet()`, que se seguía «al pie de la letra», y lo defendía así:
+`wallet()` se dibuja al lado de un nombre en un perfil y ahí un hueco es un
+render degradado aceptable, mientras que *«`leaderboard()` y `health()` son
 lecturas operativas: quien pregunta por el índice entero o por su estado quiere
-saber que falló, no recibir una lista vacía que parece un índice vacío. Y una
-ruta paga con un fallo tragado sería una credencial gastada sin recibo.
+saber que falló, no recibir una lista vacía que parece un índice vacío»*. Y
+marcaba el alcance de R5 como una ambigüedad REPORTADA y no resuelta acá.
 
-⚠️ **Esto está REPORTADO como ambigüedad del contrato, no resuelto por acá:**
-R5 dice «ante fallo de red devuelve `null`» sin acotar a qué método, y la tabla
-de tipos sí acota. Se implementó la tabla —es la afirmación más específica— y
-la pregunta va a Saul. Si el veredicto cambia, cambia en los tres frentes a la
-vez; no acá solo.
+**Qué sobrevivió, y no es poco:** la segunda mitad de esa frase. «Una lista
+vacía parece un índice vacío» era correcto, se atendió, y por eso el contrato
+corregido dice explícitamente **NUNCA `[]`**. `None` no es una lista vacía y no
+se puede confundir con un índice vacío: la distinción sigue viviendo en el TIPO,
+igual que en `wallet()`.
+
+**Qué se cayó:** la primera mitad — «lecturas operativas» no era el criterio.
+Nombraba una intuición sobre quién pregunta, no una consecuencia medible de
+equivocarse. El criterio real es **si hubo dinero de por medio**, y eso también
+desmiente la premisa: seguir «la tabla al pie de la letra» dejaba a
+`walletBreakdown` y `agent` sin `| null` por accidente de tabla y no por
+principio — el gemelo TypeScript leyó la otra mitad del contrato (la regla R5,
+que no acotaba) y terminó haciendo **fail-open en las rutas pagas**, con
+`walletBreakdown()` devolviendo `null` tras un timeout posterior al settlement.
+Ese es el bug que esta corrección existe para hacer imposible en los dos
+lenguajes: dos lecturas razonables del mismo contrato, y una costaba plata.
+
+**Y la ambigüedad ya no está abierta:** el alcance de R5 quedó resuelto el
+2026-08-30 con la regla de arriba. No queda una pregunta para Saul acá.
 
 ════════════════════════════════════════════════════════════════════════════
 R7 — 30 s de timeout, y el número está razonado (no elegido)
@@ -87,7 +134,7 @@ su default viejo de 12 s «convertía cada arranque en frío en un ilegible».
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 from urllib.parse import quote
 
 import httpx
@@ -100,6 +147,7 @@ from .errors import (
     DescribeUnparseable,
     DescribeUnreachable,
     PaymentRequiredError,
+    mark_payment_sent,
 )
 from .models import (
     AgentReputation,
@@ -134,6 +182,11 @@ logger = logging.getLogger("uvd_describe_sdk")
 
 #: Se llama con la excepción que se está tragando. Ver `_observe`.
 ErrorObserver = Callable[[DescribeError], None]
+
+#: El modelo que devuelve una ruta paga. Existe para que `_paid` sea una sola
+#: función y no dos copias: donde vive la marca de «esto falló DESPUÉS de
+#: pagar» no puede haber dos versiones que se desincronicen.
+_Parsed = TypeVar("_Parsed")
 
 
 class DescribeClient:
@@ -177,8 +230,12 @@ class DescribeClient:
                 bucket por partner, y sin atribución nadie puede saber quién lo
                 gastó. Un request anónimo contra un límite compartido es
                 free-riding.
-            fail_open: default `True`. Ver la cabecera del módulo — y leé qué
-                método es nullable antes de asumir que aplica a todos.
+            fail_open: default `True`. Cubre las rutas **GRATIS** —`wallet()`,
+                `leaderboard()`, `health()`— que ante un fallo de servicio
+                devuelven `None` (nunca `[]`) y siempre observado. **No cubre
+                las pagas**: `wallet_breakdown()` y `agent()` levantan aunque
+                acá se pase `True`, porque un fallo tragado después de firmar es
+                una credencial gastada sin recibo. Ver la cabecera del módulo.
             on_error: se llama con la excepción **cada vez** que el fail-open
                 traga una. Si no se pasa, igual se loguea en WARNING. No existe
                 el modo silencioso.
@@ -326,6 +383,12 @@ class DescribeClient:
             # Se degrada a `None` incluso con fail_open=False, porque negarse a
             # contestar sobre un sujeto ausente sería tratar la ausencia como
             # una falla.
+            # 🔴 Y esta excepción es SÓLO de acá: `leaderboard()` y `health()` no
+            # la copian porque no tienen sujeto. Un 404 ahí no dice «no tengo esa
+            # wallet» sino «esa ruta no existe» — o sea, un `base_url` mal
+            # puesto. Degradarlo en silencio con fail_open=False escondería un
+            # error de configuración detrás del valor que significa «no pude
+            # leer», que es la confusión que R1 persigue en otro plano.
             if isinstance(exc, DescribeHTTPError) and exc.status_code == 404:
                 self._observe(exc, path)
                 return None
@@ -334,7 +397,7 @@ class DescribeClient:
             self._observe(exc, path)
             return None
 
-    def leaderboard(self) -> List[LeaderboardRow]:
+    def leaderboard(self) -> Optional[List[LeaderboardRow]]:
         """`GET /leaderboard` — **GRATIS**, la primera página entera.
 
         🔴 **No acepta ni un query param.** Medido el 2026-08-30:
@@ -348,13 +411,27 @@ class DescribeClient:
         (`shrunk_score`). Reordenar por `final_score` da otra lista, y parece un
         bug del servicio.
 
-        No es nullable (tabla de tipos del contrato): un fallo levanta. Ver la
-        cabecera del módulo.
-        """
-        payload = self._get_json("/leaderboard")
-        return parse_leaderboard(payload)
+        Returns:
+            `list[LeaderboardRow]` — el índice contestó. Puede venir vacía si el
+            índice de verdad no tiene filas: eso es una RESPUESTA.
 
-    def health(self) -> IndexHealth:
+            `None` — **no hubo respuesta**. 🔴 Nunca `[]` por un fallo: una lista
+            vacía afirmaría que el índice está vacío, que es una afirmación falsa
+            sobre el mundo. Sale sólo con `fail_open=True` y siempre con su
+            observación (`on_error` + WARNING).
+
+        Raises:
+            `DescribeError` si `fail_open=False`.
+        """
+        try:
+            return parse_leaderboard(self._get_json("/leaderboard"))
+        except DescribeError as exc:
+            if not self._fail_open:
+                raise
+            self._observe(exc, "/leaderboard")
+            return None
+
+    def health(self) -> Optional[IndexHealth]:
         """`GET /health` — **GRATIS**. La autoridad sobre totales y políticas.
 
         Ninguna cifra del índice se tipea a mano: se lee de acá, viva. Y de acá
@@ -365,10 +442,26 @@ class DescribeClient:
         Es el endpoint gratis más lento (~1,6 s medidos por EM) y está sin
         cachear a propósito — nunca lo sondees con un timeout de pocos segundos.
 
-        No es nullable: un fallo levanta. Preguntar por el estado del índice y
-        recibir un objeto vacío sería el peor de los dos mundos.
+        Returns:
+            `IndexHealth` — el índice contestó, incluso si contestó
+            `status != "ok"`: un índice que se declara degradado está
+            RESPONDIENDO, y esa es justo la respuesta que se le fue a pedir.
+
+            `None` — **no hubo respuesta**. Nunca un objeto vacío: preguntar por
+            el estado del índice y recibir ceros sería el peor de los dos mundos,
+            porque «0 agentes» y «no sé cuántos agentes» no son el mismo hecho.
+            Sale sólo con `fail_open=True` y siempre observado.
+
+        Raises:
+            `DescribeError` si `fail_open=False`.
         """
-        return parse_health(self._get_json("/health"))
+        try:
+            return parse_health(self._get_json("/health"))
+        except DescribeError as exc:
+            if not self._fail_open:
+                raise
+            self._observe(exc, "/health")
+            return None
 
     def badge_url(self, address: str) -> str:
         """La URL del badge SVG. **Sin red** — sólo arma el string.
@@ -397,9 +490,13 @@ class DescribeClient:
             pricing_version=response.headers.get("X-Pricing-Version"),
         )
 
-    def _get_paid(
-        self, path: str, *, params: Optional[Dict[str, Any]] = None
-    ) -> httpx.Response:
+    def _paid(
+        self,
+        path: str,
+        parse: Callable[[Any, PaymentReceipt], _Parsed],
+        *,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> _Parsed:
         """El baile del 402, en el orden que manda la guía publicada.
 
         1. Pedir **sin header** — preguntar es gratis y es el primer movimiento
@@ -413,7 +510,18 @@ class DescribeClient:
         vuelve a pagar — un 4xx después de pagar es casi siempre una credencial
         gastada o firmada por otro monto, y el remedio es pedir un challenge
         NUEVO, no repetir el viejo. Un `retries=3` acá quemaría credenciales.
+
+        🔴 **El parseo entra acá, no en el método público.** Es lo que hace que
+        exista UNA sola frontera «desde acá hay plata de por medio» en todo el
+        archivo. Si el parseo viviera afuera, un `DescribeUnparseable` sobre el
+        cuerpo YA PAGADO saldría sin `payment_sent` — indistinguible de un
+        cuerpo roto que no costó nada. La marca no puede depender de que quien
+        agregue la tercera ruta paga se acuerde de ponerla.
+
+        🔴 **Nada de esto lo traga el fail-open, valga lo que valga.** Ver la
+        cabecera del módulo: la línea es si hubo dinero de por medio.
         """
+        # ── Tramo PRE-PAGO: no se firmó nada, no se gastó nada ───────────────
         response = self._request(path, params=params)
         if response.status_code != 402:
             if response.status_code >= 400:
@@ -421,7 +529,9 @@ class DescribeClient:
                     f"GET {path} → HTTP {response.status_code}",
                     status_code=response.status_code,
                 )
-            return response
+            # Un 200 sin pagar: el servicio decidió no cobrar (o hay un caché
+            # delante). No hubo credencial, así que no hay nada que marcar.
+            return parse(self._json(response, path), self._receipt(response))
 
         try:
             challenge = response.json()
@@ -442,15 +552,41 @@ class DescribeClient:
             network=self._pay_network,
             treasury=self._treasury,
         )
-        paid = self._request(path, params=params, headers={"X-PAYMENT": header})
-        if paid.status_code >= 400:
-            raise DescribeHTTPError(
-                f"GET {path} → HTTP {paid.status_code} DESPUÉS de pagar. "
-                "La credencial ya se consumió: pedí un challenge nuevo, no "
-                "reenvíes esta.",
-                status_code=paid.status_code,
+
+        # ══ FRONTERA. Arriba no se gastó un centavo; abajo la autorización ══
+        # EIP-3009 ya está FIRMADA. Todo lo que falle de acá para abajo sale
+        # marcado con `payment_sent=True` — un `DescribeTimeout` pelado no
+        # distingue «se cayó antes de pagar» de «se cayó después», y esa
+        # distinción es la que decide si al llamador le toca reconciliar.
+        #
+        # El monto se lee del challenge con la MISMA expresión que
+        # `payment._amount_usd`, y se lee DESPUÉS de que `build_payment_header`
+        # volvió: si `price_usd` no cerraba con `accepts[].amount`, esa función
+        # ya habría levantado `DoNotPayError` sin firmar. O sea que acá el valor
+        # es el que se firmó, no una aproximación. String y no float: es plata.
+        firmado = challenge.get("price_usd", challenge.get("amount"))
+        monto = str(firmado) if firmado is not None else None
+        recibo: Optional[str] = None
+        try:
+            paid = self._request(path, params=params, headers={"X-PAYMENT": header})
+            recibo = paid.headers.get("X-Payment-Receipt")
+            if paid.status_code >= 400:
+                raise DescribeHTTPError(
+                    f"GET {path} → HTTP {paid.status_code} DESPUÉS de pagar. "
+                    "La credencial ya se consumió: pedí un challenge nuevo, no "
+                    "reenvíes esta.",
+                    status_code=paid.status_code,
+                )
+            return parse(self._json(paid, path), self._receipt(paid))
+        except DescribeError as exc:
+            mark_payment_sent(
+                exc,
+                amount_usd=monto,
+                network=self._pay_network,
+                resource=path,
+                transaction_hash=recibo,
             )
-        return paid
+            raise
 
     def wallet_breakdown(self, address: str, *, snapshot: bool = False) -> Breakdown:
         """`GET /reputation/wallet/{wallet}` — **$0,01** ($0,05 con `snapshot`).
@@ -465,18 +601,24 @@ class DescribeClient:
                 número sino el compromiso con él: un recibo durable con
                 `inputs_digest` que se puede citar después.
 
-        No es nullable ni la traga el fail-open: hay plata de por medio y un
-        fallo tragado sería una credencial gastada sin recibo.
+        🔴 **No es nullable y NO la traga el fail-open — ni con
+        `fail_open=True` explícito.** No es una preferencia del llamador sino
+        una propiedad del método: entre firmar el sobre y recibir la respuesta
+        el USDC ya se movió, y un `None` ahí es una credencial gastada sin
+        recibo. Un flag de disponibilidad no puede comprar el derecho a tragar
+        un recibo. (R5 corregida, 2026-08-30 — ver la cabecera del módulo.)
 
         Raises:
             `PaymentRequiredError` si no hay `payer` (trae el challenge entero,
             con su `price_usd` y su `free_preview`).
             `DoNotPayError` si el 402 pide pagar a otra dirección.
+            `DescribeError` ante cualquier fallo de servicio. Si cayó DESPUÉS de
+            firmar, sale con `exc.payment_sent is True` y `exc.payment` con el
+            monto, la red y el `X-Payment-Receipt` si llegó a haber uno.
         """
         path = f"/reputation/wallet/{quote(str(address), safe='')}"
         params = {"snapshot": "true"} if snapshot else None
-        response = self._get_paid(path, params=params)
-        return parse_breakdown(self._json(response, path), self._receipt(response))
+        return self._paid(path, parse_breakdown, params=params)
 
     def agent(self, network: str, agent_id: str) -> AgentReputation:
         """`GET /reputation/agent/{network}/{agent_id}` — **$0,02**.
@@ -487,10 +629,13 @@ class DescribeClient:
         `agent_id` es un **string, no un número**: los registros EVM acuñan
         enteros pero en Solana el id es la dirección del asset Metaplex Core en
         base58 — case-sensitive, y pasarlo por `int()` lo destruye.
+
+        🔴 **No es nullable y NO la traga el fail-open**, por lo mismo que
+        `wallet_breakdown()`: hay dinero de por medio. Ver la cabecera del
+        módulo y, para el fallo posterior a la firma, `exc.payment_sent`.
         """
         path = (
             f"/reputation/agent/{quote(str(network), safe='')}"
             f"/{quote(str(agent_id), safe='')}"
         )
-        response = self._get_paid(path)
-        return parse_agent_reputation(self._json(response, path), self._receipt(response))
+        return self._paid(path, parse_agent_reputation)

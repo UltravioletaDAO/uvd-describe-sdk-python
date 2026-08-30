@@ -50,6 +50,10 @@ def main() -> int:
     with DescribeClient(product="smoke", fail_open=False) as d:
         # ── /health ────────────────────────────────────────────────────────
         h = d.health()
+        # Con `fail_open=False` estas dos no pueden devolver `None`: o contestan
+        # o levantan. El guard está para que el ejemplo se lea como se escribe un
+        # consumidor con el default (`fail_open=True`), donde `None` SÍ llega.
+        assert h is not None
         print(f"  health          status={h.status} policy={h.policy_version}")
         print(f"                  agents={h.agents:,} feedback={h.feedback_entries:,}")
         print(f"                  build_sha={(h.build_sha or '')[:12]} chains={len(h.chains)}")
@@ -61,6 +65,7 @@ def main() -> int:
 
         # ── /leaderboard ───────────────────────────────────────────────────
         filas = d.leaderboard()
+        assert filas is not None  # ídem: `fail_open=False`
         print(f"\n  leaderboard     {len(filas)} filas")
         top = filas[0]
         print(

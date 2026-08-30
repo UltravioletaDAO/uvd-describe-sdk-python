@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 88 tests, ~0,3 s, SIN RED
+.venv/Scripts/python -m pytest                     # 105 tests, ~0,3 s, SIN RED
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -53,10 +53,40 @@ desvía.**
 | R2 | Ningún método devuelve un número pelado | toda la superficie pública | `test_r2_r3_contrato.py` |
 | R3 | Caveats `{code, text}`; se ramifica por `code` | `caveats.py` | `test_r2_r3_contrato.py` |
 | R4 | Excepción sólo por transporte/protocolo | `errors.py`, `client.py` | `test_r4_sin_datos_no_es_error.py` |
-| R5 | `fail_open=True`, y **observable** | `client.py::_observe` | `test_r5_fail_open.py` |
+| R5 | `fail_open=True`, **observable**, y **sólo en las rutas gratis** | `client.py::_observe` | `test_r5_fail_open.py` |
 | R6 | El 402 lo hace `uvd-x402-sdk` | `payment.py` | `test_r6_pago_x402.py` |
 | R7 | Timeout 30 s | `client.py::DEFAULT_TIMEOUT_S` | `test_r7_cliente_y_atribucion.py` |
 | R8 | `f"{round(x,2):g}"` | `display.py` | `test_r8_formato_canonico.py` |
+
+### 🔴 R5, EL ALCANCE — corregido el 2026-08-30, es canon en los DOS SDK
+
+```
+GRATIS  wallet() · leaderboard() · health()  → None observado. NUNCA [].
+PAGAS   wallet_breakdown() · agent()         → LEVANTAN, aun con fail_open=True.
+```
+
+**La línea no es «cuántos métodos»: es si hubo dinero de por medio.** Entre
+firmar el sobre x402 y recibir la respuesta el USDC ya se movió, y un `None` ahí
+es una credencial gastada sin recibo. No es una preferencia del llamador sino una
+propiedad del método.
+
+⚠️ **Antes de hoy este repo implementaba la tabla de tipos del contrato v0.1 «al
+pie de la letra» —`| null` sólo en `wallet()`— y lo dejaba anotado como
+ambigüedad reportada. Se deja escrito porque la corrección enseña algo**: el
+gemelo TypeScript leyó la otra mitad del mismo contrato (la regla R5, que no
+acotaba a ningún método) y terminó haciendo **fail-open en las rutas pagas**,
+devolviendo `null` tras un timeout posterior al settlement. Dos lecturas
+razonables del mismo texto, y una costaba plata. Del razonamiento viejo
+sobrevivió una mitad: «una lista vacía se lee como un índice vacío» era cierto, y
+por eso el contrato corregido dice **nunca `[]`**.
+
+Y una excepción del tramo pagado sale con **`payment_sent=True`** y su
+`payment` (`amount_usd`, `network`, `resource`, `transaction_hash`): un
+`DescribeTimeout` pelado no distingue «se cayó antes de pagar» de «se cayó
+después», y sólo uno de los dos pide reconciliar. Se ramifica por el atributo,
+nunca por el texto. **Límite conocido**: `payment_sent` prueba que la credencial
+salió, no que el settlement ocurrió — eso sólo lo prueba un `transaction_hash`
+presente, y un transporte caído no trae ninguno.
 
 ### 🔴 Las tres que más fácil se rompen
 
@@ -65,7 +95,8 @@ desvía.**
    sostiene con DOS mecanismos: la distinción vive en el TIPO (`None` = no hubo
    respuesta; objeto con `global_score is None` = hubo respuesta y no hay
    evidencia) **y** ningún `None` sale sin pasar por `_observe()`. Si tocás
-   `client.py`, no rompas ninguno de los dos.
+   `client.py`, no rompas ninguno de los dos. Y hay un tercer eje desde el
+   2026-08-30: **no lo extiendas a las pagas «por simetría»**.
 
 2. **R6 se rompe reordenando dos líneas.** `assert_recipient()` va **antes** de
    `create_authorization()`. Al revés existiría, aunque sea por un instante, una
@@ -153,9 +184,12 @@ docstrings:
    pidió el 2026-08-14. El servicio no tiene cuentas ni API keys —«el pago es la
    autenticación»— así que no hay forma obvia de distinguirlos. **No inventes un
    header de partner.**
-2. **El alcance de R5.** La regla dice «ante fallo devuelve `null`» sin acotar;
-   la tabla de tipos marca `| null` sólo en `wallet()`. Se implementó la tabla
-   por ser la afirmación más específica. Si cambia, cambia en los tres frentes.
+2. ~~**El alcance de R5.**~~ **RESUELTO el 2026-08-30** — ver §«R5, el alcance»
+   arriba: gratis degradan, pagas levantan. Se deja tachado y no borrado: quien
+   vuelva con la pregunta merece encontrar la respuesta donde la dejó.
+   Lo que SÍ queda abierto de ese hilo: **confirmar un settlement desde el
+   cliente no se puede** con lo que este SDK tiene. Necesitaría preguntarle al
+   facilitator o a la cadena, y eso es otra dependencia. No lo inventes.
 3. **Sync vs async.** El cliente de Execution Market es `async` y este SDK es
    sync: para adoptarlo tendría que envolverlo en un thread. La salida sería un
    `aio.py` de transporte fino reusando estos parsers, **sin duplicar una línea

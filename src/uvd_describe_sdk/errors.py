@@ -54,6 +54,27 @@ existe para la DISPONIBILIDAD del índice («poné un fallback si describe está
 caído» — Saul, 2026-08-28), no para la configuración de quien llama. Tragarlas
 convertiría «te olvidaste de configurar el pago» en «esta wallet no tiene
 reputación», que es la misma mentira que R1 existe para impedir.
+
+Y desde el 2026-08-30 hay un segundo eje: **las rutas PAGAS no las traga el
+fail-open nunca, sea cual sea la excepción y valga lo que valga `fail_open`.**
+Ver `client.py`, bloque «QUÉ MÉTODO ES NULLABLE».
+
+────────────────────────────────────────────────────────────────────────────
+🔴 `payment_sent` — LA MARCA QUE DISTINGUE «NO GASTASTE» DE «PUEDE QUE SÍ»
+────────────────────────────────────────────────────────────────────────────
+Un `DescribeTimeout` pelado no distingue dos hechos que valen plata distinta:
+
+    se cayó ANTES de firmar   → no salió una credencial. No gastaste nada.
+    se cayó DESPUÉS de firmar → la autorización EIP-3009 ya está firmada y
+                                despachada. El USDC pudo haberse movido.
+
+El segundo caso es el que la R5 corregida protege: por eso las rutas pagas
+levantan siempre. Pero levantar no alcanza si la excepción no dice de cuál de
+los dos se trata — quien la reciba tiene que saber si le toca reconciliar.
+
+`payment_sent` y `payment` son esa marca. Las pone `mark_payment_sent()` y sólo
+las pone `DescribeClient` en el tramo posterior a la firma. En toda ruta gratis
+valen `False` / `None`, siempre.
 """
 
 from __future__ import annotations
@@ -70,9 +91,34 @@ class DescribeError(Exception):
 
     `kind` es el contrato: se ramifica por ahí (o por la subclase), **jamás por
     el texto del mensaje**. Los mensajes se reescriben; los `kind` no.
+
+    Lo mismo vale para `payment_sent`: se ramifica por el ATRIBUTO, nunca por
+    buscar «después de pagar» en el mensaje.
     """
 
     kind: str = "unreachable"
+
+    #: ¿Se levantó esta excepción DESPUÉS de que la credencial de pago firmada
+    #: salió del proceso?
+    #:
+    #: 🔴 Qué prueba y qué NO prueba, porque la diferencia es la que importa:
+    #:
+    #:   * `True` prueba que existe una autorización EIP-3009 **firmada y
+    #:     despachada** por el monto de `payment["amount_usd"]`. El settlement
+    #:     PUDO haber ocurrido. Le toca reconciliar a quien llama.
+    #:   * `True` **NO** prueba que el USDC se movió. Eso sólo se prueba con un
+    #:     `payment["transaction_hash"]` presente, y ese hash sólo llega si el
+    #:     servidor alcanzó a contestar con su cabecera `X-Payment-Receipt`.
+    #:   * `False` sí es una afirmación fuerte en el otro sentido: no se firmó
+    #:     nada, no salió ninguna credencial, no se gastó un centavo. Es el valor
+    #:     de toda ruta gratis y del tramo previo al 402 de una ruta paga.
+    payment_sent: bool = False
+
+    #: Detalle de esa credencial cuando `payment_sent` es `True`; `None` si no.
+    #: Claves: `amount_usd` (lo que se firmó, como STRING —es plata—),
+    #: `network`, `resource` (la ruta) y `transaction_hash` (el
+    #: `X-Payment-Receipt`, o `None` si el servidor no llegó a contestar).
+    payment: Optional[Dict[str, Any]] = None
 
 
 class DescribeTimeout(DescribeError):
@@ -173,3 +219,52 @@ class DoNotPayError(DescribeError):
         super().__init__(message)
         self.expected = expected
         self.offered = offered
+
+
+def mark_payment_sent(
+    exc: DescribeError,
+    *,
+    amount_usd: Optional[str],
+    network: str,
+    resource: str,
+    transaction_hash: Optional[str] = None,
+) -> None:
+    """Marcar una excepción como posterior a la firma. La llama sólo el cliente.
+
+    Muta el objeto en vez de envolverlo en una excepción nueva a propósito: un
+    `except DescribeTimeout` ya escrito en el código de un consumidor tiene que
+    seguir atrapándola. Cambiar la CLASE para agregar un dato es romper el
+    `except` de todo el mundo por una etiqueta.
+
+    Y el aviso se escribe **también en el mensaje**, no sólo en el atributo,
+    porque quien abre un traceback en un log a las 3 AM no tiene el objeto a
+    mano — tiene una línea de texto. El atributo es para ramificar; el texto es
+    para leer. (Es el mismo par que `caveats[].code` / `caveats[].text` del
+    servicio: se decide por el código, se lee el texto.)
+    """
+    exc.payment_sent = True
+    exc.payment = {
+        "amount_usd": amount_usd,
+        "network": network,
+        "resource": resource,
+        "transaction_hash": transaction_hash,
+    }
+    if transaction_hash:
+        prueba = (
+            f" HAY RECIBO: X-Payment-Receipt={transaction_hash} — el settlement "
+            "ocurrió, el gasto está confirmado y es citable."
+        )
+    else:
+        prueba = (
+            " NO llegó `X-Payment-Receipt`, así que no hay prueba en ninguno de "
+            "los dos sentidos: este SDK no puede afirmar que se liquidó ni que no."
+        )
+    base = str(exc.args[0]) if exc.args else str(exc)
+    exc.args = (
+        f"{base} — 🔴 LA CREDENCIAL DE PAGO YA SE FIRMÓ Y SE DESPACHÓ "
+        f"({amount_usd or '?'} USD en {network}, {resource}): esto NO es «no pude "
+        f"preguntar», es «puede que haya pagado y no sé qué recibí».{prueba} "
+        "Reconciliá antes de reintentar: el nonce se consume en el settlement, "
+        "así que reenviar esta credencial no vuelve a pagar y pedir un challenge "
+        "NUEVO cobra otra vez.",
+    )

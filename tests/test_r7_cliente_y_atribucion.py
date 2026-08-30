@@ -162,6 +162,9 @@ def test_health_expone_los_parametros_calibrables_sin_copiarlos(make_client) -> 
     with make_client(lambda _r: json_response(HEALTH)) as c:
         h = c.health()
 
+    # `health()` es nullable desde la R5 corregida (2026-08-30): `None` significa
+    # «no hubo respuesta». Acá el handler contesta, así que tiene que ser objeto.
+    assert h is not None
     assert h.status == "ok"
     assert h.reading_policy["min_raters"] == 3
     assert h.reading_policy["campaign_per_rater"] == 20
@@ -179,6 +182,7 @@ def test_leaderboard_conserva_el_shrunk_score_que_manda_en_el_orden(make_client)
     with make_client(lambda _r: json_response(LEADERBOARD)) as c:
         filas = c.leaderboard()
 
+    assert filas is not None  # nullable desde la R5 corregida; acá SÍ contestó
     assert filas[0].shrunk_score == 99.982977
     assert filas[0].final_score == 100.0
     assert filas[0].shrunk_score != filas[0].final_score
