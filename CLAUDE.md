@@ -145,7 +145,7 @@ mano; `GET /health` es la autoridad.
 
 Un chequeo verde que **también habría estado verde con el bug** no prueba nada.
 Antes de decir que un test ata algo: montá el estado malo y confirmá que se pone
-rojo. Los cuatro que ya se verificaron así (2026-08-30) están anotados en sus
+rojo. Los nueve que ya se verificaron así (2026-08-30) están anotados en sus
 docstrings:
 
 | Mutación inyectada | Qué se puso rojo |
@@ -154,6 +154,24 @@ docstrings:
 | `_opt_float` → `float(value or 0)` | 7 de 10 tests de R1 |
 | `assert_recipient` movido DESPUÉS de firmar | los 2 tests de `DO_NOT_PAY` |
 | `chain_name_for` → `None` (SDK ausente) | el mensaje de error nombraba la causa equivocada — **bug real, arreglado** |
+| **A.** `wallet_breakdown()` metido en el fail-open (`-> Optional[Breakdown]` + `except`) | **14 rojos**: los 3 de `test_las_rutas_pagas_no_hacen_fail_open_ni_con_fail_open_true` (`DID NOT RAISE`), el de firmas, y 10 de R6 que ya existían |
+| **B.** `leaderboard()`/`health()` fuera del fail-open (la regla vieja) | **7 rojos**: los 6 de `test_las_dos_gratis_hacen_fail_open_y_lo_reportan` + el de «nunca `[]`» |
+| **C.** `return []` en vez de `return None` en el `except` de `leaderboard()` | **4 rojos**, incluido `assert [] is None` en `test_un_fallo_de_leaderboard_NUNCA_devuelve_una_lista_vacia` |
+| **D.** marcar TODO `_paid` y no sólo el tramo posterior a la firma | **1 rojo**: `test_un_timeout_ANTES_de_firmar_NO_marca_ningun_pago` (`assert True is False`) — y el de DESPUÉS quedó verde |
+| **E.** sacar `mark_payment_sent()` (excepción pelada) | **7 rojos**: los 4 de `payment_sent` + los 3 de rutas pagas — y el de ANTES quedó verde |
+
+**A y B son el par que sostiene la R5 corregida**, uno por borde: A se pone rojo
+si alguien mete las pagas adentro, B si alguien saca a las gratis. **D y E son el
+par que sostiene `payment_sent`**: el mismo timeout, el mismo cliente, y la única
+diferencia es de qué lado de la firma ocurre — cada mutación pone rojo un lado y
+deja verde el otro, que es lo que prueba que la distinción existe y no es
+decorativa.
+
+⚠️ **B no pone rojo el test de firmas** (`test_la_tabla_de_nullabilidad_...`),
+porque quitar el `except` no toca la anotación. Está anotado porque es la clase
+de hueco que hace creer que un test cubre más de lo que cubre: el que ata el
+comportamiento es el parametrizado, el de firmas sólo evita que la anotación
+publicada mienta.
 
 ---
 
