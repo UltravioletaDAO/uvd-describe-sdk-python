@@ -80,6 +80,17 @@ son gratis. Un fallo ruidoso ahí obliga a cada consumidor a escribir su propio
 `try/except` para algo que el SDK ya sabe hacer — que es justo la duplicación
 que este SDK viene a borrar.
 
+🔴 **EL MODO PARTNER NO MUEVE ESTA LÍNEA NI UN MILÍMETRO** (2026-08-30). Que
+`wallet_breakdown()` te salga gratis por el riel no la convierte en una ruta
+gratis: sigue LEVANTANDO ante cualquier fallo, con `fail_open=True` explícito
+incluido. El criterio nunca fue el precio que pagaste sino **si hubo dinero de
+por medio**, y con `payer=` configurado un riel roto lo hay — por eso el riel
+roto también levanta (`PartnerRejectedError`) en vez de dejarte pagar. Un
+partner es alguien que gasta $0 mientras el riel aguante, no alguien con un
+contrato distinto: las dos rutas medidas están en el mismo lugar de la tabla
+antes y después de este cambio, y `test_partner_riel_gratis.py` lo afirma
+corriendo los mismos casos de R5 con un partner puesto.
+
 ────────────────────────────────────────────────────────────────────────────
 LO QUE ESTE BLOQUE DECÍA HASTA EL 2026-08-30, Y QUÉ SOBREVIVIÓ DE ESO
 ────────────────────────────────────────────────────────────────────────────
@@ -146,6 +157,7 @@ from .errors import (
     DescribeTimeout,
     DescribeUnparseable,
     DescribeUnreachable,
+    PartnerRejectedError,
     PaymentRequiredError,
     mark_payment_sent,
 )
@@ -162,6 +174,7 @@ from .models import (
     parse_leaderboard,
     parse_wallet_reputation,
 )
+from .partner import PartnerSignature, PartnerSigner, sign_partner_headers
 from .payment import TREASURY_EVM, Payer, build_payment_header
 from .version import default_user_agent
 
@@ -221,6 +234,7 @@ class DescribeClient:
         payer: Optional[Payer] = None,
         pay_network: str = DEFAULT_PAY_NETWORK,
         treasury: str = TREASURY_EVM,
+        partner: Optional[PartnerSigner] = None,
         transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
         """
@@ -244,6 +258,14 @@ class DescribeClient:
             treasury: la dirección a la que se acepta pagar. Configurable para
                 un despliegue propio del índice, **no** para desactivar el
                 chequeo: si el challenge nombra otra, es `DO_NOT_PAY`.
+            partner: el firmante del **riel de partner** (`partner.PartnerSigner`).
+                Si describe dio de alta tu wallet, las rutas medidas dejan de
+                cobrarte. 🔴 Es un OBJETO que firma: este SDK no toca tu clave,
+                no la lee de una env var y no la guarda. Ver `partner.py`.
+                Con esto puesto, un 402 en una ruta medida es un **fallo del
+                riel** y se levanta `PartnerRejectedError`: **el `payer` no se
+                usa aunque esté**, porque un riel roto que paga solo es una
+                factura que aparece semanas después.
             transport: para los tests (`httpx.MockTransport`). Es el seam que
                 permite que la suite entera corra **sin red**.
         """
@@ -255,6 +277,7 @@ class DescribeClient:
         self._payer = payer
         self._pay_network = pay_network
         self._treasury = treasury
+        self._partner = partner
         self._http = httpx.Client(
             timeout=timeout,
             headers={"User-Agent": self._user_agent, "Accept": "application/json"},
@@ -279,6 +302,18 @@ class DescribeClient:
         """El UA efectivo. Se publica para poder afirmarlo en un test en vez de
         confiar en que se armó bien."""
         return self._user_agent
+
+    @property
+    def is_partner(self) -> bool:
+        """¿Este cliente va a firmar las rutas medidas como partner?
+
+        Dice si hay firmante CONFIGURADO, no si describe te va a eximir — eso
+        lo decide la allowlist del servicio y sólo se sabe pidiendo. Sirve para
+        que un arranque pueda afirmar «salgo con riel» en vez de descubrirlo
+        con la factura. No llama al firmante: un `get_address()` puede ser una
+        ida a un KMS y una propiedad no debería costar una request.
+        """
+        return self._partner is not None
 
     # ------------------------------------------------------------------
     # Transporte
@@ -490,6 +525,51 @@ class DescribeClient:
             pricing_version=response.headers.get("X-Pricing-Version"),
         )
 
+    def _partner_signature(
+        self, path: str, params: Optional[Dict[str, Any]]
+    ) -> Optional[PartnerSignature]:
+        """La firma del riel, o `None` si este cliente no es partner.
+
+        🔴 **La URL que se firma la construye `httpx`, no nosotros.** No es
+        prolijidad: la base de firma cubre `@path` y —cuando existe— `@query`,
+        así que firmar una URL rearmada a mano y mandar otra produce una firma
+        que no verifica, un 402, y ninguna pista de por qué. Medido el
+        2026-08-30 contra el gate real: firmada sin `?snapshot=true` y pedida
+        con él ⇒ `PartnerGate.check` devuelve `None`, o sea se cobra.
+        Pasando por `build_request` las dos cadenas son la misma **por
+        construcción**: mismos argumentos, mismo normalizador, misma salida.
+
+        Sólo se firman las rutas MEDIDAS, y eso está medido del otro lado:
+        `authorize` devuelve `Decision(True, REASON_FREE, …)` en
+        `describe-net/describenet/paywall.py:772-777`, **antes** de mirar el
+        `partner_id` (:794). O sea que una firma en `/health` no cambia
+        absolutamente nada del resultado — y sí cuesta: con un firmante remoto
+        cada lectura gratis se comería una ida al KMS a cambio de nada.
+        (La atribución de consumo, que es lo otro que un partner debe, no sale
+        de la firma sino del User-Agent: pasá `product=`.)
+        """
+        if self._partner is None:
+            return None
+        url = self._http.build_request(
+            "GET", f"{self._base_url}{path}", params=params
+        ).url
+        return sign_partner_headers(self._partner, method="GET", url=str(url))
+
+    @staticmethod
+    def _challenge_o_none(response: httpx.Response) -> Optional[Dict[str, Any]]:
+        """El cuerpo del 402 si se puede leer, `None` si no. **No levanta.**
+
+        Existe para el mensaje de `PartnerRejectedError`: un 402 con un cuerpo
+        ilegible sigue siendo un riel roto, y reportarlo como
+        `DescribeUnparseable` mandaría a investigar el JSON del servicio
+        cuando lo que hay que revisar es la allowlist.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        return body if isinstance(body, dict) else None
+
     def _paid(
         self,
         path: str,
@@ -499,8 +579,13 @@ class DescribeClient:
     ) -> _Parsed:
         """El baile del 402, en el orden que manda la guía publicada.
 
-        1. Pedir **sin header** — preguntar es gratis y es el primer movimiento
-           previsto por el servicio.
+        0. Si este cliente es **partner**, el primer intento va firmado con el
+           riel (ERC-8128, que no mueve plata: sólo dice quién sos). Con la
+           wallet dada de alta, el paso 1 vuelve 200 y no hay 402 en toda la
+           historia. Y si vuelve 402 igual, **se levanta**: ver la rama de
+           `PartnerRejectedError` abajo.
+        1. Pedir **sin header de pago** — preguntar es gratis y es el primer
+           movimiento previsto por el servicio.
         2. Si vuelve 402: leer el challenge, **verificar el destinatario** contra
            la tesorería pinneada, firmar con el payer.
         3. Repetir **la misma request** con `X-PAYMENT`.
@@ -522,7 +607,16 @@ class DescribeClient:
         cabecera del módulo: la línea es si hubo dinero de por medio.
         """
         # ── Tramo PRE-PAGO: no se firmó nada, no se gastó nada ───────────────
-        response = self._request(path, params=params)
+        #
+        # La firma del RIEL DE PARTNER (que no es una firma de pago: no mueve
+        # un centavo, sólo dice quién sos) va en el PRIMER intento. Si describe
+        # dio de alta la wallet, este único GET vuelve 200 y no hay 402 en toda
+        # la historia. Si el firmante falla, `sign_partner_headers` levanta
+        # `PartnerSigningError` acá mismo, antes de que salga una sola request.
+        firma = self._partner_signature(path, params)
+        response = self._request(
+            path, params=params, headers=dict(firma.headers) if firma else None
+        )
         if response.status_code != 402:
             if response.status_code >= 400:
                 raise DescribeHTTPError(
@@ -532,6 +626,33 @@ class DescribeClient:
             # Un 200 sin pagar: el servicio decidió no cobrar (o hay un caché
             # delante). No hubo credencial, así que no hay nada que marcar.
             return parse(self._json(response, path), self._receipt(response))
+
+        # ══ EL RIEL SE ROMPIÓ, Y ACÁ SE LEVANTA EN VEZ DE PAGAR ══════════════
+        # Firmamos como partner y describe igual pide plata. Las cuatro causas
+        # están en `PartnerRejectedError` y las cuatro son fail-closed del lado
+        # del servicio: la wallet no está en la allowlist, se firmó contra otro
+        # host, el reloj se corrió, o la firma no cubría la URL que salió.
+        #
+        # 🔴 Esta rama va ARRIBA de la del `payer`, y ese orden ES la decisión
+        # entera del modo partner. Al revés —dejar caer un partner con `payer`
+        # al camino de pago— el bug sería invisible: la respuesta llega igual,
+        # el código funciona, y lo único que cambia es una factura de USDC que
+        # aparece semanas después. «Levanta, no degrada» significa exactamente
+        # esta línea, y `test_partner_riel_gratis.py` la ata con un payer que
+        # explota si alguien lo llama.
+        if firma is not None:
+            raise PartnerRejectedError(
+                f"GET {path} contestó 402 aunque este cliente firmó como partner "
+                f"con la wallet {firma.wallet}. NO se pagó y NO se va a pagar solo. "
+                "Revisá, en este orden: (1) que describe haya dado de alta esa "
+                "wallet en su allowlist; (2) que `base_url` sea "
+                "https://api.describe.net — se firma contra el host al que "
+                "apuntás y el gate verifica contra el suyo pinneado; (3) el reloj "
+                "del firmante (la ventana del gate son 300 s). Si de verdad querés "
+                "pagar, construí el cliente SIN `partner=`.",
+                wallet=firma.wallet,
+                challenge=self._challenge_o_none(response),
+            )
 
         try:
             challenge = response.json()

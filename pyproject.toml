@@ -46,6 +46,15 @@ dependencies = ["httpx>=0.24.0"]
 # El pago x402. Extra y no dependencia base a proposito: es la unica caseta de
 # peaje (R6) y solo hace falta para las dos rutas medidas.
 x402 = ["uvd-x402-sdk>=0.70.0", "eth-account>=0.11.0"]
+# El riel de partner (firma ERC-8128). NO lleva `eth-account`, y no es un
+# olvido: MEDIDO el 2026-08-30 en este venv, `from uvd_x402_sdk.erc8128 import
+# sign_request` importa y firma sin `eth-account` instalado — la criptografia
+# la pone el FIRMANTE que inyecta el consumidor, que puede ser un KMS o un
+# signer remoto que no necesita nada local. Quien use `EnvKeyAdapter` (la clave
+# en una env var) si necesita `eth-account`, y para eso esta el extra `x402` o
+# `uvd-x402-sdk[signer]`. Declararlo asi deja que un partner con HSM instale lo
+# minimo en vez de arrastrar una libreria de claves que no va a usar.
+partner = ["uvd-x402-sdk>=0.70.0"]
 dev = [
     "pytest>=7.0.0",
     "mypy>=1.0.0",

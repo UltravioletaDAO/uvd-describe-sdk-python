@@ -59,6 +59,14 @@ Y desde el 2026-08-30 hay un segundo eje: **las rutas PAGAS no las traga el
 fail-open nunca, sea cual sea la excepción y valga lo que valga `fail_open`.**
 Ver `client.py`, bloque «QUÉ MÉTODO ES NULLABLE».
 
+Las dos del riel de partner —`PartnerSigningError` y `PartnerRejectedError`—
+caen en la misma bolsa y por la misma razón: son configuración de quien llama.
+Pero cargan además una afirmación que ninguna otra hace, y es la mitad buena
+del asunto: **`payment_sent is False` es verdad fuerte ahí**. Las dos se
+levantan ANTES de firmar ninguna autorización de pago, así que quien las reciba
+sabe que no gastó — se enteró de que perdió el riel gratis SIN haber gastado el
+USDC que el riel le ahorraba. Esa es toda la decisión del modo partner.
+
 ────────────────────────────────────────────────────────────────────────────
 🔴 `payment_sent` — LA MARCA QUE DISTINGUE «NO GASTASTE» DE «PUEDE QUE SÍ»
 ────────────────────────────────────────────────────────────────────────────
@@ -199,6 +207,78 @@ class PaymentRequiredError(DescribeError):
         """
         value = self.challenge.get("price_usd") or self.challenge.get("amount")
         return str(value) if value is not None else None
+
+
+class PartnerSigningError(DescribeError):
+    """El riel de partner no pudo firmar. **No salió ninguna request.**
+
+    Es configuración de quien llama —el extra sin instalar, un firmante que
+    levanta, un KMS caído, una firma que no es hex— así que no la traga el
+    fail-open, por lo mismo que `PaymentRequiredError`: degradarla a `None`
+    convertiría «tu riel gratis está roto» en «esta wallet no tiene
+    reputación».
+
+    🔴 **`payment_sent` es `False` y eso es una afirmación fuerte, no un
+    default**: la firma del riel ocurre ANTES de la primera request, así que
+    cuando esto sale no se pidió nada, no se recibió ningún 402, no se firmó
+    ninguna autorización EIP-3009 y no se movió un centavo. Es la mitad buena
+    de «levanta, no degrada».
+
+    `wallet` trae la dirección del firmante si se alcanzó a leer (`None` si el
+    fallo fue justamente al pedirla). Es pública por diseño: es la que va en la
+    allowlist del servicio.
+    """
+
+    kind = "partner_signing"
+
+    def __init__(self, message: str, wallet: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.wallet = wallet
+
+
+class PartnerRejectedError(PaymentRequiredError):
+    """Firmaste como partner y describe **igual pidió que pagues**. No se pagó.
+
+    Hereda de `PaymentRequiredError` a propósito, y la herencia dice algo
+    verdadero: los dos casos son «llegó un 402 y este cliente no puso un
+    centavo». Un consumidor que ya escribía `except PaymentRequiredError` la
+    atrapa sin cambiar una línea, y hereda `challenge` y `price_usd` — que acá
+    valen doble, porque dicen **cuánto te iba a costar** el riel roto.
+
+    🔴 POR QUÉ ESTO LEVANTA EN VEZ DE PAGAR, que es la decisión entera del
+    modo partner:
+
+        Un partner con `payer=` configurado y el riel caído tiene un camino
+        obvio y silencioso: pagar. Y ahí el bug no se ve nunca — la respuesta
+        llega igual, el código funciona, y la factura de USDC aparece semanas
+        después. Es la misma familia del gate del servicio: *un bug acá no
+        rompe nada, no tira error, y regala/gasta el producto.*
+
+    Así que un 402 con `partner=` configurado es un FALLO y no una señal de
+    cobro. **El `payer` no se usa aunque esté**, y el mensaje lo dice a gritos.
+    Quien de verdad quiera pagar construye un cliente sin `partner=`: es una
+    línea, es explícita, y queda escrita en su código.
+
+    Las cuatro causas, todas fail-closed del lado del servicio:
+      * la wallet no está en la allowlist (el alta la hace describe);
+      * se firmó contra otro host (tu `base_url` no es `api.describe.net`);
+      * el reloj del firmante se corrió más de 300 s (la ventana del gate);
+      * la firma no cubría la URL que salió (query incluida).
+
+    `wallet` es la dirección con la que se firmó: es lo primero que hay que
+    mirar y lo que hay que citarle a describe para el alta.
+    """
+
+    kind = "partner_rejected"
+
+    def __init__(
+        self,
+        message: str,
+        wallet: str,
+        challenge: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, challenge)
+        self.wallet = wallet
 
 
 class DoNotPayError(DescribeError):

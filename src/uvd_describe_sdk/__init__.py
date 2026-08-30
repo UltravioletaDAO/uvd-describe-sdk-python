@@ -40,6 +40,18 @@ resuelve `uvd-x402-sdk`, que es un **extra** opcional
 medidas. El camino gratis no arrastra una sola dependencia de criptografía.
 
 Tampoco escribe en ninguna cadena, ni emite calificaciones: es un LECTOR.
+
+════════════════════════════════════════════════════════════════════════════
+EL RIEL DE PARTNER — SI DESCRIBE DIO DE ALTA TU WALLET, LAS MEDIDAS SON $0
+════════════════════════════════════════════════════════════════════════════
+    from uvd_x402_sdk.wallet import EnvKeyAdapter    # lee WALLET_PRIVATE_KEY
+    with DescribeClient(product="meshrelay", partner=EnvKeyAdapter()) as d:
+        b = d.wallet_breakdown("0x97cd…0996")        # $0,01 para un tercero
+
+Firma ERC-8128, no un token: describe guarda tu DIRECCIÓN pública, nunca un
+secreto tuyo. 🔴 **Este SDK sigue sin tocar tu clave** — `partner=` recibe un
+objeto que firma. Y si el riel se rompe, el cliente **levanta**
+(`PartnerRejectedError`) en vez de pagar en silencio. Ver `partner.py`.
 """
 
 from __future__ import annotations
@@ -68,6 +80,8 @@ from .errors import (
     DescribeUnparseable,
     DescribeUnreachable,
     DoNotPayError,
+    PartnerRejectedError,
+    PartnerSigningError,
     PaymentRequiredError,
 )
 from .models import (
@@ -90,6 +104,13 @@ from .models import (
     SelfRated,
     Snapshot,
     WalletReputation,
+)
+from .partner import (
+    PARTNER_AUTHORITY,
+    PARTNER_CHAIN_ID,
+    PartnerSignature,
+    PartnerSigner,
+    sign_partner_headers,
 )
 from .payment import TREASURY_EVM, Payer, build_payment_header, chain_name_for
 from .version import USER_AGENT_NAME, __version__, default_user_agent
@@ -121,6 +142,8 @@ __all__ = [
     "DescribeUnparseable",
     "PaymentRequiredError",
     "DoNotPayError",
+    "PartnerSigningError",
+    "PartnerRejectedError",
     "HTTP_5XX_LEGACY_KIND",
     # modelos
     "WalletReputation",
@@ -147,6 +170,12 @@ __all__ = [
     "TREASURY_EVM",
     "build_payment_header",
     "chain_name_for",
+    # riel de partner — firma ERC-8128, CERO claves en este SDK
+    "PartnerSigner",
+    "PartnerSignature",
+    "PARTNER_CHAIN_ID",
+    "PARTNER_AUTHORITY",
+    "sign_partner_headers",
     # versión / atribución
     "__version__",
     "USER_AGENT_NAME",
