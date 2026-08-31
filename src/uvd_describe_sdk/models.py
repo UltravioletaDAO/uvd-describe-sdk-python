@@ -344,6 +344,19 @@ class WalletReputation:
 
 def parse_wallet_reputation(payload: Any) -> WalletReputation:
     body = _require(payload, "wallet", "GET /wallets/{wallet}/chains")
+    # 🔴 Wrong-parser guard, mirrored from the TypeScript twin (spirit measured
+    # here on 2026-08-31): fed the body of the METERED route, this parser used
+    # to succeed SILENTLY — `global_score=None` — turning a score that exists
+    # and was paid for into "not yet rated". The discriminator is the pair of
+    # top-level markers, not one key alone, so a future payload carrying both
+    # stays additive-tolerant and does not fire.
+    if "final_score" in body and "global_score" not in body:
+        raise DescribeUnparseable(
+            "this payload has `final_score` and no `global_score`: it is the "
+            "body of the METERED route GET /reputation/wallet/{wallet}. Parse "
+            "it with `parse_breakdown`, not `parse_wallet_reputation` — "
+            "until today this succeeded silently with `global_score=None`."
+        )
     try:
         chains = [
             ChainReputation(
@@ -568,12 +581,23 @@ class PaymentReceipt:
 
     Exposing them is the difference between "I paid" and "I can prove I paid".
 
-    🔴 `transaction_hash` is shape-checked too, but with its OWN rule
-    (`hashes.looks_like_settlement_receipt`): the live OpenAPI declares this header
-    may be worth the literal **`pending`** when settlement has not reported its
-    hash yet. `pending` is LEGITIMATE and is not marked — treating it as garbage
-    would turn the happy path of every freshly settled payment into an alarm, and
-    an alarm that fires on the happy path gets learned into being ignored.
+    🔴 `transaction_hash` is shape-checked too, and the live OpenAPI declares the
+    header may be worth the literal **`pending`** when settlement has not
+    reported its hash yet. `pending` is LEGITIMATE and is not marked in
+    `malformed_hashes` — treating it as garbage would turn the happy path of
+    every freshly settled payment into an alarm, and an alarm that fires on the
+    happy path gets learned into being ignored.
+
+    ⚠️ REWRITTEN 2026-08-31 — the correction stays written, per house rule. Until
+    0.1.0 this paragraph went one step further: "legitimate and not marked" was
+    implemented as *the literal travels inside `transaction_hash` itself*, so a
+    200 carried `transaction_hash="pending"` — indistinguishable from a citable
+    hash without re-checking the string, which is the exact family of Execution
+    Market's INC-2026-08-26: a placeholder occupying the place of the proof.
+    Since 0.2.0 the sentinel is split out: `transaction_hash=None` +
+    `settlement_pending=True`. The field below only ever carries something
+    shaped like a hash, and `None` keeps meaning what it means across this whole
+    SDK — no proof either way, see `hashes.py`.
     """
 
     transaction_hash: Optional[str] = None
@@ -582,6 +606,10 @@ class PaymentReceipt:
     #: `("transaction_hash",)` if the header brought something that is neither a
     #: hash nor `pending`. Empty in the normal case.
     malformed_hashes: Tuple[str, ...] = ()
+    #: `True` = the header brought the literal `pending`: the service charged and
+    #: settlement has not reported the hash yet. NOT an error and NOT malformed —
+    #: reconcile later. When it is `True`, `transaction_hash` is `None`.
+    settlement_pending: bool = False
 
 
 def _parse_confidence(raw: Any) -> Optional[Confidence]:
@@ -709,6 +737,17 @@ class Breakdown:
 
 def parse_breakdown(payload: Any, receipt: Optional[PaymentReceipt] = None) -> Breakdown:
     body = _require(payload, "wallet", "GET /reputation/wallet/{wallet}")
+    # 🔴 Wrong-parser guard, mirrored from the TypeScript twin (spirit measured
+    # here on 2026-08-31): fed the body of the FREE route, this parser used to
+    # succeed SILENTLY — `final_score=None`, `total_reviews=0` — a paid-looking
+    # object built out of the free preview. Both markers, same reason as above.
+    if "global_score" in body and "final_score" not in body:
+        raise DescribeUnparseable(
+            "this payload has `global_score` and no `final_score`: it is the "
+            "body of the FREE route GET /wallets/{wallet}/chains. Parse it "
+            "with `parse_wallet_reputation`, not `parse_breakdown` — until "
+            "today this succeeded silently with `final_score=None`."
+        )
     try:
         per_chain = {
             str(net): ChainScore(

@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from uvd_describe_sdk import (
+    SETTLEMENT_PENDING,
     TREASURY_EVM,
     DescribeHTTPError,
     DescribeTimeout,
@@ -478,6 +479,44 @@ def test_un_recibo_en_el_fallo_convierte_el_quizas_en_certeza(make_client) -> No
     assert exc.value.payment is not None
     assert exc.value.payment["transaction_hash"] == RECIBO_REAL
     assert "settlement happened" in str(exc.value)
+
+
+def test_un_recibo_pending_en_el_fallo_dice_pendiente_no_finge_silencio(
+    make_client,
+) -> None:
+    """Espejo del gemelo TS («a `pending` receipt on the failing response»).
+
+    `pending` es un valor que el OpenAPI del vendedor declara legítimo: cobró y
+    el settlement todavía no reportó el hash. Hasta 0.2.0 este camino lo
+    filtraba a `None` y la excepción decía «NO `X-Payment-Receipt` arrived» —
+    FALSO: la cabecera SÍ llegó y el vendedor SÍ declaró el estado. El campo
+    del hash sigue vacío (el centinela jamás viaja en la columna de la prueba,
+    INC-2026-08-26 de Execution Market); lo que cambió el 2026-08-31 es que
+    ahora el estado se DICE — `settlement_pending` es la bandera, igual que
+    `settlementPending` en el `PaymentAttempt` del gemelo.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "X-PAYMENT" not in request.headers:
+            return json_response(CHALLENGE_402, status=402)
+        return json_response(
+            {"detail": "el índice se cayó DESPUÉS de cobrar"},
+            status=500,
+            headers={"X-Payment-Receipt": SETTLEMENT_PENDING},
+        )
+
+    with make_client(handler, payer=PayerEspia()) as c:
+        with pytest.raises(DescribeHTTPError) as exc:
+            c.wallet_breakdown("0xdead")
+
+    assert exc.value.payment_sent is True
+    assert exc.value.payment is not None
+    # La bandera es el estado; el campo es el hash. Ninguno suplanta al otro.
+    assert exc.value.payment["settlement_pending"] is True
+    assert exc.value.payment["transaction_hash"] is None
+    # Y el mensaje YA NO finge que no llegó nada: el vendedor declaró.
+    assert "no proof either way" not in str(exc.value)
+    assert "pending" in str(exc.value)
 
 
 def test_un_cuerpo_ILEGIBLE_despues_de_pagar_tambien_sale_marcado(make_client) -> None:
