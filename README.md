@@ -186,6 +186,51 @@ se firmó nada.
 > implementan igual. De la versión vieja sobrevivió la observación de que una
 > lista vacía se lee como un índice vacío: por eso el contrato dice «nunca `[]`».
 
+### `err.recovery` — qué hacer EN VEZ DE, y por qué a veces está vacío
+
+Aporte de **Execution Market** (`#agents`, 2026-08-30), que ese día tipó diez
+códigos en su propio 502 y lo publicó *«para que lo codifiquen de su lado»*. Su
+argumento es el que justifica el campo: *«SIETE de los diez son TERMINALES
+(`retryable:false`) … contra `AUTHORIZATION_EXPIRED` reintentar es quemar
+llamadas contra una ventana cerrada hace 317 HORAS.»*
+
+Se absorbió el **patrón**, no su tabla: sus códigos son de su API (escrow,
+release al worker, wallets de payout) y este SDK envuelve la de describe. Así
+que se recorrieron **nuestros** `kind` y se decidió uno por uno.
+
+```python
+except DescribeError as err:
+    log.warning("describe: %s", err)
+    if err.recovery:
+        log.warning("qué hacer: %s", err.recovery)   # se LEE
+    if err.kind == "payment_required":               # se RAMIFICA
+        ...
+```
+
+| `kind` | ¿Hay ruta de recuperación? |
+|---|---|
+| `payment_required` | Sí — **la puerta gratis**: `wallet()` da el score global sin pagar ni firmar, y el 402 nombra la gratis de *ese* sujeto en `challenge['free_preview']`. |
+| `partner_rejected` | Sí — el alta la hace describe: reintentar no la produce. |
+| `partner_signing` | Sí — y el dato que nadie deduce solo: **el riel roto no bloquea nada gratis**. |
+| `do_not_pay` | Sí — no se firmó nada; se bifurca por `expected` / `offered`. |
+| `http_error` | Sí — ramificá por `status_code`: el bucket junta tres causas. |
+| `unreachable` · `unparseable` | Sí — mirá `base_url` y el intermediario antes que el índice. |
+| `malformed_hash` | Sí — el crudo está en `.raw`, y **no descartes la respuesta**. |
+| `timeout` | 🔴 **No, y está fijado por un test.** |
+
+**Que `timeout` esté vacío es la parte importante**, no un olvido: es el fallo
+más común y aun así no hay *otra* cosa que hacer. Subir el timeout choca con los
+29 s del API Gateway del proveedor (el default ya es 30) y «reintentá» sería un
+booleano redactado en prosa. **Inventar una recuperación que no funciona es peor
+que no tener el campo**, porque te manda a hacer algo inútil con confianza.
+
+Se **lee**; para decidir está `kind`. Es el mismo par que `caveats[].code` /
+`caveats[].text`, y por eso `recovery` es texto y no un enum: el enum ya existe y
+se llama `kind`. El texto es una **constante** que escribimos nosotros — nunca
+interpola el mensaje de una excepción ajena, así que no puede filtrar la URL de
+un RPC con su API key ni un DSN. Hay un test con un secreto de mentira que se
+pone rojo si alguna vez lo hiciera.
+
 ---
 
 ## Pagar (R6) — una sola caseta de peaje

@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 125 tests, ~0,4 s, SIN RED
+.venv/Scripts/python -m pytest                     # 215 pasan, 14,9 s, SIN RED (medido 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -87,6 +87,33 @@ después», y sólo uno de los dos pide reconciliar. Se ramifica por el atributo
 nunca por el texto. **Límite conocido**: `payment_sent` prueba que la credencial
 salió, no que el settlement ocurrió — eso sólo lo prueba un `transaction_hash`
 presente, y un transporte caído no trae ninguno.
+
+### `recovery` — la décima superficie, y TAMPOCO es una regla del contrato
+
+`errors.py`. Aporte de **Execution Market** (`#agents`, 2026-08-30): *«SIETE de
+los diez son TERMINALES … contra `AUTHORIZATION_EXPIRED` reintentar es quemar
+llamadas contra una ventana cerrada hace 317 HORAS.»* Se absorbió el **patrón**,
+no su tabla de códigos —que es de SU API— así que se recorrieron NUESTROS nueve
+`kind` y se decidió caso por caso. No entra a las ocho reglas: agrega un
+atributo, no cambia ninguna. **R5 intacta.**
+
+Lo que hay que saber antes de tocarlo (el porqué completo, en `errors.py`):
+
+1. 🔴 **`None` es una respuesta y está fijada por un test.** `timeout` no tiene
+   ruta: subir el timeout choca con los 29 s del API GW y «reintentá» es un
+   booleano en prosa. **Inventar una recuperación que no funciona es peor que no
+   tener el campo.** Mutación J.
+2. **Cada clase la declara en SU cuerpo**, también cuando vale `None`
+   (`"recovery" in cls.__dict__`). Es lo único que separa «decidí» de «me
+   olvidé». Mutación L.
+3. 🔴 **Es una CONSTANTE de clase y no interpola nada** — la versión SDK del
+   `_redact` del servicio. Un `recovery` armado en `__init__` puede filtrar la
+   URL de un RPC con su key. Mutación K.
+4. **Texto y no enum, porque el enum ya existe y es `kind`.** Se ramifica por el
+   código, se lee el texto — el mismo par que `caveats[].code`/`.text`.
+5. ⚠️ **La premisa del aporte era falsa acá y se dejó escrita**: llegó como «ya
+   tienen `transient` y `serviceFault`». `grep -rEni "transient|servicefault"
+   src/` = **0**. El hueco se reportó, no se rellenó.
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
@@ -205,6 +232,9 @@ docstrings:
 | **G.** firmar una URL rearmada a mano (`f"{base}{path}"`, sin la query) | **1 rojo**: `assert None == '?snapshot=true'` — la línea `@query` de la base firmada contra la que salió |
 | **H.** firmar también las rutas GRATIS («por simetría») | **3 rojos**: los 3 casos de `test_las_rutas_GRATIS_no_se_firman` |
 | **I.** que `sign_partner_headers` devuelva headers vacíos en vez de levantar | **1 rojo**: `DID NOT RAISE PartnerSigningError` |
+| **J.** 🔴 «completar la tabla»: darle a `DescribeTimeout` un `recovery` que dice «Reintentá…» | **3 rojos**, y el que importa es `assert 'Reintenta en unos segundos…' is None` — el vacío honesto está fijado |
+| **K.** que `PartnerSigningError` arme su `recovery` en `__init__` interpolando el mensaje | **2 rojos**: el secreto de mentira aparece dentro del consejo (`'CLAVE-FALSA-DE-TEST' is contained here`) y `una.recovery is otra.recovery` deja de valer |
+| **L.** sacarle a `PartnerRejectedError` su `recovery` (hereda la de `PaymentRequiredError`) | **6 rojos**, con el mensaje que nombra el bug: «hereda la de PaymentRequiredError» — publicaría «configurá `payer=`» ante un riel roto |
 
 **A y B son el par que sostiene la R5 corregida**, uno por borde: A se pone rojo
 si alguien mete las pagas adentro, B si alguien saca a las gratis. **D y E son el
@@ -221,6 +251,18 @@ quedado verde con el bug adentro, porque un cliente que paga religiosamente
 también devuelve el breakdown. **F y H son el par por borde**, igual que A y B:
 F se pone roja si el riel deja de proteger las rutas donde hay plata, H si
 alguien lo extiende a las rutas donde no la hay.
+
+**J, K y L son las tres del `recovery`, y cada una cuida una propiedad
+distinta**: J el **vacío honesto** (que nadie complete la tabla con un
+«reintentá», que es un booleano redactado en prosa); K el **guard de secretos**,
+que es estructural y no defensivo —el texto es una constante de clase, así que
+no puede arrastrar la URL de un RPC con su key— y su rojo lo prueba enseñando el
+secreto de mentira DENTRO del consejo; L que **declarar sea obligatorio**, con
+el caso real: `PartnerRejectedError` hereda de `PaymentRequiredError` y sin
+declarar la suya le diría «configurá `payer=`» a alguien con el riel roto, que
+es exactamente el consejo que su docstring existe para prohibir. Un test de
+`recovery` que sólo mirara «los textos no están vacíos» habría quedado verde con
+las tres adentro.
 
 ⚠️ **B no pone rojo el test de firmas** (`test_la_tabla_de_nullabilidad_...`),
 porque quitar el `except` no toca la anotación. Está anotado porque es la clase
