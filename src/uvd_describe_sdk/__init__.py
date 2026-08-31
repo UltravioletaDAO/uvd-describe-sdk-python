@@ -71,6 +71,7 @@ from .client import (
     DEFAULT_TIMEOUT_S,
     DescribeClient,
     ErrorObserver,
+    FallbackReader,
 )
 from .display import NO_SCORE_PLACEHOLDER, format_score
 from .errors import (
@@ -129,6 +130,12 @@ __all__ = [
     # jitter — contributed by KarmaKadabra (27 agents), ON by default
     "DEFAULT_JITTER_S",
     "ErrorObserver",
+    # fallback reader — también de KarmaKadabra (PR #2). Se exporta porque el
+    # consumidor tiene que poder ANOTAR su función: `fallback_reader=` recibe un
+    # `Callable[[str], Optional[WalletReputation]]`, y sin el alias en el paquete
+    # esa firma se escribe a mano en cada consumidor o se importa desde
+    # `.client`, que es privado. Mismo criterio que `ErrorObserver`.
+    "FallbackReader",
     # display (R8)
     "format_score",
     "NO_SCORE_PLACEHOLDER",

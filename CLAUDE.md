@@ -235,6 +235,18 @@ docstrings:
 | **J.** 🔴 «completar la tabla»: darle a `DescribeTimeout` un `recovery` que dice «Reintentá…» | **3 rojos**, y el que importa es `assert 'Reintenta en unos segundos…' is None` — el vacío honesto está fijado |
 | **K.** que `PartnerSigningError` arme su `recovery` en `__init__` interpolando el mensaje | **2 rojos**: el secreto de mentira aparece dentro del consejo (`'CLAVE-FALSA-DE-TEST' is contained here`) y `una.recovery is otra.recovery` deja de valer |
 | **L.** sacarle a `PartnerRejectedError` su `recovery` (hereda la de `PaymentRequiredError`) | **6 rojos**, con el mensaje que nombra el bug: «hereda la de PaymentRequiredError» — publicaría «configurá `payer=`» ante un riel roto |
+| **M.** `exc.status_code == 404` → `== 4040` en el guard que saca al 404 antes del respaldo (`client.py:687`) | **2 rojos**: `test_un_404_NO_dispara_el_respaldo` y —el que prueba que no es redundante— `test_r4_sin_datos_no_es_error.py::test_404_no_lanza_ni_con_fail_open_apagado`. El 404 se cae a la vez del respaldo y de R4 |
+| **N.** sacar `replace(respaldo, source="fallback")` (`client.py:719`), o sea devolver el respaldo sin marcar | **1 rojo**: `test_el_respaldo_se_marca_y_no_se_hace_pasar_por_el_indice` |
+
+**M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
+KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un
+404 es una RESPUESTA, no un fallo, y consultar una segunda fuente para
+contradecirlo convertiría el respaldo en una forma de buscar el número que a uno
+le gusta más. Su segundo rojo, el de R4, es la parte que importa: prueba que el
+guard del 404 es uno solo y que el respaldo se colgó del lado correcto.
+**N** fija *qué devuelve*: sin la marca, un consumidor no puede distinguir el
+índice de su plan B y terminaría publicando como canónico un número que
+describe.net no firmó — la misma enfermedad que R1 persigue con `None` vs `0`.
 
 **A y B son el par que sostiene la R5 corregida**, uno por borde: A se pone rojo
 si alguien mete las pagas adentro, B si alguien saca a las gratis. **D y E son el
