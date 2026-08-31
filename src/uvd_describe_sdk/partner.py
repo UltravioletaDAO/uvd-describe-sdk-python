@@ -1,115 +1,118 @@
-"""El riel de PARTNER — entrar a las rutas medidas sin gastar un centavo.
+"""The PARTNER rail — getting into the metered routes without spending a cent.
 
 ════════════════════════════════════════════════════════════════════════════
-QUÉ ES, Y POR QUÉ NO ES UN TOKEN
+WHAT IT IS, AND WHY IT IS NOT A TOKEN
 ════════════════════════════════════════════════════════════════════════════
-describe no tiene cuentas ni API keys —«el pago es la autenticación»— y sin
-embargo los servicios de la casa (Execution Market, KarmaKadabra, MeshRelay)
-delegaron su lectura de reputación acá y consultan cientos de veces por día.
-El servicio resolvió eso el 2026-08-28 con un mecanismo que **no le exige a
-describe custodiar ningún secreto ajeno**: una allowlist de DIRECCIONES
-PÚBLICAS, y cada partner firma sus requests con una wallet dedicada.
+describe has no accounts and no API keys — "the payment is the authentication" —
+and yet the house's services (Execution Market, KarmaKadabra, MeshRelay) delegated
+their reputation reads here and query hundreds of times a day. The service solved
+that on 2026-08-28 with a mechanism that **does not require describe to custody
+anybody else's secret**: an allowlist of PUBLIC ADDRESSES, with each partner
+signing its requests with a dedicated wallet.
 
-    `describe-net/describenet/partner.py` — el gate, del otro lado.
+    `describe-net/describenet/partner.py` — the gate, on the other side.
 
-Es mejor que un token por una propiedad que ningún token tiene: la allowlist
-se puede commitear, loguear y publicar en un `get-function-configuration` sin
-filtrar nada, porque **una brecha de describe no compromete a ningún partner**.
-No hay allá una credencial tuya que robar. Sólo tu dirección, que es pública.
+It is better than a token because of a property no token has: the allowlist can be
+committed, logged and published in a `get-function-configuration` without leaking
+anything, because **a breach of describe compromises no partner**. There is no
+credential of yours over there to steal. Only your address, which is public.
 
-Este módulo es la mitad cliente de ese mecanismo: firma la request con el
-primitivo del `uvd-x402-sdk` y devuelve los dos headers de RFC 9421.
+This module is the client half of that mechanism: it signs the request with the
+`uvd-x402-sdk` primitive and returns the two RFC 9421 headers.
 
 ════════════════════════════════════════════════════════════════════════════
-🔴 ACÁ NO HAY, NI HABRÁ, UNA CLAVE PRIVADA
+🔴 THERE IS NO PRIVATE KEY HERE, AND THERE NEVER WILL BE
 ════════════════════════════════════════════════════════════════════════════
-**Este módulo no lee una env var, no acepta una clave por parámetro, no la
-guarda y no la ve.** Recibe un OBJETO FIRMANTE inyectado (`PartnerSigner`) y le
-pide dos cosas: `get_address()` y `sign_message()`. La clave se queda del lado
-del firmante — un adaptador de env var, un KMS, un signer remoto, una Ledger.
+**This module does not read an env var, does not accept a key by parameter, does
+not store one and does not see one.** It receives an injected SIGNING OBJECT
+(`PartnerSigner`) and asks it two things: `get_address()` and `sign_message()`.
+The key stays on the signer's side — an env-var adapter, a KMS, a remote signer, a
+Ledger.
 
-    🔴 NUNCA escribas una private key en un archivo, ni «temporalmente», ni
-    «para probar». Hay bots barriendo GitHub por `0x`+64 hex que drenan en
-    minutos: la casa ya perdió DOS wallets así (INC-2026-03-30).
+    🔴 NEVER write a private key into a file, not "temporarily", not "just to
+    test". There are bots sweeping GitHub for `0x` + 64 hex that drain in minutes:
+    the house has already lost TWO wallets that way (INC-2026-03-30).
 
-Y usá una wallet **dedicada y sin fondos**: lo único que hace es firmar. Esa es
-la propiedad que hace barato el peor caso — una firma filtrada sirve contra el
-MISMO método y la MISMA URL, y sólo por 300 segundos (`MAX_VALIDITY_SEC` del
-gate). No es una credencial permanente y no puede mover plata.
+And use a **dedicated wallet with no funds**: all it does is sign. That is the
+property that makes the worst case cheap — a leaked signature works against the
+SAME method and the SAME URL, and only for 300 seconds (the gate's
+`MAX_VALIDITY_SEC`). It is not a permanent credential and it cannot move money.
 
-    # La clave sale del entorno del CONSUMIDOR, jamás de este SDK.
-    from uvd_x402_sdk.wallet import EnvKeyAdapter   # lee WALLET_PRIVATE_KEY
+    # The key comes from the CONSUMER's environment, never from this SDK.
+    from uvd_x402_sdk.wallet import EnvKeyAdapter   # reads WALLET_PRIVATE_KEY
     from uvd_describe_sdk import DescribeClient
 
     with DescribeClient(product="meshrelay", partner=EnvKeyAdapter()) as d:
-        b = d.wallet_breakdown("0x97cd…0996")   # $0,01 para un tercero, $0 acá
+        b = d.wallet_breakdown("0x97cd…0996")   # $0.01 for a third party, $0 here
 
 ════════════════════════════════════════════════════════════════════════════
-UPSTREAM-FIRST: EL PRIMITIVO YA ESTABA, Y SE MIDIÓ ANTES DE ESCRIBIR ESTO
+UPSTREAM-FIRST: THE PRIMITIVE WAS ALREADY THERE, AND IT WAS MEASURED FIRST
 ════════════════════════════════════════════════════════════════════════════
-`uvd-x402-sdk` **0.70.0 ya firma ERC-8128** — `sign_request` de
-`uvd_x402_sdk.erc8128`, con los vectores dorados de la flota de EM pinneados en
-el paquete. Así que acá NO se implementa RFC 9421, no se arma una base de firma
-y no se toca EIP-191: se delega, igual que `payment.py` delega EIP-3009.
+`uvd-x402-sdk` **0.70.0 already signs ERC-8128** — `sign_request` from
+`uvd_x402_sdk.erc8128`, with EM's fleet's golden vectors pinned inside the
+package. So RFC 9421 is NOT implemented here, no signature base is assembled and
+EIP-191 is not touched: it is delegated, just as `payment.py` delegates EIP-3009.
 
-Medido el 2026-08-30 contra el gate REAL del servicio (importando
-`describenet.partner` y su misma `VerifyPolicy`, con una clave efímera de
-memoria):
+Measured 2026-08-30 against the service's REAL gate (importing
+`describenet.partner` and its own `VerifyPolicy`, with an ephemeral in-memory
+key):
 
-    verify_request ok = True · wallet recuperada == la que firmó
-    PartnerGate.check con wallet LISTADA     -> 'mi-partner'
-    PartnerGate.check con wallet NO listada  -> None   (paga; el discriminante)
-    firmada contra `localhost:8088`          -> None   (authority equivocada)
-    firmada SIN query, pedida CON query      -> None   ← ver abajo
+    verify_request ok = True · recovered wallet == the one that signed
+    PartnerGate.check with a LISTED wallet      -> 'mi-partner'
+    PartnerGate.check with an UNLISTED wallet   -> None   (charges; the
+                                                           discriminating case)
+    signed against `localhost:8088`             -> None   (wrong authority)
+    signed WITHOUT query, requested WITH query  -> None   ← see below
 
-Y los defaults del SDK de pagos **ya coinciden** con lo que el gate pide, lo
-cual no es suerte sino el mismo ecosistema: `DEFAULT_CHAIN_ID = 8453` (Base),
-`DEFAULT_VALIDITY_SEC = 300`, `alg="eip191"`, keyid en minúsculas. El
-`chain_id` se pasa igual EXPLÍCITO (ver `PARTNER_CHAIN_ID`).
+And the payments SDK's defaults **already match** what the gate demands, which is
+not luck but the same ecosystem: `DEFAULT_CHAIN_ID = 8453` (Base),
+`DEFAULT_VALIDITY_SEC = 300`, `alg="eip191"`, lowercase keyid. The `chain_id` is
+passed EXPLICITLY anyway (see `PARTNER_CHAIN_ID`).
 
-El bucle se cerró entero el mismo día: un `DescribeClient` real, con firma de
-`eth_account` de verdad, contra el `PartnerGate` real del servicio — lo único
-simulado fue el transporte. Es la evidencia que la suite de este repo NO puede
-dar, porque corre sin criptografía a propósito:
+The loop was closed end to end the same day: a real `DescribeClient`, with a real
+`eth_account` signature, against the service's real `PartnerGate` — the only thing
+simulated was the transport. It is the evidence this repo's suite CANNOT give,
+because it runs without cryptography on purpose:
 
-    [A] wallet EN la allowlist -> el gate contesta partner='meshrelay'
-        wallet_breakdown -> Breakdown(final_score=86.653045), UNA sola
-        request, y el payer nunca se tocó
-    [B] wallet FUERA (el estado real de KK y mesh hoy) -> el gate cobra
+    [A] wallet ON the allowlist -> the gate answers partner='meshrelay'
+        wallet_breakdown -> Breakdown(final_score=86.653045), ONE single
+        request, and the payer was never touched
+    [B] wallet OFF it (the real state of KK and mesh today) -> the gate charges
         -> PartnerRejectedError · payment_sent=False · wallet=0xC259…861c
-           · price_usd='0.01'  ← lo que el riel roto iba a costar
+           · price_usd='0.01'  ← what the broken rail was going to cost
 
 ════════════════════════════════════════════════════════════════════════════
-🔴 SE FIRMA LO QUE SE MANDA, BYTE A BYTE — INCLUIDA LA QUERY
+🔴 WHAT IS SENT IS WHAT IS SIGNED, BYTE FOR BYTE — QUERY INCLUDED
 ════════════════════════════════════════════════════════════════════════════
-La base de firma cubre `@method`, `@authority`, `@path` y —**sólo cuando la
-URL tiene query**— `@query`. La quinta línea de la medición de arriba es el
-modo de falla: una firma hecha sobre la URL sin `?snapshot=true` y mandada con
-`?snapshot=true` **no verifica**, y el partner cae al 402 sin entender por qué.
+The signature base covers `@method`, `@authority`, `@path` and — **only when the
+URL has a query** — `@query`. The fifth line of the measurement above is the
+failure mode: a signature made over the URL without `?snapshot=true` and sent with
+`?snapshot=true` **does not verify**, and the partner falls to the 402 without
+understanding why.
 
-Por eso el cliente firma la URL que `httpx` ya construyó (`build_request`) y no
-una que rearme a mano: la que se firma y la que sale son la misma cadena por
-construcción, no por cuidado. `test_partner_riel_gratis.py` lo ata comparando
-las líneas `"@path"` / `"@query"` de la base firmada contra la URL que el
-transporte vio salir.
+That is why the client signs the URL `httpx` already built (`build_request`) and
+not one it rebuilds by hand: the one signed and the one that goes out are the same
+string **by construction**, not by care. `test_partner_riel_gratis.py` pins it by
+comparing the `"@path"` / `"@query"` lines of the signed base against the URL the
+transport saw leave.
 
-Y el `authority` sale de la URL, o sea de tu `base_url`. Consecuencia: **si
-apuntás el cliente a cualquier host que no sea `api.describe.net`, el riel no
-funciona** — el gate reconstruye la base contra su authority pinneada y a
-propósito nunca contra el Host del request (derivar la authority de un header
-que controla el cliente es cómo se rompió un verificador ajeno). No es un bug
-de este SDK: es fail-closed, y se entera ruidosamente por
+And the `authority` comes from the URL, i.e. from your `base_url`. Consequence:
+**if you point the client at any host other than `api.describe.net`, the rail does
+not work** — the gate rebuilds the base against its pinned authority and
+deliberately never against the request's Host (deriving the authority from a
+header the client controls is how somebody else's verifier got broken). It is not
+a bug of this SDK: it is fail-closed, and you find out loudly through
 `PartnerRejectedError`.
 
 ════════════════════════════════════════════════════════════════════════════
-DEFAULT-COBRAR ES DEL SERVIDOR, Y ESO ES LO QUE LO HACE UNA GARANTÍA
+CHARGE-BY-DEFAULT IS THE SERVER'S, AND THAT IS WHAT MAKES IT A GUARANTEE
 ════════════════════════════════════════════════════════════════════════════
-Nada de lo que pase en este archivo puede eximir a nadie. La allowlist vive en
-el servicio; env ausente, vacía o con JSON inválido ⇒ allowlist VACÍA ⇒ 402
-para todos. Este módulo sólo produce dos headers; quien decide es el otro lado.
-Dicho al revés: **no hay ninguna forma de que un bug de este SDK regale el
-producto**, y sí hay una de que te haga gastar USDC en silencio. Contra esa
-está `PartnerRejectedError` (ver `client.py::_paid`).
+Nothing that happens in this file can exempt anybody. The allowlist lives in the
+service; an absent, empty or invalid-JSON env ⇒ EMPTY allowlist ⇒ 402 for
+everyone. This module only produces two headers; the one who decides is the other
+side. Put the other way round: **there is no way for a bug in this SDK to give the
+product away**, and there is one for it to make you spend USDC silently. Against
+that one stands `PartnerRejectedError` (see `client.py::_paid`).
 """
 
 from __future__ import annotations
@@ -123,59 +126,60 @@ except ImportError:  # pragma: no cover
 
 from .errors import PartnerSigningError
 
-#: La cadena del keyid ERC-8128 (`erc8128:<chain>:0x…`). **8453, Base**, y el
-#: número no se elige acá: lo pinnea el gate del servicio
-#: (`describenet/partner.py::CHAIN_ID`), que fija UNA a propósito porque
-#: «cualquier cadena» sería innecesariamente laxo para una allowlist de tres
-#: servicios propios. Se pasa EXPLÍCITO a `sign_request` aunque el default del
-#: SDK de pagos hoy coincida (medido 2026-08-30: `DEFAULT_CHAIN_ID = 8453`):
-#: heredar un default ajeno para un valor que el servidor compara es firmar
-#: contra lo que otro repo decida mañana.
+#: The chain of the ERC-8128 keyid (`erc8128:<chain>:0x…`). **8453, Base**, and
+#: the number is not chosen here: it is pinned by the service's gate
+#: (`describenet/partner.py::CHAIN_ID`), which fixes ONE on purpose because "any
+#: chain" would be needlessly lax for an allowlist of three of our own services.
+#: It is passed EXPLICITLY to `sign_request` even though the payments SDK's
+#: default matches today (measured 2026-08-30: `DEFAULT_CHAIN_ID = 8453`):
+#: inheriting somebody else's default for a value the server compares is signing
+#: against whatever another repo decides tomorrow.
 PARTNER_CHAIN_ID = 8453
 
-#: El dominio contra el que el gate reconstruye la base. NO se usa para firmar
-#: —el `authority` sale de la URL que se manda, ver la cabecera— y se publica
-#: sólo para que un error pueda decir contra qué authority firmaste y contra
-#: cuál te iban a verificar. Espejo de `describenet/partner.py::AUTHORITY`.
+#: The domain the gate rebuilds the base against. It is NOT used for signing —
+#: the `authority` comes from the URL that is sent, see the header — and it is
+#: published only so an error can say which authority you signed against and which
+#: one you were going to be verified against. Mirror of
+#: `describenet/partner.py::AUTHORITY`.
 PARTNER_AUTHORITY = "api.describe.net"
 
 
 @runtime_checkable
 class PartnerSigner(Protocol):
-    """Lo único que este SDK le pide a quien firma. **La clave nunca sale de acá.**
+    """The only thing this SDK asks of whoever signs. **The key never leaves.**
 
-    Es, a propósito, el mismo par de métodos que el `WalletAdapter` del
-    `uvd-x402-sdk`: cualquier adaptador suyo lo satisface **estructuralmente**,
-    sin heredar nada nuestro, y un firmante propio (KMS, HSM, signer remoto)
-    entra con dos métodos y sin importar una línea de este paquete.
+    It is, on purpose, the same pair of methods as `uvd-x402-sdk`'s
+    `WalletAdapter`: any adapter of theirs satisfies it **structurally**, without
+    inheriting anything of ours, and your own signer (KMS, HSM, remote signer)
+    fits with two methods and without importing a line of this package.
 
-        class MiFirmanteRemoto:
-            def get_address(self) -> str: ...        # la dirección PÚBLICA
+        class MyRemoteSigner:
+            def get_address(self) -> str: ...        # the PUBLIC address
             def sign_message(self, message: str) -> str: ...   # EIP-191, hex
 
-    `sign_message` recibe la base de firma de RFC 9421 (texto plano) y devuelve
-    la firma `personal_sign` en hex. Que la interfaz sea de dos métodos es lo
-    que hace que los tests de este repo corran **sin una sola clave y sin
-    criptografía**: el doble devuelve hex fijo.
+    `sign_message` receives the RFC 9421 signature base (plain text) and returns
+    the `personal_sign` signature in hex. That the interface is two methods is
+    what makes this repo's tests run **without a single key and without
+    cryptography**: the double returns fixed hex.
     """
 
     def get_address(self) -> str:
-        """La dirección EVM del firmante. Es PÚBLICA: va a la allowlist."""
+        """The signer's EVM address. It is PUBLIC: it goes on the allowlist."""
         ...
 
     def sign_message(self, message: str) -> str:
-        """Firma EIP-191 (`personal_sign`) del mensaje, en hex."""
+        """EIP-191 (`personal_sign`) signature of the message, in hex."""
         ...
 
 
 class PartnerSignature:
-    """Los headers firmados **y** la dirección con la que se firmó.
+    """The signed headers **and** the address they were signed with.
 
-    La dirección viaja de vuelta por una razón operativa, no decorativa: cuando
-    el riel se rompe, el 99 % de las veces es «esa wallet no está en la
-    allowlist», y el remedio exige saber CUÁL wallet firmó. Sacarla de acá y no
-    de un segundo `get_address()` importa cuando el firmante es remoto: ese
-    segundo llamado puede fallar justo cuando estás armando el mensaje de error.
+    The address travels back for an operational reason, not a decorative one: when
+    the rail breaks, 99 % of the time it is "that wallet is not on the allowlist",
+    and the remedy requires knowing WHICH wallet signed. Taking it from here and
+    not from a second `get_address()` matters when the signer is remote: that
+    second call can fail exactly when you are assembling the error message.
     """
 
     __slots__ = ("headers", "wallet")
@@ -193,21 +197,22 @@ def sign_partner_headers(
     chain_id: int = PARTNER_CHAIN_ID,
     now: Optional[Callable[[], int]] = None,
 ) -> PartnerSignature:
-    """Firmar una request para el riel de partner. Delega TODO en el SDK de pagos.
+    """Sign a request for the partner rail. It delegates EVERYTHING to the
+    payments SDK.
 
     Args:
-        signer: el objeto firmante inyectado. **Este SDK jamás construye uno**,
-            no lo lee de una env var y no toca su clave.
-        method: el método HTTP, tal cual va a salir.
-        url: la URL COMPLETA que se va a mandar, con su query si la tiene. Ver
-            la cabecera: firmar otra cosa produce un 402 que no se entiende.
-        now: reloj inyectable (epoch en segundos), para tests.
+        signer: the injected signing object. **This SDK never builds one**, does
+            not read it from an env var and does not touch its key.
+        method: the HTTP method, exactly as it will go out.
+        url: the COMPLETE URL that will be sent, with its query if it has one. See
+            the header: signing anything else produces a 402 nobody understands.
+        now: injectable clock (epoch in seconds), for tests.
 
     Raises:
-        `PartnerSigningError` ante cualquier fallo — el extra sin instalar, un
-        firmante que levanta, un KMS caído, una firma que no es hex. **Nunca se
-        devuelve un diccionario a medias**: seguir sin firma es exactamente el
-        camino que termina gastando USDC en silencio.
+        `PartnerSigningError` on any failure — the extra not installed, a signer
+        that raises, a KMS that is down, a signature that is not hex. **A
+        half-built dictionary is never returned**: carrying on without a signature
+        is exactly the path that ends up spending USDC silently.
     """
     try:
         # El import va acá adentro y no arriba, igual que en el gate del
@@ -221,9 +226,10 @@ def sign_partner_headers(
         # equivocado es peor que ninguno, porque el que lo lee ejecuta la
         # receta, sigue en rojo y no busca más.
         raise PartnerSigningError(
-            "el riel de partner necesita `uvd-x402-sdk` (es quien sabe firmar "
-            "ERC-8128) y no está instalado: `pip install uvd-describe-sdk[partner]`. "
-            "NO se pidió nada y NO se gastó nada.",
+            "the partner rail needs `uvd-x402-sdk` (it is the one that knows how "
+            "to sign ERC-8128) and it is not installed: "
+            "`pip install uvd-describe-sdk[partner]`. NOTHING was requested and "
+            "NOTHING was spent.",
             wallet=None,
         ) from exc
 
@@ -246,9 +252,9 @@ def sign_partner_headers(
         # pagos —ni el cliente de su KMS— para escribir su `except`. Lo que NO
         # se hace nunca es seguir sin firma.
         raise PartnerSigningError(
-            f"el firmante del riel de partner falló ({type(exc).__name__}: {exc}). "
-            "NO se pidió nada y NO se gastó nada: arreglá el firmante, o construí "
-            "el cliente SIN `partner=` si de verdad querés pagar.",
+            f"the partner rail's signer failed ({type(exc).__name__}: {exc}). "
+            "NOTHING was requested and NOTHING was spent: fix the signer, or build "
+            "the client WITHOUT `partner=` if you really do want to pay.",
             wallet=wallet,
         ) from exc
 

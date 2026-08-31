@@ -1,104 +1,104 @@
-"""Los códigos de caveat, publicados como contrato — R3.
+"""The caveat codes, published as a contract — R3.
 
-**Se ramifica por `code`, JAMÁS por `text`.** No es una preferencia de estilo:
-lo declara el schema del servicio en la descripción de su propio tipo `Caveat`
-(leído vivo el 2026-08-30 en `api.describe.net/openapi.json`):
+**You branch on `code`, NEVER on `text`.** This is not a style preference: the
+service's schema declares it in the description of its own `Caveat` type (read
+live 2026-08-30 at `api.describe.net/openapi.json`):
 
     code: "Stable identifier of the trap that fired. Branch on THIS, never on
            `text`. Codes are permanent; text is not."
     text: "Spanish prose meant to be shown to whoever is deciding. May be
            rewritten, re-measured or translated without notice."
 
-Y la guía publicada agrega el porqué: un caveat es **advisory por
-construcción** — nombra un corte, no mueve un score ni un precio, y por eso no
-bumpea `policy_version` (docs.describe.net §«caveats[] — the same rules,
-already fired»).
+And the published guide adds the why: a caveat is **advisory by construction** —
+it names a cut, it moves neither a score nor a price, and that is why it does not
+bump `policy_version` (docs.describe.net §"caveats[] — the same rules, already
+fired").
 
-Se exportan acá para que el consumidor **no los tipee**. Un `if c.code ==
-"burn-adress"` con un typo no falla: simplemente nunca entra, y el caso que el
-código creía cubrir queda descubierto en silencio. Esa es la clase de bug que
-una constante importada mata.
-
-────────────────────────────────────────────────────────────────────────────
-🔴 POR QUÉ ESTO **NO** ES UN `Enum`, Y ES LA DECISIÓN QUE MÁS IMPORTA ACÁ
-────────────────────────────────────────────────────────────────────────────
-`Caveat.code` se tipa `str`, no `CaveatCode`. Un `Enum` cerrado haría que el
-día que describe agregue un código nuevo, el SDK **rompa o lo descarte** — y
-descartar un caveat es descartar la advertencia, que es literalmente lo
-contrario de para qué existe el campo.
-
-El precedente es medido y es del propio servicio: `Facet.direction` viajaba en
-la respuesta y FastAPI lo descartaba en silencio por no estar declarado — HTTP
-200, forma correcta, dato ausente (regla 5 de `F0-describe-sdk.md:206-211`). Un
-`Enum` acá reproduce ese bug del lado del cliente.
-
-Entonces el contrato es de dos piezas:
-  * `CaveatCode.*` — las ocho constantes, para no tipear strings a mano.
-  * `KNOWN_CAVEAT_CODES` — el set congelado, para PREGUNTAR si un código es
-    conocido. Uno desconocido no es un error: es un caveat nuevo que igual hay
-    que mostrar.
+They are exported here so the consumer **does not type them**. An `if c.code ==
+"burn-adress"` with a typo does not fail: it simply never matches, and the case
+the code believed it covered is left silently uncovered. That is the class of bug
+an imported constant kills.
 
 ────────────────────────────────────────────────────────────────────────────
-LAS OCHO, Y DÓNDE ESTÁ EL SET COMPLETO
+🔴 WHY THIS IS **NOT** AN `Enum`, AND IT IS THE DECISION THAT MATTERS MOST HERE
 ────────────────────────────────────────────────────────────────────────────
-Copiadas de docs.describe.net (leído el 2026-08-30), que dice: *«The eight
-codes are the whole set, and it is frozen by a test — adding or renaming one is
-deliberately red»*. O sea: el set vive del lado del servicio y allá hay un test
-que lo congela. Acá se refleja, con su fecha, y `test_caveats.py` compara este
-espejo contra el conteo declarado para que una copia a medias se ponga roja.
+`Caveat.code` is typed `str`, not `CaveatCode`. A closed `Enum` would mean that
+the day describe adds a new code, the SDK **breaks or discards it** — and
+discarding a caveat is discarding the warning, which is literally the opposite of
+what the field exists for.
+
+The precedent is measured and belongs to the service itself: `Facet.direction`
+travelled in the response and FastAPI silently discarded it for not being declared
+— HTTP 200, correct shape, missing data (rule 5 of
+`F0-describe-sdk.md:206-211`). An `Enum` here reproduces that bug on the client
+side.
+
+So the contract has two pieces:
+  * `CaveatCode.*` — the eight constants, so strings are not typed by hand.
+  * `KNOWN_CAVEAT_CODES` — the frozen set, to ASK whether a code is known. An
+    unknown one is not an error: it is a new caveat that still has to be shown.
+
+────────────────────────────────────────────────────────────────────────────
+THE EIGHT, AND WHERE THE COMPLETE SET LIVES
+────────────────────────────────────────────────────────────────────────────
+Copied from docs.describe.net (read 2026-08-30), which says: *"The eight codes are
+the whole set, and it is frozen by a test — adding or renaming one is deliberately
+red"*. That is: the set lives on the service's side and there is a test over there
+that freezes it. Here it is mirrored, with its date, and `test_caveats.py` compares
+this mirror against the declared count so a half-done copy goes red.
 """
 
 from __future__ import annotations
 
 from typing import FrozenSet
 
-#: Fecha en que este espejo se leyó de la fuente. Toda cifra o se lee viva o
-#: lleva fecha (regla de la casa) — y un set de códigos es una cifra.
+#: The date this mirror was read from the source. Every figure is either read live
+#: or carries a date (house rule) — and a set of codes is a figure.
 CAVEAT_CODES_MEASURED_AT = "2026-08-30"
 
 
 class CaveatCode:
-    """Las ocho constantes. Contenedor de strings, **no** un Enum (ver módulo).
+    """The eight constants. A string container, **not** an Enum (see the module).
 
-    No se instancia: es un namespace para que el import sea explícito y el
-    autocompletado los ofrezca.
+    It is not instantiated: it is a namespace so the import is explicit and
+    autocompletion offers them.
     """
 
-    #: No hay score que leer. **null, nunca cero** — invariante 7 del servicio.
+    #: There is no score to read. **null, never zero** — the service's invariant 7.
     NO_SCORE = "no-score"
 
-    #: `concentration` volvió `null`: la señal está caída, no ausente. La
-    #: diferencia importa — «no lo pude medir» no es «no está concentrado».
+    #: `concentration` came back `null`: the signal is down, not absent. The
+    #: difference matters — "I could not measure it" is not "it is not
+    #: concentrated".
     CONCENTRATION_DEGRADED = "concentration-degraded"
 
-    #: Exactamente un calificador distinto.
+    #: Exactly one distinct rater.
     SINGLE_RATER = "single-rater"
 
-    #: Por debajo de `reading_policy.min_raters` (vivo el 2026-08-30: 3, leído
-    #: de `GET /health` — nunca se tipea acá, ver `IndexHealth.reading_policy`).
+    #: Below `reading_policy.min_raters` (live on 2026-08-30: 3, read from
+    #: `GET /health` — it is never typed here, see `IndexHealth.reading_policy`).
     FEW_RATERS = "few-raters"
 
-    #: En o por encima de `reading_policy.top_share`.
+    #: At or above `reading_policy.top_share`.
     TOP_CLIENT_SHARE = "top-client-share"
 
-    #: En o por encima de `reading_policy.campaign_per_rater` ratings por
-    #: calificador.
+    #: At or above `reading_policy.campaign_per_rater` ratings per rater.
     CAMPAIGN_PER_RATER = "campaign-per-rater"
 
-    #: El sujeto se calificó a sí mismo. El gap se publica, no se juzga.
+    #: The subject rated itself. The gap is published, not judged.
     SELF_RATED = "self-rated"
 
-    #: El sujeto es una dirección de quema conocida: calificaciones on-chain
-    #: reales sobre algo que nadie controla. Es el ÚNICO que hoy dispara en la
-    #: puerta gratis `GET /wallets/{w}/chains`.
+    #: The subject is a known burn address: real on-chain ratings about something
+    #: nobody controls. It is the ONLY one that fires today at the free door
+    #: `GET /wallets/{w}/chains`.
     BURN_ADDRESS = "burn-address"
 
     def __init__(self) -> None:  # pragma: no cover - defensa, no lógica
-        raise TypeError("CaveatCode es un namespace de constantes, no se instancia")
+        raise TypeError("CaveatCode is a namespace of constants, it is not instantiated")
 
 
-#: El set congelado. Se PREGUNTA, no se valida contra él: un código fuera de
-#: acá es un caveat nuevo del servicio, y hay que mostrarlo igual.
+#: The frozen set. It is ASKED, not validated against: a code outside it is a new
+#: caveat from the service, and it has to be shown anyway.
 KNOWN_CAVEAT_CODES: FrozenSet[str] = frozenset(
     {
         CaveatCode.NO_SCORE,
@@ -112,19 +112,18 @@ KNOWN_CAVEAT_CODES: FrozenSet[str] = frozenset(
     }
 )
 
-#: Subconjunto que la puerta GRATIS puede disparar. La guía publicada avisa que
-#: en `GET /wallets/{w}/chains` la lista es un SUBSET —hoy sólo
-#: `burn-address`— y que **una lista vacía ahí no promete que la
-#: descomposición paga esté limpia**. Se publica para que nadie lea el silencio
-#: del preview como un veredicto.
+#: The subset the FREE door can fire. The published guide warns that on
+#: `GET /wallets/{w}/chains` the list is a SUBSET — today only `burn-address` —
+#: and that **an empty list there does not promise the metered breakdown is
+#: clean**. It is published so nobody reads the preview's silence as a verdict.
 FREE_GATE_CAVEAT_CODES: FrozenSet[str] = frozenset({CaveatCode.BURN_ADDRESS})
 
 
 def is_known(code: str) -> bool:
-    """¿Este código estaba en el set del `CAVEAT_CODES_MEASURED_AT`?
+    """Was this code in the set as of `CAVEAT_CODES_MEASURED_AT`?
 
-    `False` **no** significa inválido: significa «más nuevo que este SDK».
-    Mostralo igual; lo que no se puede hacer es ramificar lógica sobre él sin
-    saber qué corte nombra.
+    `False` does **not** mean invalid: it means "newer than this SDK". Show it
+    anyway; what you cannot do is branch logic on it without knowing which cut it
+    names.
     """
     return code in KNOWN_CAVEAT_CODES

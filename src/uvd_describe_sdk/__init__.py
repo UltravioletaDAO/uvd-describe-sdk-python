@@ -1,57 +1,57 @@
-"""uvd-describe-sdk — el cliente Python del índice de reputación ERC-8004 de describe.
+"""uvd-describe-sdk — the Python client of describe's ERC-8004 reputation index.
 
     pip install uvd-describe-sdk
 
     from uvd_describe_sdk import DescribeClient, format_score
 
-    with DescribeClient(product="mi-app") as describe:
+    with DescribeClient(product="my-app") as describe:
         rep = describe.wallet("0x97cd97cfe21799bacbf39d0a53469e5f82f30996")
         if rep is None:
-            print("el índice no contestó")          # NO es «sin reputación»
+            print("the index did not answer")        # NOT "no reputation"
         elif not rep.has_identity:
-            print("no registrada")
+            print("not registered")
         else:
             print(format_score(rep.global_score), "·", rep.policy_version)
 
 ════════════════════════════════════════════════════════════════════════════
-LAS TRES COSAS QUE HAY QUE SABER ANTES DE USARLO
+THE THREE THINGS TO KNOW BEFORE USING IT
 ════════════════════════════════════════════════════════════════════════════
-1. **`None` nunca es cero, y nunca es «no tiene reputación».** Un método que
-   devuelve `None` está diciendo *no hubo respuesta*. Una wallet sin
-   calificaciones vuelve como un objeto con `global_score is None`. Son hechos
-   distintos y el tipo los mantiene distintos. (`models.py` §R1)
+1. **`None` is never zero, and never "has no reputation".** A method returning
+   `None` is saying *there was no answer*. A wallet with no ratings comes back as
+   an object with `global_score is None`. They are different facts and the type
+   keeps them different. (`models.py` §R1)
 
-2. **Ningún método devuelve un número pelado.** Todo resultado trae
-   `policy_version`, `caveats[]` y su fuente. Si querés sólo el número lo sacás
-   del objeto a mano — y eso es a propósito: *un score sin sus calificadores es
-   un rumor*, y sacarlo deja escrito en tu código que decidiste tirar el
-   contexto. (`models.py` §R2)
+2. **No method returns a bare number.** Every result carries `policy_version`,
+   `caveats[]` and its source. If you only want the number you take it off the
+   object by hand — and that is on purpose: *a score without its raters is a
+   rumour*, and taking it out leaves written in your code that you decided to
+   throw the context away. (`models.py` §R2)
 
-3. **Se ramifica por `caveats[].code`, jamás por `caveats[].text`.** El texto
-   puede reescribirse sin aviso; el código no cambia nunca. Los ocho están
-   exportados en `CaveatCode` para que no los tipees. (`caveats.py` §R3)
-
-════════════════════════════════════════════════════════════════════════════
-LO QUE ESTE SDK NO HACE
-════════════════════════════════════════════════════════════════════════════
-No firma nada. No custodia una clave. No implementa EIP-3009. El pago x402 lo
-resuelve `uvd-x402-sdk`, que es un **extra** opcional
-(`pip install uvd-describe-sdk[x402]`) y sólo hace falta para las dos rutas
-medidas. El camino gratis no arrastra una sola dependencia de criptografía.
-
-Tampoco escribe en ninguna cadena, ni emite calificaciones: es un LECTOR.
+3. **You branch on `caveats[].code`, never on `caveats[].text`.** The text may be
+   rewritten without notice; the code never changes. All eight are exported in
+   `CaveatCode` so you do not type them. (`caveats.py` §R3)
 
 ════════════════════════════════════════════════════════════════════════════
-EL RIEL DE PARTNER — SI DESCRIBE DIO DE ALTA TU WALLET, LAS MEDIDAS SON $0
+WHAT THIS SDK DOES NOT DO
 ════════════════════════════════════════════════════════════════════════════
-    from uvd_x402_sdk.wallet import EnvKeyAdapter    # lee WALLET_PRIVATE_KEY
+It signs nothing. It custodies no key. It does not implement EIP-3009. The x402
+payment is resolved by `uvd-x402-sdk`, which is an optional **extra**
+(`pip install uvd-describe-sdk[x402]`) and is only needed for the two metered
+routes. The free path drags in not a single cryptography dependency.
+
+Nor does it write to any chain, or issue ratings: it is a READER.
+
+════════════════════════════════════════════════════════════════════════════
+THE PARTNER RAIL — IF DESCRIBE ALLOWLISTED YOUR WALLET, THE METERED ONES ARE $0
+════════════════════════════════════════════════════════════════════════════
+    from uvd_x402_sdk.wallet import EnvKeyAdapter    # reads WALLET_PRIVATE_KEY
     with DescribeClient(product="meshrelay", partner=EnvKeyAdapter()) as d:
-        b = d.wallet_breakdown("0x97cd…0996")        # $0,01 para un tercero
+        b = d.wallet_breakdown("0x97cd…0996")        # $0.01 for a third party
 
-Firma ERC-8128, no un token: describe guarda tu DIRECCIÓN pública, nunca un
-secreto tuyo. 🔴 **Este SDK sigue sin tocar tu clave** — `partner=` recibe un
-objeto que firma. Y si el riel se rompe, el cliente **levanta**
-(`PartnerRejectedError`) en vez de pagar en silencio. Ver `partner.py`.
+It signs ERC-8128, not a token: describe stores your PUBLIC ADDRESS, never a
+secret of yours. 🔴 **This SDK still does not touch your key** — `partner=`
+receives an object that signs. And if the rail breaks, the client **raises**
+(`PartnerRejectedError`) instead of paying silently. See `partner.py`.
 """
 
 from __future__ import annotations
@@ -120,18 +120,18 @@ from .payment import TREASURY_EVM, Payer, build_payment_header, chain_name_for
 from .version import USER_AGENT_NAME, __version__, default_user_agent
 
 __all__ = [
-    # cliente
+    # client
     "DescribeClient",
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT_S",
     "DEFAULT_PAY_NETWORK",
-    # jitter — aporte de KarmaKadabra (27 agentes), PRENDIDO por default
+    # jitter — contributed by KarmaKadabra (27 agents), ON by default
     "DEFAULT_JITTER_S",
     "ErrorObserver",
     # display (R8)
     "format_score",
     "NO_SCORE_PLACEHOLDER",
-    # badge — la superficie copy-paste, sin red
+    # badge — the copy-paste surface, no network
     "badge_url",
     "badge_img_tag",
     # caveats (R3)
@@ -140,20 +140,20 @@ __all__ = [
     "FREE_GATE_CAVEAT_CODES",
     "CAVEAT_CODES_MEASURED_AT",
     "is_known",
-    # errores (R4)
+    # errors (R4)
     "DescribeError",
     "DescribeTimeout",
     "DescribeHTTPError",
     "DescribeUnreachable",
     "DescribeUnparseable",
-    # 🔴 NUNCA se levanta: viaja por `on_error`. Ver su docstring.
+    # 🔴 NEVER raised: it travels through `on_error`. See its docstring.
     "DescribeMalformedHash",
     "PaymentRequiredError",
     "DoNotPayError",
     "PartnerSigningError",
     "PartnerRejectedError",
     "HTTP_5XX_LEGACY_KIND",
-    # modelos
+    # models
     "WalletReputation",
     "ChainReputation",
     "Breakdown",
@@ -173,22 +173,22 @@ __all__ = [
     "Ownership",
     "Rating",
     "PaymentReceipt",
-    # validación de forma de los hashes — aporte de KarmaKadabra
+    # hash shape validation — contributed by KarmaKadabra
     "looks_like_onchain_id",
     "looks_like_settlement_receipt",
     "malformed_hash_report",
-    # pago (R6)
+    # payment (R6)
     "Payer",
     "TREASURY_EVM",
     "build_payment_header",
     "chain_name_for",
-    # riel de partner — firma ERC-8128, CERO claves en este SDK
+    # partner rail — ERC-8128 signing, ZERO keys in this SDK
     "PartnerSigner",
     "PartnerSignature",
     "PARTNER_CHAIN_ID",
     "PARTNER_AUTHORITY",
     "sign_partner_headers",
-    # versión / atribución
+    # version / attribution
     "__version__",
     "USER_AGENT_NAME",
     "default_user_agent",

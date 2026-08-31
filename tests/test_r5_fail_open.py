@@ -144,7 +144,7 @@ def test_sin_on_error_igual_loguea_en_warning(make_client, caplog) -> None:
     mensaje = " ".join(r.getMessage() for r in caplog.records)
     # El mensaje tiene que decir explícitamente que None no es «sin reputación»:
     # es lo que va a leer el que abra el log a las 3 AM.
-    assert "sin reputación" in mensaje
+    assert "no reputation" in mensaje
 
 
 def test_el_caso_legitimo_no_produce_ninguna_observacion(make_client) -> None:

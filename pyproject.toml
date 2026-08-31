@@ -9,7 +9,7 @@ name = "uvd-describe-sdk"
 # superficies se bumpea en una sola: es la regla de configuracion centralizada
 # de la casa, aplicada al caso mas barato de contraer.
 dynamic = ["version"]
-description = "Cliente Python del indice de reputacion ERC-8004 de describe (api.describe.net): null nunca cero, todo resultado con su policy_version y sus caveats, pago x402 delegado al uvd-x402-sdk"
+description = "Python client of describe's ERC-8004 reputation index (api.describe.net): null is never zero, every result carries its policy_version and caveats, x402 payment delegated to uvd-x402-sdk"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

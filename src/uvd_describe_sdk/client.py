@@ -1,203 +1,212 @@
-"""`DescribeClient` — el cliente sincrónico. Acá viven R4, R5 y R7.
+"""`DescribeClient` — the synchronous client. R4, R5 and R7 live here.
 
-Sincrónico a propósito: los tres consumidores medidos del ecosistema que leen
-esta API lo son o lo pueden ser sin dolor, y una API async duplicada es la vía
-más corta a que las dos ramas diverjan. (La única excepción real está
-declarada como riesgo en el README: el cliente de Execution Market es `async` y
-para adoptarlo tendría que envolver esto en un thread. Es una pregunta abierta,
-no un descuido.)
-
-════════════════════════════════════════════════════════════════════════════
-🔴 R5 — EL FAIL-OPEN, Y POR QUÉ ES LO MÁS FÁCIL DE HACER MAL
-════════════════════════════════════════════════════════════════════════════
-Saul lo pidió textual el 2026-08-28: *«pon un fallback si es que describe está
-caído»*. El default es `fail_open=True`.
-
-Pero un fail-open ingenuo **rompe R1**. Mirá la trampa de frente:
-
-    wallet() devuelve None  ──> ¿«describe está caído»?
-                           └──> ¿o «esta wallet no tiene reputación»?
-
-Si las dos cosas devolvieran lo mismo y nada más, el fail-open habría fabricado
-exactamente la confusión que R1 existe para impedir — y no es hipotética: le
-costó un reporte equivocado a KarmaKadabra el 2026-08-28, en el gate que decide
-con quién se comercia.
-
-**Cómo se resuelve acá, con dos mecanismos y no con un comentario:**
-
-1. **La distinción vive en el TIPO, no en el valor.** Una wallet que el índice
-   sí pudo leer vuelve como un `WalletReputation` — aunque no tenga ni una
-   calificación, aunque no esté registrada. `None` significa **una sola cosa**:
-   *no hubo respuesta*. Nunca *no hay reputación*.
-
-       resultado is None                      → no se pudo leer
-       resultado.has_identity is False        → no registrada
-       resultado.global_score is None         → registrada, sin calificar
-
-2. **Ningún `None` sale sin ser observado.** Todo camino que devuelve `None`
-   pasa antes por `_observe()`, que llama a `on_error` y loguea en WARNING. Un
-   fail-open silencioso convierte «describe está caído» en «esta wallet no
-   tiene reputación» **en los logs**, que es donde se investiga. Por eso el
-   default no es «no hacer nada»: es loguear.
-   `tests/test_r5_fail_open.py` lo ata, y su test discriminante monta el estado
-   BUENO —una wallet real sin calificaciones— para exigir objeto y CERO
-   observaciones: sin él, «sin ratings ⇒ devolvé None» pasaría en verde.
-
-**Lo que el fail-open NO tapa nunca:** `PaymentRequiredError` y `DoNotPayError`.
-El fail-open es para la DISPONIBILIDAD del índice, no para la configuración de
-quien llama ni para un desvío de fondos.
+Synchronous on purpose: the three measured consumers of this API in the ecosystem
+either are synchronous or can be without pain, and a duplicated async API is the
+shortest path to the two branches diverging. (The one real exception is declared
+as a risk in the README: Execution Market's client is `async` and to adopt this
+it would have to wrap it in a thread. That is an open question, not an
+oversight.)
 
 ════════════════════════════════════════════════════════════════════════════
-QUÉ MÉTODO ES «NULLABLE» — LA LÍNEA ES SI HUBO DINERO DE POR MEDIO
+🔴 R5 — THE FAIL-OPEN, AND WHY IT IS THE EASIEST THING TO GET WRONG
 ════════════════════════════════════════════════════════════════════════════
-**R5 corregida, 2026-08-30. Es canon del contrato núcleo y los dos SDK
-—Python y TypeScript— la implementan IGUAL.**
+Saul asked for it verbatim on 2026-08-28: *«pon un fallback si es que describe
+está caído»* — [in English] "put a fallback in if describe is down". The default
+is `fail_open=True`.
 
-    RUTAS GRATIS      wallet() · leaderboard() · health()
-                      Ante un fallo DE SERVICIO (timeout, unreachable, 5xx,
-                      cuerpo ilegible) con `fail_open=True` devuelven `None`,
-                      SIEMPRE observado (`on_error` + WARNING).
-                      🔴 Nunca `[]`. Una lista vacía se lee como «el índice
-                      está vacío», que es una afirmación FALSA sobre el mundo.
-                      `None` se lee como «no pude preguntar».
+But a naive fail-open **breaks R1**. Look the trap in the face:
 
-    RUTAS PAGAS       wallet_breakdown() · agent()
-                      LEVANTAN SIEMPRE. Incluso con `fail_open=True` explícito.
+    wallet() returns None  ──> is it "describe is down"?
+                          └──> or "this wallet has no reputation"?
 
-**Por qué las pagas no, y la razón es dinero y no simetría:** entre firmar el
-sobre x402 y recibir la respuesta hay una ventana en la que el USDC ya se
-movió. Devolver `None` ahí le oculta al llamador que gastó — es una credencial
-gastada sin recibo, y nada distingue «pagué y se cayó» de «no había nada que
-traer». Un fallo ruidoso después de pagar es recuperable (se reintenta, se
-registra, se reclama); un `None` silencioso no lo es. Por eso no es una
-preferencia del llamador sino una **propiedad del método**: un flag de
-disponibilidad no puede comprar el derecho a tragar un recibo. Y para que
-«ruidoso» sea además informativo, la excepción del tramo pagado sale marcada
-con `payment_sent=True` (ver `errors.py`).
+If both things returned the same value and nothing else, the fail-open would have
+manufactured exactly the confusion R1 exists to prevent — and it is not
+hypothetical: it cost KarmaKadabra a wrong report on 2026-08-28, in the gate that
+decides who to trade with.
 
-**Por qué las gratis sí, y no sólo `wallet()`:** `leaderboard()` y `health()`
-son gratis. Un fallo ruidoso ahí obliga a cada consumidor a escribir su propio
-`try/except` para algo que el SDK ya sabe hacer — que es justo la duplicación
-que este SDK viene a borrar.
+**How it is solved here, with two mechanisms and not with a comment:**
 
-🔴 **EL MODO PARTNER NO MUEVE ESTA LÍNEA NI UN MILÍMETRO** (2026-08-30). Que
-`wallet_breakdown()` te salga gratis por el riel no la convierte en una ruta
-gratis: sigue LEVANTANDO ante cualquier fallo, con `fail_open=True` explícito
-incluido. El criterio nunca fue el precio que pagaste sino **si hubo dinero de
-por medio**, y con `payer=` configurado un riel roto lo hay — por eso el riel
-roto también levanta (`PartnerRejectedError`) en vez de dejarte pagar. Un
-partner es alguien que gasta $0 mientras el riel aguante, no alguien con un
-contrato distinto: las dos rutas medidas están en el mismo lugar de la tabla
-antes y después de este cambio, y `test_partner_riel_gratis.py` lo afirma
-corriendo los mismos casos de R5 con un partner puesto.
+1. **The distinction lives in the TYPE, not in the value.** A wallet the index
+   really could read comes back as a `WalletReputation` — even with not a single
+   rating, even if it is not registered. `None` means **one single thing**: *there
+   was no answer*. Never *there is no reputation*.
+
+       result is None                      → it could not be read
+       result.has_identity is False        → not registered
+       result.global_score is None         → registered, unrated
+
+2. **No `None` leaves unobserved.** Every path that returns `None` goes through
+   `_observe()` first, which calls `on_error` and logs at WARNING. A silent
+   fail-open turns "describe is down" into "this wallet has no reputation" **in
+   the logs**, which is where you investigate. That is why the default is not "do
+   nothing": it is to log.
+   `tests/test_r5_fail_open.py` pins it, and its discriminating test mounts the
+   GOOD state — a real wallet with no ratings — to demand an object and ZERO
+   observations: without it, "no ratings ⇒ return None" would pass green.
+
+**What the fail-open never covers:** `PaymentRequiredError` and `DoNotPayError`.
+The fail-open is for the AVAILABILITY of the index, not for the caller's
+configuration nor for a diversion of funds.
+
+════════════════════════════════════════════════════════════════════════════
+WHICH METHOD IS "NULLABLE" — THE LINE IS WHETHER THERE WAS MONEY IN FLIGHT
+════════════════════════════════════════════════════════════════════════════
+**R5 corrected, 2026-08-30. It is core-contract canon and both SDKs — Python and
+TypeScript — implement it THE SAME.**
+
+    FREE ROUTES       wallet() · leaderboard() · health()
+                      On a SERVICE failure (timeout, unreachable, 5xx,
+                      unreadable body) with `fail_open=True` they return `None`,
+                      ALWAYS observed (`on_error` + WARNING).
+                      🔴 Never `[]`. An empty list reads as "the index is empty",
+                      which is a FALSE claim about the world. `None` reads as "I
+                      could not ask".
+
+    METERED ROUTES    wallet_breakdown() · agent()
+                      THEY ALWAYS RAISE. Even with an explicit `fail_open=True`.
+
+**Why the metered ones do not, and the reason is money and not symmetry:**
+between signing the x402 envelope and receiving the answer there is a window in
+which the USDC has already moved. Returning `None` there hides from the caller
+that they spent — it is a spent credential with no receipt, and nothing
+distinguishes "I paid and it fell over" from "there was nothing to fetch". A loud
+failure after paying is recoverable (you retry, you log, you claim); a silent
+`None` is not. So it is not a caller preference but a **property of the method**:
+an availability flag cannot buy the right to swallow a receipt. And so that
+"loud" is also informative, the exception from the paid stretch comes out marked
+with `payment_sent=True` (see `errors.py`).
+
+**Why the free ones do, and not just `wallet()`:** `leaderboard()` and `health()`
+are free. A loud failure there forces every consumer to write their own
+`try/except` for something the SDK already knows how to do — which is precisely
+the duplication this SDK came to erase.
+
+🔴 **PARTNER MODE DOES NOT MOVE THIS LINE ONE MILLIMETRE** (2026-08-30). That
+`wallet_breakdown()` comes out free for you over the rail does not turn it into a
+free route: it still RAISES on any failure, explicit `fail_open=True` included.
+The criterion was never the price you paid but **whether there was money in
+flight**, and with `payer=` configured a broken rail means there is — which is why
+a broken rail also raises (`PartnerRejectedError`) instead of letting you pay. A
+partner is someone who spends $0 for as long as the rail holds, not someone with
+a different contract: the two metered routes are in the same place of the table
+before and after this change, and `test_partner_riel_gratis.py` asserts it by
+running the same R5 cases with a partner configured.
 
 ────────────────────────────────────────────────────────────────────────────
-LO QUE ESTE BLOQUE DECÍA HASTA EL 2026-08-30, Y QUÉ SOBREVIVIÓ DE ESO
+WHAT THIS BLOCK SAID UNTIL 2026-08-30, AND WHAT SURVIVED OF IT
 ────────────────────────────────────────────────────────────────────────────
-Se deja escrito, no se borra: es la convención de la casa, y acá se aplica al
-propio razonamiento de este archivo.
+It is left written, not deleted: it is the house convention, and here it is
+applied to this file's own reasoning.
 
-La versión vieja decía que la tabla de tipos del contrato v0.1 marcaba `| null`
-**sólo** en `wallet()`, que se seguía «al pie de la letra», y lo defendía así:
-`wallet()` se dibuja al lado de un nombre en un perfil y ahí un hueco es un
-render degradado aceptable, mientras que *«`leaderboard()` y `health()` son
-lecturas operativas: quien pregunta por el índice entero o por su estado quiere
-saber que falló, no recibir una lista vacía que parece un índice vacío»*. Y
-marcaba el alcance de R5 como una ambigüedad REPORTADA y no resuelta acá.
+The old version said the v0.1 contract's type table marked `| null` **only** on
+`wallet()`, that this was followed "to the letter", and defended it like this:
+`wallet()` gets drawn next to a name on a profile and there a gap is an acceptable
+degraded render, whereas *"`leaderboard()` and `health()` are operational reads:
+whoever asks about the whole index or about its state wants to know that it
+failed, not to receive an empty list that looks like an empty index"*. And it
+marked the scope of R5 as a REPORTED and unresolved ambiguity.
 
-**Qué sobrevivió, y no es poco:** la segunda mitad de esa frase. «Una lista
-vacía parece un índice vacío» era correcto, se atendió, y por eso el contrato
-corregido dice explícitamente **NUNCA `[]`**. `None` no es una lista vacía y no
-se puede confundir con un índice vacío: la distinción sigue viviendo en el TIPO,
-igual que en `wallet()`.
+**What survived, and it is not little:** the second half of that sentence. "An
+empty list looks like an empty index" was correct, it was addressed, and that is
+why the corrected contract says explicitly **NEVER `[]`**. `None` is not an empty
+list and cannot be confused with an empty index: the distinction still lives in
+the TYPE, just as in `wallet()`.
 
-**Qué se cayó:** la primera mitad — «lecturas operativas» no era el criterio.
-Nombraba una intuición sobre quién pregunta, no una consecuencia medible de
-equivocarse. El criterio real es **si hubo dinero de por medio**, y eso también
-desmiente la premisa: seguir «la tabla al pie de la letra» dejaba a
-`walletBreakdown` y `agent` sin `| null` por accidente de tabla y no por
-principio — el gemelo TypeScript leyó la otra mitad del contrato (la regla R5,
-que no acotaba) y terminó haciendo **fail-open en las rutas pagas**, con
-`walletBreakdown()` devolviendo `null` tras un timeout posterior al settlement.
-Ese es el bug que esta corrección existe para hacer imposible en los dos
-lenguajes: dos lecturas razonables del mismo contrato, y una costaba plata.
+**What fell:** the first half — "operational reads" was not the criterion. It
+named an intuition about who is asking, not a measurable consequence of getting
+it wrong. The real criterion is **whether there was money in flight**, and that
+also disproves the premise: following "the table to the letter" left
+`walletBreakdown` and `agent` without `| null` by accident of the table and not by
+principle — the TypeScript twin read the other half of the contract (rule R5,
+which did not narrow it) and ended up doing **fail-open on the metered routes**,
+with `walletBreakdown()` returning `null` after a post-settlement timeout. That is
+the bug this correction exists to make impossible in both languages: two
+reasonable readings of the same contract, and one of them cost money.
 
-**Y la ambigüedad ya no está abierta:** el alcance de R5 quedó resuelto el
-2026-08-30 con la regla de arriba. No queda una pregunta para Saul acá.
-
-════════════════════════════════════════════════════════════════════════════
-R7 — 30 s de timeout, y el número está razonado (no elegido)
-════════════════════════════════════════════════════════════════════════════
-Es el único de los tres consumidores que llegó a su timeout con una medición
-detrás (`execution-market/.../client.py:19-23`, INC-2026-08-19):
-
-  * el cold start de la Lambda del proveedor midió **15,2 s**;
-  * su API Gateway corta a **29 s** — pedir más sería pedirle al aire;
-  * y 30 es **deliberadamente distinto** de los 45 s del facilitator, «so the
-    two clocks never race»: dos timeouts iguales expiran el mismo segundo y no
-    hay forma de saber cuál falló.
-
-KarmaKadabra usa 25 s con la misma medición del cold start y dejó escrito que
-su default viejo de 12 s «convertía cada arranque en frío en un ilegible».
-30 gana porque cubre el cold start con margen y no empata con nada.
+**And the ambiguity is no longer open:** the scope of R5 was resolved on
+2026-08-30 with the rule above. There is no open question for Saul here.
 
 ════════════════════════════════════════════════════════════════════════════
-🔴 EL JITTER VIENE PRENDIDO — Y ACÁ ESTÁ EL TRADE-OFF, NO UNA PREFERENCIA
+R7 — a 30 s timeout, and the number is reasoned (not picked)
 ════════════════════════════════════════════════════════════════════════════
-Aporte de **KarmaKadabra** (`#agents`, **2026-08-30**), que opera una flota de
-27 agentes. Su medición, textual:
+It is the only one of the three consumers that reached its timeout with a
+measurement behind it (`execution-market/.../client.py:19-23`, INC-2026-08-19):
 
-    «27 agentes despiertan al MISMO tiempo por EventBridge y pegan simultáneo
-    contra su límite de rps COMPARTIDO con los otros consumidores. Sin jitter,
-    un enjambre es un DDoS educado.»
+  * the provider Lambda's cold start measured **15,2 s**;
+  * their API Gateway cuts at **29 s** — asking for more would be asking thin air;
+  * and 30 is **deliberately different** from the facilitator's 45 s, "so the two
+    clocks never race": two identical timeouts expire in the same second and
+    there is no way to know which one failed.
 
-Su implementación es `random.uniform(0, 0.4)` antes de cada lectura del índice
-(`karmakadabra/lib/reputation_scan.py:120-123`). El default de acá **es ese
-mismo 0,4**, y el número se hereda con su procedencia en vez de inventarse uno
-nuevo que nadie midió.
+KarmaKadabra uses 25 s with the same cold-start measurement and left written that
+their old default of 12 s "turned every cold start into an unreadable". 30 wins
+because it covers the cold start with margin and ties with nothing.
 
-**Por qué prendido y no opt-in, que era la decisión de verdad:** los dos lados
-son reales y se pesaron.
+════════════════════════════════════════════════════════════════════════════
+🔴 JITTER SHIPS ON — AND HERE IS THE TRADE-OFF, NOT A PREFERENCE
+════════════════════════════════════════════════════════════════════════════
+Contributed by **KarmaKadabra** (`#agents`, **2026-08-30**), who run a fleet of 27
+agents. Their measurement, verbatim:
 
-    A FAVOR de apagado   Una librería que duerme sin que se lo pidan sorprende.
-                         Quien escribe un script suelto paga 0,2 s de mediana
-                         por un problema que no tiene: el jitter no le sirve de
-                         nada a un solo llamador, sólo sirve cuando hay muchos.
+    *«27 agentes despiertan al MISMO tiempo por EventBridge y pegan simultáneo
+    contra su límite de rps COMPARTIDO con los otros consumidores. Sin jitter, un
+    enjambre es un DDoS educado.»*
 
-    A FAVOR de prendido  El que escribe ese script suelto **no se entera de que
-                         el problema existe** hasta que tiene flota, y para
-                         entonces ya le pegó al límite de otro.
+    [translation] "27 agents wake at the SAME time on EventBridge and hit their
+    rps limit — SHARED with the other consumers — simultaneously. Without jitter,
+    a swarm is a polite DDoS."
 
-Lo que rompe el empate no es cuál cuesta más sino **quién paga**. El costo de
-tenerlo prendido lo paga quien eligió el default, y son 0,2 s de mediana. El
-costo de tenerlo apagado lo pagan **terceros**: el límite es compartido con los
-otros dos consumidores del ecosistema, así que un enjambre sin dispersar les
-come el presupuesto a MeshRelay y a Execution Market, que no eligieron nada. Un
-default cuyo daño cae sobre alguien que no lo eligió no es un default, es una
-trampa — y es el mismo criterio con el que R5 decide qué traga el fail-open.
+Their implementation is `random.uniform(0, 0.4)` before every read of the index
+(`karmakadabra/lib/reputation_scan.py:120-123`). The default here **is that same
+0.4**, and the number is inherited with its provenance instead of inventing a new
+one nobody measured.
 
-Apagarlo es una línea explícita y queda escrita en el código de quien la pone:
+**Why on and not opt-in, which was the real decision:** both sides are real and
+were weighed.
 
-    DescribeClient(product="mi-script", jitter=0)
+    FOR off   A library that sleeps without being asked is surprising. Whoever
+              writes a one-off script pays 0.2 s of median for a problem they do
+              not have: jitter does nothing for a single caller, it only helps
+              when there are many.
 
-**Sólo dispersa, nunca cede.** El jitter va antes de la request y NADA MÁS: no
-es un backoff. Son dos cosas distintas y confundirlas cuesta plata — el jitter
-dispersa un rebaño que todavía no pidió nada; el backoff cede ante un servicio
-que ya dijo que no. Este SDK no reintenta (ver `_paid`), así que no hay backoff
-que escribir. Y hay un lugar donde el jitter está **explícitamente prohibido**:
-el segundo tramo del baile del 402, el posterior a la firma. Dormir entre firmar
-una autorización EIP-3009 y despacharla quema ventana de settlement
-(`maxTimeoutSeconds: 120` en el challenge) a cambio de CERO dispersión — el
-rebaño ya se dispersó en el primer tramo. Ver `_request(disperse=...)`.
+    FOR on    Whoever writes that one-off script **does not find out the problem
+              exists** until they have a fleet, and by then they have already hit
+              somebody else's limit.
 
-🔴 **La aleatoriedad NO es criptográfica, y es deliberado**: esto es dispersión,
-no un secreto. `secrets` acá sería cargo cult — más lento y sin comprar nada.
+What breaks the tie is not which one costs more but **who pays**. The cost of
+having it on is paid by whoever chose the default, and it is 0.2 s of median. The
+cost of having it off is paid by **third parties**: the limit is shared with the
+other two consumers of the ecosystem, so an undispersed swarm eats the budget of
+MeshRelay and Execution Market, who chose nothing. A default whose damage lands on
+somebody who did not choose it is not a default, it is a trap — and it is the same
+criterion R5 uses to decide what the fail-open swallows.
 
-Sobre el número del rate limit: no se tipea en este SDK. La autoridad viva es la
-cabecera **`Ratelimit-Policy`** que la API manda en CADA respuesta. Medida hoy
-(2026-08-30) vale `50;w=1;burst=40`; KK citó 20 porque la documentación vieja
-decía eso y el límite se subió el 2026-08-28. Ese desfasaje es exactamente la
-razón de remitir al header en vez de copiar el número a un cuarto archivo.
+Turning it off is one explicit line and it stays written in the code of whoever
+writes it:
+
+    DescribeClient(product="my-script", jitter=0)
+
+**It only disperses, it never yields.** The jitter goes before the request and
+NOTHING ELSE: it is not a backoff. They are two different things and confusing
+them costs money — jitter disperses a herd that has not asked for anything yet;
+backoff yields to a service that has already said no. This SDK does not retry (see
+`_paid`), so there is no backoff to write. And there is one place where jitter is
+**explicitly forbidden**: the second stretch of the 402 dance, the one after the
+signature. Sleeping between signing an EIP-3009 authorization and dispatching it
+burns settlement window (`maxTimeoutSeconds: 120` in the challenge) in exchange for
+ZERO dispersion — the herd already dispersed in the first stretch. See
+`_request(disperse=...)`.
+
+🔴 **The randomness is NOT cryptographic, and that is deliberate**: this is
+dispersion, not a secret. `secrets` here would be cargo cult — slower and buying
+nothing.
+
+About the rate-limit number: it is not typed into this SDK. The live authority is
+the **`RateLimit-Policy`** header the API sends on EVERY response. Measured today
+(2026-08-30) it reads `50;w=1;burst=40`; KK quoted 20 because the old
+documentation said so and the limit was raised on 2026-08-28. That drift is
+exactly the reason for pointing at the header instead of copying the number into a
+fourth file.
 """
 
 from __future__ import annotations
@@ -243,21 +252,21 @@ from .version import default_user_agent
 
 DEFAULT_BASE_URL = "https://api.describe.net"
 
-#: R7. Ver la cabecera del módulo: 15,2 s de cold start medido, 29 s de techo
-#: del API Gateway, y distinto de los 45 s del facilitator a propósito.
+#: R7. See the module header: 15,2 s of measured cold start, a 29 s API Gateway
+#: ceiling, and different from the facilitator's 45 s on purpose.
 DEFAULT_TIMEOUT_S = 30.0
 
-#: La red por la que se paga si el llamador no dice otra. `base` es la primera
-#: de `supportedChains` en el challenge vivo (2026-08-30) y la más barata de las
-#: seis. No hay forma de adivinar dónde tiene fondos quien llama: se elige un
-#: default explícito y se documenta, en vez de probar las seis por turno —
-#: probar gastaría credenciales.
+#: The network payment goes over when the caller does not say otherwise. `base`
+#: is the first of `supportedChains` in the live challenge (2026-08-30) and the
+#: cheapest of the six. There is no way to guess where the caller holds funds: an
+#: explicit default is chosen and documented, instead of trying the six in turn —
+#: trying would spend credentials.
 DEFAULT_PAY_NETWORK = "base"
 
-#: Techo del sueño de dispersión, en SEGUNDOS. Es el valor que KarmaKadabra mide
-#: y usa en producción con 27 agentes (`reputation_scan.py:123`), heredado tal
-#: cual. Ver el bloque «EL JITTER VIENE PRENDIDO» en la cabecera del módulo para
-#: el trade-off completo; `jitter=0` lo apaga.
+#: Ceiling of the dispersion sleep, in SECONDS. It is the value KarmaKadabra
+#: measures and runs in production with 27 agents (`reputation_scan.py:123`),
+#: inherited as-is. See the "JITTER SHIPS ON" block in the module header for the
+#: full trade-off; `jitter=0` turns it off.
 DEFAULT_JITTER_S = 0.4
 
 logger = logging.getLogger("uvd_describe_sdk")
@@ -273,16 +282,16 @@ _RNG = random.Random()
 
 
 def _jitter_seconds(jitter: float) -> float:
-    """Cuánto dormir antes de una request. Puro y testeable sin dormir.
+    """How long to sleep before a request. Pure, and testable without sleeping.
 
-    `<= 0` desactiva —es el opt-out explícito— y con eso un valor negativo por
-    error tampoco puede convertirse en un `sleep` que levante.
+    `<= 0` disables it — that is the explicit opt-out — and with that a negative
+    value passed by mistake cannot turn into a `sleep` that raises either.
     """
     if jitter <= 0:
         return 0.0
     return _RNG.uniform(0.0, jitter)
 
-#: Se llama con la excepción que se está tragando. Ver `_observe`.
+#: Called with the exception being swallowed. See `_observe`.
 ErrorObserver = Callable[[DescribeError], None]
 
 #: El modelo que devuelve una ruta paga. Existe para que `_paid` sea una sola
@@ -292,21 +301,21 @@ _Parsed = TypeVar("_Parsed")
 
 
 class DescribeClient:
-    """Cliente sincrónico de describe. Config por constructor, cero globals.
+    """Synchronous describe client. Configured by constructor, zero globals.
 
-    Todo se pasa por constructor y nada se lee de una env var adentro: es lo que
-    hace que el módulo sea testeable sin entorno y embebible en cualquier
-    proceso. (La referencia de EM lo llama su «SDK-extractability contract» y
-    por eso su cliente se pudo levantar tal cual a este repo.)
+    Everything is passed through the constructor and nothing is read from an env
+    var inside: that is what makes the module testable without an environment and
+    embeddable in any process. (EM's reference calls this their "SDK-extractability
+    contract", and it is why their client could be lifted into this repo as-is.)
 
         with DescribeClient(product="karmakadabra") as describe:
             rep = describe.wallet("0x97cd…0996")
             if rep is None:
-                ...  # el índice no contestó — NO es «no tiene reputación»
+                ...  # the index did not answer — NOT "has no reputation"
             elif not rep.has_identity:
-                ...  # no está registrada
+                ...  # not registered
             elif rep.global_score is None:
-                ...  # registrada y todavía sin calificar
+                ...  # registered and not yet rated
             else:
                 print(format_score(rep.global_score), rep.policy_version)
     """
@@ -329,44 +338,44 @@ class DescribeClient:
     ) -> None:
         """
         Args:
-            product: quién consume (`"karmakadabra"`, `"meshrelay"`…). Va al
-                User-Agent. Pasalo: el rate limit es COMPARTIDO entre todos
-                los consumidores y no hay bucket por partner, así que sin
-                atribución nadie puede saber quién lo gastó. Un request anónimo
-                contra un límite compartido es free-riding. (El número vivo lo
-                manda la API en `Ratelimit-Policy` en cada respuesta; no se
-                copia acá — ver `jitter`.)
-            fail_open: default `True`. Cubre las rutas **GRATIS** —`wallet()`,
-                `leaderboard()`, `health()`— que ante un fallo de servicio
-                devuelven `None` (nunca `[]`) y siempre observado. **No cubre
-                las pagas**: `wallet_breakdown()` y `agent()` levantan aunque
-                acá se pase `True`, porque un fallo tragado después de firmar es
-                una credencial gastada sin recibo. Ver la cabecera del módulo.
-            on_error: se llama con la excepción **cada vez** que el fail-open
-                traga una. Si no se pasa, igual se loguea en WARNING. No existe
-                el modo silencioso. Por acá viaja también —sin que nada se
-                levante— el `DescribeMalformedHash` de un campo de hash que
-                llegó con basura.
-            jitter: segundos de dispersión aleatoria ANTES de cada request.
-                Default `0.4`, **prendido**, heredado de la medición de
-                KarmaKadabra con 27 agentes. `jitter=0` lo apaga. No es un
-                backoff y no se aplica al tramo posterior a la firma de un pago.
-                Ver el bloque «EL JITTER VIENE PRENDIDO» en la cabecera.
-            payer: quien firma el 402. Sólo hace falta para las rutas medidas.
-                Ver `payment.Payer`.
-            treasury: la dirección a la que se acepta pagar. Configurable para
-                un despliegue propio del índice, **no** para desactivar el
-                chequeo: si el challenge nombra otra, es `DO_NOT_PAY`.
-            partner: el firmante del **riel de partner** (`partner.PartnerSigner`).
-                Si describe dio de alta tu wallet, las rutas medidas dejan de
-                cobrarte. 🔴 Es un OBJETO que firma: este SDK no toca tu clave,
-                no la lee de una env var y no la guarda. Ver `partner.py`.
-                Con esto puesto, un 402 en una ruta medida es un **fallo del
-                riel** y se levanta `PartnerRejectedError`: **el `payer` no se
-                usa aunque esté**, porque un riel roto que paga solo es una
-                factura que aparece semanas después.
-            transport: para los tests (`httpx.MockTransport`). Es el seam que
-                permite que la suite entera corra **sin red**.
+            product: who is consuming (`"karmakadabra"`, `"meshrelay"`…). Goes
+                into the User-Agent. Pass it: the rate limit is SHARED across
+                every consumer and there is no per-partner bucket, so without
+                attribution nobody can know who spent it. An anonymous request
+                against a shared limit is free-riding. (The live number is sent by
+                the API in `RateLimit-Policy` on every response; it is not copied
+                in here — see `jitter`.)
+            fail_open: default `True`. Covers the **FREE** routes — `wallet()`,
+                `leaderboard()`, `health()` — which on a service failure return
+                `None` (never `[]`) and always observed. **It does not cover the
+                metered ones**: `wallet_breakdown()` and `agent()` raise even if
+                `True` is passed here, because a failure swallowed after signing
+                is a spent credential with no receipt. See the module header.
+            on_error: called with the exception **every time** the fail-open
+                swallows one. If it is not passed, it is still logged at WARNING.
+                There is no silent mode. The `DescribeMalformedHash` of a hash
+                field that arrived with garbage also travels through here —
+                without anything being raised.
+            jitter: seconds of random dispersion BEFORE every request. Default
+                `0.4`, **on**, inherited from KarmaKadabra's measurement with 27
+                agents. `jitter=0` turns it off. It is not a backoff and it is not
+                applied to the stretch after a payment signature. See the "JITTER
+                SHIPS ON" block in the header.
+            payer: whoever signs the 402. Only needed for the metered routes. See
+                `payment.Payer`.
+            treasury: the address payment is accepted to. Configurable for your
+                own deployment of the index, **not** to disable the check: if the
+                challenge names another one, it is `DO_NOT_PAY`.
+            partner: the signer of the **partner rail** (`partner.PartnerSigner`).
+                If describe allowlisted your wallet, the metered routes stop
+                charging you. 🔴 It is an OBJECT that signs: this SDK does not
+                touch your key, does not read it from an env var and does not
+                store it. See `partner.py`. With this set, a 402 on a metered
+                route is a **rail failure** and `PartnerRejectedError` is raised:
+                **the `payer` is not used even if it is there**, because a broken
+                rail that pays on its own is an invoice that shows up weeks later.
+            transport: for the tests (`httpx.MockTransport`). It is the seam that
+                lets the whole suite run **without network**.
         """
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -399,19 +408,20 @@ class DescribeClient:
 
     @property
     def user_agent(self) -> str:
-        """El UA efectivo. Se publica para poder afirmarlo en un test en vez de
-        confiar en que se armó bien."""
+        """The effective UA. Published so a test can assert it instead of
+        trusting that it was assembled correctly."""
         return self._user_agent
 
     @property
     def is_partner(self) -> bool:
-        """¿Este cliente va a firmar las rutas medidas como partner?
+        """Will this client sign the metered routes as a partner?
 
-        Dice si hay firmante CONFIGURADO, no si describe te va a eximir — eso
-        lo decide la allowlist del servicio y sólo se sabe pidiendo. Sirve para
-        que un arranque pueda afirmar «salgo con riel» en vez de descubrirlo
-        con la factura. No llama al firmante: un `get_address()` puede ser una
-        ida a un KMS y una propiedad no debería costar una request.
+        It says whether a signer is CONFIGURED, not whether describe will exempt
+        you — that is decided by the service's allowlist and is only knowable by
+        asking. It exists so a startup path can assert "I am going out on the
+        rail" instead of finding out from the invoice. It does not call the
+        signer: a `get_address()` may be a round trip to a KMS, and a property
+        should not cost a request.
         """
         return self._partner is not None
 
@@ -420,15 +430,15 @@ class DescribeClient:
     # ------------------------------------------------------------------
 
     def _observe(self, exc: DescribeError, context: str) -> None:
-        """Todo `None` que devuelve este cliente pasa por acá primero.
+        """Every `None` this client returns goes through here first.
 
-        Es el mecanismo que hace que el fail-open sea **observable**. Si el
-        observador de quien llama explota, se loguea y se sigue: un callback
-        roto no puede convertir una degradación prevista en un crash.
+        It is the mechanism that makes the fail-open **observable**. If the
+        caller's observer blows up, it is logged and we carry on: a broken
+        callback cannot turn a planned degradation into a crash.
         """
         logger.warning(
-            "describe no contestó (%s en %s): %s — se devuelve None, "
-            "que NO significa «sin reputación»",
+            "describe did not answer (%s at %s): %s — returning None, "
+            "which does NOT mean «no reputation»",
             exc.kind,
             context,
             exc,
@@ -437,60 +447,64 @@ class DescribeClient:
             try:
                 self._on_error(exc)
             except Exception:  # noqa: BLE001
-                logger.exception("el on_error de quien llama levantó una excepción")
+                logger.exception("the caller's on_error raised an exception")
 
     def _notify(self, exc: DescribeError) -> None:
-        """Avisar sin el texto del fail-open. Mismo canal, otro hecho.
+        """Announce without the fail-open text. Same channel, different fact.
 
-        `_observe` cierra su mensaje con «se devuelve None, que NO significa sin
-        reputación», y eso acá sería mentira: la respuesta llegó y se devuelve
-        entera. Compartir el canal (que es lo que pedía KK: *«el contrato debería
-        decirlo»*, y por el canal donde el consumidor ya está mirando) no es
-        compartir el mensaje — un aviso que describe mal lo que pasó manda a
-        investigar al lugar equivocado, que es la falla que este repo persigue.
+        `_observe` closes its message with "returning None, which does NOT mean no
+        reputation", and here that would be a lie: the answer arrived and is
+        returned whole. Sharing the channel (which is what KK asked for: *«el
+        contrato debería decirlo»* — "the contract should say so" — and down the
+        channel the consumer is already watching) is not sharing the message: a
+        notice that mis-describes what happened sends you to investigate the wrong
+        place, which is the failure this repo hunts.
         """
         logger.warning("describe: %s", exc)
         if self._on_error is not None:
             try:
                 self._on_error(exc)
             except Exception:  # noqa: BLE001
-                logger.exception("el on_error de quien llama levantó una excepción")
+                logger.exception("the caller's on_error raised an exception")
 
     def _check_hashes(self, resultado: Any, path: str) -> None:
-        """Observar los campos de hash que llegaron con basura. **No levanta.**
+        """Observe the hash fields that arrived with garbage. **It never raises.**
 
-        Aporte de **KarmaKadabra** (`#agents`, 2026-08-30): *«Un 200 que no hizo
-        la cosa es peor que un 503, porque el cliente lo toma por bueno: si
+        Contributed by **KarmaKadabra** (`#agents`, 2026-08-30): *«Un 200 que no
+        hizo la cosa es peor que un 503, porque el cliente lo toma por bueno: si
         nosotros no chequeáramos el tx, habríamos contado 14 ratings que no
-        existen.»*
+        existen.»* — [in English] "A 200 that did not do the thing is worse than a
+        503, because the client takes it for good: if we did not check the tx, we
+        would have counted 14 ratings that do not exist."
 
-        Las tres salidas posibles se pesaron y ésta es la única que no reproduce
-        el bug o lo empeora:
+        The three possible outcomes were weighed and this is the only one that
+        does not reproduce the bug or make it worse:
 
-          * **levantar** — un `tx_hash` podrido tumbaría una descomposición
-            entera que por lo demás llegó bien, y encima YA PAGADA. Romper por un
-            campo accesorio es peor que el bug que se está cazando.
-          * **anular en silencio** — es exactamente lo que mordió a KK: el
-            consumidor lo toma por bueno y cuenta ratings que no existen.
-          * **dejar pasar el valor con una marca** — el camino por defecto, que
-            es el que nadie revisa, sigue armando links a un explorador con
-            basura. Marcar algo que igual se entrega no protege a nadie.
+          * **raise** — a rotten `tx_hash` would take down a whole breakdown that
+            otherwise arrived fine, and one that was ALREADY PAID FOR. Breaking
+            over an accessory field is worse than the bug being hunted.
+          * **null it silently** — that is exactly what bit KK: the consumer takes
+            it for good and counts ratings that do not exist.
+          * **let the value through with a mark** — the default path, which is the
+            one nobody reviews, keeps building explorer links out of garbage.
+            Marking something you hand over anyway protects nobody.
 
-        Así que: el campo tipado queda en `None`, el crudo sobrevive en `raw`, y
-        el hecho sale por `on_error` + WARNING, que es donde el consumidor ya
-        está mirando. Nada se levanta.
+        So: the typed field is left `None`, the raw one survives in `raw`, and the
+        fact goes out through `on_error` + WARNING, which is where the consumer is
+        already watching. Nothing is raised.
         """
         fields = malformed_hash_report(resultado)
         if not fields:
             return
         self._notify(
             DescribeMalformedHash(
-                f"GET {path} trajo {len(fields)} campo(s) de hash con algo que NO "
-                f"tiene forma de identificador on-chain: {', '.join(fields)}. Esos "
-                "campos quedaron en None (el valor crudo sigue en `.raw`) y el "
-                "RESTO de la respuesta es válido y se devuelve entero. 🔴 No los "
-                "cuentes como transacciones ni armes un link de explorador con "
-                "ellos: un 200 que no hizo la cosa se toma por bueno.",
+                f"GET {path} brought {len(fields)} hash field(s) carrying something "
+                f"that is NOT shaped like an on-chain identifier: "
+                f"{', '.join(fields)}. Those fields were left None (the raw value "
+                "is still in `.raw`) and the REST of the response is valid and is "
+                "returned whole. 🔴 Do not count them as transactions and do not "
+                "build an explorer link out of them: a 200 that did not do the "
+                "thing gets taken for good.",
                 fields=fields,
             )
         )
@@ -503,15 +517,15 @@ class DescribeClient:
         headers: Optional[Dict[str, str]] = None,
         disperse: bool = True,
     ) -> httpx.Response:
-        """GET con la taxonomía tipada. **Nunca deja escapar una `httpx.*`.**
+        """GET with the typed taxonomy. **It never lets an `httpx.*` escape.**
 
-        Que ninguna excepción de la librería cruce el borde del módulo es
-        deliberado: quien llama no debería tener que importar `httpx` para
-        escribir su `except`, ni verse obligado a cambiarlo el día que este SDK
-        cambie de cliente HTTP.
+        That no exception from the library crosses the module boundary is
+        deliberate: the caller should not have to import `httpx` to write their
+        `except`, nor be forced to change it the day this SDK switches HTTP
+        client.
 
-        `disperse=False` salta el jitter. Lo usa **un solo** llamador: el tramo
-        del baile del 402 posterior a la firma. Ver la cabecera del módulo.
+        `disperse=False` skips the jitter. **Exactly one** caller uses it: the
+        stretch of the 402 dance after the signature. See the module header.
         """
         if disperse:
             espera = _jitter_seconds(self._jitter)
@@ -524,21 +538,21 @@ class DescribeClient:
             # 🔴 Tiene que ir ANTES de TransportError: `TimeoutException` es
             # subclase suya, y al revés todo timeout se reportaría como
             # «unreachable» — dos causas distintas con la misma etiqueta.
-            raise DescribeTimeout(f"GET {path} superó los {self._timeout}s") from exc
+            raise DescribeTimeout(f"GET {path} outlived the {self._timeout}s timeout") from exc
         except httpx.TransportError as exc:
-            raise DescribeUnreachable(f"GET {path} inalcanzable: {exc}") from exc
+            raise DescribeUnreachable(f"GET {path} unreachable: {exc}") from exc
 
     @staticmethod
     def _json(response: httpx.Response, path: str) -> Any:
         try:
             return response.json()
         except ValueError as exc:
-            raise DescribeUnparseable(f"GET {path} no devolvió JSON") from exc
+            raise DescribeUnparseable(f"GET {path} did not return JSON") from exc
 
     def _get_json(
         self, path: str, *, params: Optional[Dict[str, Any]] = None
     ) -> Any:
-        """Una ruta GRATIS. 4xx/5xx → `DescribeHTTPError`. R4."""
+        """A FREE route. 4xx/5xx → `DescribeHTTPError`. R4."""
         response = self._request(path, params=params)
         if response.status_code >= 400:
             raise DescribeHTTPError(
@@ -552,27 +566,28 @@ class DescribeClient:
     # ------------------------------------------------------------------
 
     def wallet(self, address: str) -> Optional[WalletReputation]:
-        """`GET /wallets/{wallet}/chains` — **GRATIS**. La puerta.
+        """`GET /wallets/{wallet}/chains` — **FREE**. The door.
 
-        Es el primer movimiento del camino feliz y no es una preferencia de
-        diseño: el propio 402 de la ruta paga lo dice en su `free_preview` —
-        *«Si no hay reputación ahí, este cobro no devuelve nada.»*
+        It is the first move of the happy path and that is not a design
+        preference: the metered route's own 402 says it in its `free_preview` —
+        *"if there is no reputation there, this charge returns nothing"*.
 
-        La dirección viaja **verbatim**, sin `lower()`: una EVM la normaliza el
-        servidor, pero un id Solana es base58 case-SENSITIVE y bajarlo a
-        minúsculas nombra otra clave, en silencio y con un 200.
+        The address travels **verbatim**, with no `lower()`: an EVM one is
+        normalised by the server, but a Solana id is case-SENSITIVE base58 and
+        lowercasing it names a different key, silently and with a 200.
 
         Returns:
-            `WalletReputation` — el índice contestó. Puede no tener identidades
-            (`has_identity is False`) o tenerlas sin calificar
-            (`global_score is None`); las dos son RESPUESTAS.
+            `WalletReputation` — the index answered. It may have no identities
+            (`has_identity is False`) or have them unrated (`global_score is
+            None`); both are ANSWERS.
 
-            `None` — **no hubo respuesta**: transporte, HTTP no-2xx, o un 404.
-            Nunca significa «no tiene reputación». Sale sólo con
-            `fail_open=True` y siempre con su observación (`on_error` + WARNING).
+            `None` — **there was no answer**: transport, a non-2xx HTTP, or a 404.
+            It never means "has no reputation". It only comes out with
+            `fail_open=True` and always with its observation (`on_error` +
+            WARNING).
 
         Raises:
-            `DescribeError` si `fail_open=False`.
+            `DescribeError` if `fail_open=False`.
         """
         path = f"/wallets/{quote(str(address), safe='')}/chains"
         try:
@@ -597,30 +612,30 @@ class DescribeClient:
             return None
 
     def leaderboard(self) -> Optional[List[LeaderboardRow]]:
-        """`GET /leaderboard` — **GRATIS**, la primera página entera.
+        """`GET /leaderboard` — **FREE**, the whole first page.
 
-        🔴 **No acepta ni un query param.** Medido el 2026-08-30:
-        `GET /leaderboard?limit=3` → **HTTP 422**, cuerpo
+        🔴 **It does not accept a single query param.** Measured 2026-08-30:
+        `GET /leaderboard?limit=3` → **HTTP 422**, body
         `{"error": "leaderboard_takes_no_params", "params": ["limit"],
-        "paged_route": "GET /leaderboard/page"}`. La paginación es otra ruta y
-        es paga ($0,01). Por eso este método no tiene argumentos: una firma con
-        `limit=` invitaría a un 422 garantizado.
+        "paged_route": "GET /leaderboard/page"}`. Paging is another route and it
+        is metered ($0.01). That is why this method takes no arguments: a
+        signature with `limit=` would invite a guaranteed 422.
 
-        ⚠️ Y el orden **no es por promedio, es por la media bayesiana**
-        (`shrunk_score`). Reordenar por `final_score` da otra lista, y parece un
-        bug del servicio.
+        ⚠️ And the ordering **is not by average, it is by the Bayesian mean**
+        (`shrunk_score`). Re-sorting by `final_score` gives a different list, and
+        it looks like a service bug.
 
         Returns:
-            `list[LeaderboardRow]` — el índice contestó. Puede venir vacía si el
-            índice de verdad no tiene filas: eso es una RESPUESTA.
+            `list[LeaderboardRow]` — the index answered. It may come back empty if
+            the index really has no rows: that is an ANSWER.
 
-            `None` — **no hubo respuesta**. 🔴 Nunca `[]` por un fallo: una lista
-            vacía afirmaría que el índice está vacío, que es una afirmación falsa
-            sobre el mundo. Sale sólo con `fail_open=True` y siempre con su
-            observación (`on_error` + WARNING).
+            `None` — **there was no answer**. 🔴 Never `[]` because of a failure:
+            an empty list would claim the index is empty, which is a false claim
+            about the world. It only comes out with `fail_open=True` and always
+            with its observation (`on_error` + WARNING).
 
         Raises:
-            `DescribeError` si `fail_open=False`.
+            `DescribeError` if `fail_open=False`.
         """
         try:
             return parse_leaderboard(self._get_json("/leaderboard"))
@@ -631,28 +646,29 @@ class DescribeClient:
             return None
 
     def health(self) -> Optional[IndexHealth]:
-        """`GET /health` — **GRATIS**. La autoridad sobre totales y políticas.
+        """`GET /health` — **FREE**. The authority on totals and policies.
 
-        Ninguna cifra del índice se tipea a mano: se lee de acá, viva. Y de acá
-        salen también los parámetros calibrables (`reading_policy`,
-        `confidence_thresholds`) que el servicio publica **justamente** para que
-        ningún consumidor los copie.
+        No figure of the index is typed by hand: it is read from here, live. And
+        the calibratable parameters (`reading_policy`, `confidence_thresholds`)
+        come from here too — the service publishes them **precisely** so that no
+        consumer copies them.
 
-        Es el endpoint gratis más lento (~1,6 s medidos por EM) y está sin
-        cachear a propósito — nunca lo sondees con un timeout de pocos segundos.
+        It is the slowest free endpoint (~1,6 s measured by EM) and it is uncached
+        on purpose — never poll it with a timeout of a few seconds.
 
         Returns:
-            `IndexHealth` — el índice contestó, incluso si contestó
-            `status != "ok"`: un índice que se declara degradado está
-            RESPONDIENDO, y esa es justo la respuesta que se le fue a pedir.
+            `IndexHealth` — the index answered, even if it answered
+            `status != "ok"`: an index that declares itself degraded is ANSWERING,
+            and that is exactly the answer you went to ask for.
 
-            `None` — **no hubo respuesta**. Nunca un objeto vacío: preguntar por
-            el estado del índice y recibir ceros sería el peor de los dos mundos,
-            porque «0 agentes» y «no sé cuántos agentes» no son el mismo hecho.
-            Sale sólo con `fail_open=True` y siempre observado.
+            `None` — **there was no answer**. Never an empty object: asking about
+            the index's state and receiving zeros would be the worst of both
+            worlds, because "0 agents" and "I do not know how many agents" are not
+            the same fact. It only comes out with `fail_open=True` and always
+            observed.
 
         Raises:
-            `DescribeError` si `fail_open=False`.
+            `DescribeError` if `fail_open=False`.
         """
         try:
             return parse_health(self._get_json("/health"))
@@ -663,10 +679,10 @@ class DescribeClient:
             return None
 
     def badge_url(self, address: str) -> str:
-        """La URL del badge SVG. **Sin red** — sólo arma el string.
+        """The SVG badge URL. **No network** — it only builds the string.
 
-        Está acá para que quede a mano en el mismo objeto, pero no toca el
-        cliente HTTP: se puede llamar sin conexión, en un render, en un loop.
+        It is here so it is at hand on the same object, but it does not touch the
+        HTTP client: it can be called offline, in a render, in a loop.
         """
         return _badge_url(address, base_url=self._base_url)
 
@@ -676,16 +692,16 @@ class DescribeClient:
 
     @staticmethod
     def _receipt(response: httpx.Response) -> PaymentReceipt:
-        """Las cabeceras de liquidación, que hasta hoy ningún cliente leía.
+        """The settlement headers, which until today no client read.
 
-        `X-Payment-Receipt` es el hash de la transacción de settlement (público,
-        sirve para conciliar) y `X-Payment-Reused: true` dice que se reusó un
-        recibo en vez de cobrar de nuevo. Verificado en el servicio:
-        `paywall.py:1059-1062` los escribe, `api.py:2226` los expone por CORS.
+        `X-Payment-Receipt` is the settlement transaction hash (public, useful for
+        reconciling) and `X-Payment-Reused: true` says a receipt was replayed
+        instead of charging again. Verified in the service:
+        `paywall.py:1059-1062` writes them, `api.py:2226` exposes them over CORS.
 
-        El recibo se valida por FORMA con su regla propia: acá `pending` es un
-        valor LEGÍTIMO que el OpenAPI declara («settlement has not reported one»)
-        y no se marca. Ver `hashes.looks_like_settlement_receipt`.
+        The receipt is shape-checked with its own rule: here `pending` is a
+        LEGITIMATE value the OpenAPI declares ("settlement has not reported one")
+        and it is not marked. See `hashes.looks_like_settlement_receipt`.
         """
         crudo = response.headers.get("X-Payment-Receipt")
         malos: List[str] = []
@@ -705,25 +721,25 @@ class DescribeClient:
     def _partner_signature(
         self, path: str, params: Optional[Dict[str, Any]]
     ) -> Optional[PartnerSignature]:
-        """La firma del riel, o `None` si este cliente no es partner.
+        """The rail's signature, or `None` if this client is not a partner.
 
-        🔴 **La URL que se firma la construye `httpx`, no nosotros.** No es
-        prolijidad: la base de firma cubre `@path` y —cuando existe— `@query`,
-        así que firmar una URL rearmada a mano y mandar otra produce una firma
-        que no verifica, un 402, y ninguna pista de por qué. Medido el
-        2026-08-30 contra el gate real: firmada sin `?snapshot=true` y pedida
-        con él ⇒ `PartnerGate.check` devuelve `None`, o sea se cobra.
-        Pasando por `build_request` las dos cadenas son la misma **por
-        construcción**: mismos argumentos, mismo normalizador, misma salida.
+        🔴 **The URL that gets signed is built by `httpx`, not by us.** That is
+        not tidiness: the signature base covers `@path` and — when there is one —
+        `@query`, so signing a hand-rebuilt URL and sending a different one
+        produces a signature that does not verify, a 402, and no clue why.
+        Measured 2026-08-30 against the real gate: signed without `?snapshot=true`
+        and requested with it ⇒ `PartnerGate.check` returns `None`, i.e. you get
+        charged. Going through `build_request`, the two strings are the same **by
+        construction**: same arguments, same normaliser, same output.
 
-        Sólo se firman las rutas MEDIDAS, y eso está medido del otro lado:
-        `authorize` devuelve `Decision(True, REASON_FREE, …)` en
-        `describe-net/describenet/paywall.py:772-777`, **antes** de mirar el
-        `partner_id` (:794). O sea que una firma en `/health` no cambia
-        absolutamente nada del resultado — y sí cuesta: con un firmante remoto
-        cada lectura gratis se comería una ida al KMS a cambio de nada.
-        (La atribución de consumo, que es lo otro que un partner debe, no sale
-        de la firma sino del User-Agent: pasá `product=`.)
+        Only the METERED routes are signed, and that is measured on the other
+        side: `authorize` returns `Decision(True, REASON_FREE, …)` at
+        `describe-net/describenet/paywall.py:772-777`, **before** it looks at
+        `partner_id` (:794). So a signature on `/health` changes absolutely
+        nothing about the outcome — and it does cost: with a remote signer every
+        free read would eat a round trip to the KMS in exchange for nothing.
+        (Consumption attribution, which is the other thing a partner owes, does
+        not come from the signature but from the User-Agent: pass `product=`.)
         """
         if self._partner is None:
             return None
@@ -734,12 +750,12 @@ class DescribeClient:
 
     @staticmethod
     def _challenge_o_none(response: httpx.Response) -> Optional[Dict[str, Any]]:
-        """El cuerpo del 402 si se puede leer, `None` si no. **No levanta.**
+        """The 402 body if it can be read, `None` otherwise. **It never raises.**
 
-        Existe para el mensaje de `PartnerRejectedError`: un 402 con un cuerpo
-        ilegible sigue siendo un riel roto, y reportarlo como
-        `DescribeUnparseable` mandaría a investigar el JSON del servicio
-        cuando lo que hay que revisar es la allowlist.
+        It exists for `PartnerRejectedError`'s message: a 402 with an unreadable
+        body is still a broken rail, and reporting it as `DescribeUnparseable`
+        would send you to investigate the service's JSON when what has to be
+        checked is the allowlist.
         """
         try:
             body = response.json()
@@ -754,34 +770,35 @@ class DescribeClient:
         *,
         params: Optional[Dict[str, Any]] = None,
     ) -> _Parsed:
-        """El baile del 402, en el orden que manda la guía publicada.
+        """The 402 dance, in the order the published guide mandates.
 
-        0. Si este cliente es **partner**, el primer intento va firmado con el
-           riel (ERC-8128, que no mueve plata: sólo dice quién sos). Con la
-           wallet dada de alta, el paso 1 vuelve 200 y no hay 402 en toda la
-           historia. Y si vuelve 402 igual, **se levanta**: ver la rama de
-           `PartnerRejectedError` abajo.
-        1. Pedir **sin header de pago** — preguntar es gratis y es el primer
-           movimiento previsto por el servicio.
-        2. Si vuelve 402: leer el challenge, **verificar el destinatario** contra
-           la tesorería pinneada, firmar con el payer.
-        3. Repetir **la misma request** con `X-PAYMENT`.
+        0. If this client is a **partner**, the first attempt goes signed with the
+           rail (ERC-8128, which moves no money: it only says who you are). With
+           the wallet allowlisted, step 1 comes back 200 and there is no 402 in
+           the whole story. And if a 402 comes back anyway, **it raises**: see the
+           `PartnerRejectedError` branch below.
+        1. Ask **with no payment header** — asking is free and it is the first
+           move the service expects.
+        2. If a 402 comes back: read the challenge, **verify the recipient**
+           against the pinned treasury, sign with the payer.
+        3. Replay **the identical request** with `X-PAYMENT`.
 
-        No hay reintento después del segundo intento, y es deliberado: el nonce
-        se consume en el settlement, así que reenviar la misma credencial no
-        vuelve a pagar — un 4xx después de pagar es casi siempre una credencial
-        gastada o firmada por otro monto, y el remedio es pedir un challenge
-        NUEVO, no repetir el viejo. Un `retries=3` acá quemaría credenciales.
+        There is no retry after the second attempt, and that is deliberate: the
+        nonce is consumed at settlement, so resending the same credential does not
+        pay again — a 4xx after paying is almost always a spent credential or one
+        signed for a different amount, and the remedy is to ask for a NEW
+        challenge, not to repeat the old one. A `retries=3` here would burn
+        credentials.
 
-        🔴 **El parseo entra acá, no en el método público.** Es lo que hace que
-        exista UNA sola frontera «desde acá hay plata de por medio» en todo el
-        archivo. Si el parseo viviera afuera, un `DescribeUnparseable` sobre el
-        cuerpo YA PAGADO saldría sin `payment_sent` — indistinguible de un
-        cuerpo roto que no costó nada. La marca no puede depender de que quien
-        agregue la tercera ruta paga se acuerde de ponerla.
+        🔴 **Parsing happens in here, not in the public method.** That is what
+        makes there be ONE single "from here on there is money in flight" boundary
+        in the whole file. If parsing lived outside, a `DescribeUnparseable` over
+        an ALREADY PAID body would come out without `payment_sent` —
+        indistinguishable from a broken body that cost nothing. The mark cannot
+        depend on whoever adds the third metered route remembering to set it.
 
-        🔴 **Nada de esto lo traga el fail-open, valga lo que valga.** Ver la
-        cabecera del módulo: la línea es si hubo dinero de por medio.
+        🔴 **None of this is swallowed by the fail-open, whatever it is worth.**
+        See the module header: the line is whether there was money in flight.
         """
         # ── Tramo PRE-PAGO: no se firmó nada, no se gastó nada ───────────────
         #
@@ -821,14 +838,14 @@ class DescribeClient:
         # explota si alguien lo llama.
         if firma is not None:
             raise PartnerRejectedError(
-                f"GET {path} contestó 402 aunque este cliente firmó como partner "
-                f"con la wallet {firma.wallet}. NO se pagó y NO se va a pagar solo. "
-                "Revisá, en este orden: (1) que describe haya dado de alta esa "
-                "wallet en su allowlist; (2) que `base_url` sea "
-                "https://api.describe.net — se firma contra el host al que "
-                "apuntás y el gate verifica contra el suyo pinneado; (3) el reloj "
-                "del firmante (la ventana del gate son 300 s). Si de verdad querés "
-                "pagar, construí el cliente SIN `partner=`.",
+                f"GET {path} answered 402 even though this client signed as a "
+                f"partner with wallet {firma.wallet}. NOTHING WAS PAID and nothing "
+                "will be paid on its own. Check, in this order: (1) that describe "
+                "has allowlisted that wallet; (2) that `base_url` is "
+                "https://api.describe.net — you sign against the host you point "
+                "at and the gate verifies against its own pinned one; (3) the "
+                "signer's clock (the gate's window is 300 s). If you really do "
+                "want to pay, build the client WITHOUT `partner=`.",
                 wallet=firma.wallet,
                 challenge=self._challenge_o_none(response),
             )
@@ -836,13 +853,13 @@ class DescribeClient:
         try:
             challenge = response.json()
         except ValueError as exc:
-            raise DescribeUnparseable(f"el 402 de {path} no es JSON") from exc
+            raise DescribeUnparseable(f"the 402 from {path} is not JSON") from exc
 
         if self._payer is None:
             raise PaymentRequiredError(
-                f"GET {path} es una ruta medida y este cliente no tiene `payer`. "
-                "Construilo con `DescribeClient(payer=...)` — o usá la puerta "
-                "gratis, que para una wallet es `wallet()`.",
+                f"GET {path} is a metered route and this client has no `payer`. "
+                "Build it with `DescribeClient(payer=...)` — or use the free door, "
+                "which for a wallet is `wallet()`.",
                 challenge=challenge,
             )
 
@@ -892,9 +909,9 @@ class DescribeClient:
                 recibo = str(cabecera)
             if paid.status_code >= 400:
                 raise DescribeHTTPError(
-                    f"GET {path} → HTTP {paid.status_code} DESPUÉS de pagar. "
-                    "La credencial ya se consumió: pedí un challenge nuevo, no "
-                    "reenvíes esta.",
+                    f"GET {path} → HTTP {paid.status_code} AFTER paying. The "
+                    "credential is already consumed: ask for a new challenge, do "
+                    "not resend this one.",
                     status_code=paid.status_code,
                 )
             pagado = parse(self._json(paid, path), self._receipt(paid))
@@ -914,50 +931,50 @@ class DescribeClient:
             raise
 
     def wallet_breakdown(self, address: str, *, snapshot: bool = False) -> Breakdown:
-        """`GET /reputation/wallet/{wallet}` — **$0,01** ($0,05 con `snapshot`).
+        """`GET /reputation/wallet/{wallet}` — **$0.01** ($0.05 with `snapshot`).
 
-        La descomposición: quiénes calificaron, cuántas veces, con qué fecha y
-        en qué transacción. El número global ya está **gratis** en `wallet()`;
-        lo que se cobra es el desglose.
+        The breakdown: who rated, how many times, on what date and in which
+        transaction. The global number is already **free** in `wallet()`; what is
+        charged for is the decomposition.
 
         Args:
-            snapshot: persiste la respuesta y devuelve la fila. Es la **única
-                ruta que escribe** y cuesta más. Lo que se compra no es el
-                número sino el compromiso con él: un recibo durable con
-                `inputs_digest` que se puede citar después.
+            snapshot: persists the answer and returns the row. It is the **only
+                route that writes** and it costs more. What you buy is not the
+                number but the commitment to it: a durable receipt with an
+                `inputs_digest` you can cite later.
 
-        🔴 **No es nullable y NO la traga el fail-open — ni con
-        `fail_open=True` explícito.** No es una preferencia del llamador sino
-        una propiedad del método: entre firmar el sobre y recibir la respuesta
-        el USDC ya se movió, y un `None` ahí es una credencial gastada sin
-        recibo. Un flag de disponibilidad no puede comprar el derecho a tragar
-        un recibo. (R5 corregida, 2026-08-30 — ver la cabecera del módulo.)
+        🔴 **It is not nullable and the fail-open does NOT swallow it — not even
+        with an explicit `fail_open=True`.** It is not a caller preference but a
+        property of the method: between signing the envelope and receiving the
+        answer the USDC has already moved, and a `None` there is a spent
+        credential with no receipt. An availability flag cannot buy the right to
+        swallow a receipt. (R5 corrected, 2026-08-30 — see the module header.)
 
         Raises:
-            `PaymentRequiredError` si no hay `payer` (trae el challenge entero,
-            con su `price_usd` y su `free_preview`).
-            `DoNotPayError` si el 402 pide pagar a otra dirección.
-            `DescribeError` ante cualquier fallo de servicio. Si cayó DESPUÉS de
-            firmar, sale con `exc.payment_sent is True` y `exc.payment` con el
-            monto, la red y el `X-Payment-Receipt` si llegó a haber uno.
+            `PaymentRequiredError` if there is no `payer` (it carries the whole
+            challenge, with its `price_usd` and its `free_preview`).
+            `DoNotPayError` if the 402 asks to pay a different address.
+            `DescribeError` on any service failure. If it fell AFTER signing, it
+            comes out with `exc.payment_sent is True` and `exc.payment` carrying
+            the amount, the network and the `X-Payment-Receipt` if there was one.
         """
         path = f"/reputation/wallet/{quote(str(address), safe='')}"
         params = {"snapshot": "true"} if snapshot else None
         return self._paid(path, parse_breakdown, params=params)
 
     def agent(self, network: str, agent_id: str) -> AgentReputation:
-        """`GET /reputation/agent/{network}/{agent_id}` — **$0,02**.
+        """`GET /reputation/agent/{network}/{agent_id}` — **$0.02**.
 
-        `network` tiene que ser uno de los `chains[].network` de `health()`; un
-        id sólo es único **por cadena**.
+        `network` has to be one of `health()`'s `chains[].network`; an id is only
+        unique **per chain**.
 
-        `agent_id` es un **string, no un número**: los registros EVM acuñan
-        enteros pero en Solana el id es la dirección del asset Metaplex Core en
-        base58 — case-sensitive, y pasarlo por `int()` lo destruye.
+        `agent_id` is a **string, not a number**: the EVM registries mint integers
+        but on Solana the id is the base58 address of the Metaplex Core asset —
+        case-sensitive, and running it through `int()` destroys it.
 
-        🔴 **No es nullable y NO la traga el fail-open**, por lo mismo que
-        `wallet_breakdown()`: hay dinero de por medio. Ver la cabecera del
-        módulo y, para el fallo posterior a la firma, `exc.payment_sent`.
+        🔴 **It is not nullable and the fail-open does NOT swallow it**, for the
+        same reason as `wallet_breakdown()`: there is money in flight. See the
+        module header and, for the post-signature failure, `exc.payment_sent`.
         """
         path = (
             f"/reputation/agent/{quote(str(network), safe='')}"

@@ -1,66 +1,66 @@
-"""La única caseta de peaje — R6. Este SDK **jamás** firma, custodia ni deriva.
+"""The one toll booth — R6. This SDK **never** signs, custodies or derives.
 
 ════════════════════════════════════════════════════════════════════════════
-LA REGLA, Y NO ES NEGOCIABLE
+THE RULE, AND IT IS NOT NEGOTIABLE
 ════════════════════════════════════════════════════════════════════════════
-El 402 lo resuelve `uvd-x402-sdk` (PyPI `uvd-x402-sdk`, 0.70.0 al 2026-08-30).
-Acá **no se reimplementa EIP-3009, no se arma el sobre a mano, no se toca una
-clave privada y no se lee una env var con un secreto**. Es la regla
-*upstream-first* de la casa: si al SDK de pagos le falta algo, se sube ALLÁ y
-después se consume — no se parchea acá.
+The 402 is resolved by `uvd-x402-sdk` (PyPI `uvd-x402-sdk`, 0.70.0 as of
+2026-08-30). Here **EIP-3009 is not reimplemented, the envelope is not built by
+hand, no private key is touched and no env var with a secret is read**. It is the
+house's *upstream-first* rule: if the payments SDK is missing something, it goes
+up THERE and is consumed afterwards — it is not patched here.
 
-Lo que este módulo hace es exactamente tres cosas, y ninguna es criptográfica:
+What this module does is exactly three things, and none of them is cryptographic:
 
-  1. **Verificar a quién se le va a pagar** contra la tesorería pinneada.
-  2. **Elegir** cuál de los `accepts[]` corresponde a la red que el llamador
-     dice tener fondos.
-  3. **Delegar** la firma al payer, echando de vuelta el accept VERBATIM.
+  1. **Verify who is about to be paid** against the pinned treasury.
+  2. **Pick** which of the `accepts[]` matches the network the caller says they
+     hold funds on.
+  3. **Delegate** the signing to the payer, echoing the accept back VERBATIM.
 
 ════════════════════════════════════════════════════════════════════════════
-🔴 EL CHEQUEO DE DESTINATARIO: `DO_NOT_PAY`, NO UN RETRY
+🔴 THE RECIPIENT CHECK: `DO_NOT_PAY`, NOT A RETRY
 ════════════════════════════════════════════════════════════════════════════
-Paso 2 de la guía publicada (docs.describe.net, «Paying with x402»):
+Step 2 of the published guide (docs.describe.net, "Paying with x402"):
 
-    «The only address this service ever asks to be paid at is
+    "The only address this service ever asks to be paid at is
      0xe4dc963c56979E0260fc146b87eE24F18220e545. If the challenge names another
      address, do not pay: either it did not come from describe, or the treasury
      changed and the server did not find out. Raw HTTP does not make this
-     comparison for you. Pin the address in your own code.»
+     comparison for you. Pin the address in your own code."
 
-Reintentar ahí sería convertir un desvío de fondos en un desvío de fondos con
-reintentos. Por eso `DoNotPayError` **no la traga el fail-open** y no hay un
-`retries=` que la pueda pisar.
+Retrying there would turn a diversion of funds into a diversion of funds with
+retries. That is why `DoNotPayError` is **not swallowed by the fail-open** and
+there is no `retries=` that can override it.
 
-La tesorería está pinneada como default y es configurable por constructor —
-para un despliegue propio del índice, no para «desactivar el chequeo». Si
-alguien pasa `treasury=None` no se paga: se levanta `ConfigurationError` del
-propio payer o el chequeo falla. Nunca hay un camino silencioso.
-
-════════════════════════════════════════════════════════════════════════════
-POR QUÉ NO HAY UNA TABLA `nombre de red → chain id` EN ESTE REPO
-════════════════════════════════════════════════════════════════════════════
-El `accepts[].network` viene en CAIP-2 (`eip155:8453`) y `create_authorization`
-quiere un nombre (`"base"`). La traducción **se le pregunta al registro del
-`uvd-x402-sdk`**, que es su dueño: se recorre `get_supported_network_names()` y
-se matchea por `chain_id`. Una tabla local sería una copia que se pudre, y
-copiar lo que el SDK ya sabe es justo lo que upstream-first prohíbe.
-
-Verificado el 2026-08-30 contra `uvd_x402_sdk.networks.base`: las seis cadenas
-que describe acepta hoy —8453 base, 43114 avalanche, 42161 arbitrum, 10
-optimism, 137 polygon, 42220 celo— resuelven las seis en el registro.
+The treasury is pinned as a default and configurable by constructor — for your own
+deployment of the index, not to "turn the check off". If somebody passes
+`treasury=None` nothing is paid: the payer's own `ConfigurationError` is raised or
+the check fails. There is never a silent path.
 
 ════════════════════════════════════════════════════════════════════════════
-EL `payer` ES UN PROTOCOL, NO UNA DEPENDENCIA DURA
+WHY THERE IS NO `network name → chain id` TABLE IN THIS REPO
 ════════════════════════════════════════════════════════════════════════════
-`uvd-x402-sdk` es un **extra** (`pip install uvd-describe-sdk[x402]`), no una
-dependencia base. Un consumidor que sólo usa las rutas gratis —que es el camino
-feliz del producto: R «gratis-primero», y el 402 mismo lo dice: *«Si no hay
-reputación ahí, este cobro no devuelve nada»*— no arrastra `eth-account` ni
-nada que firme.
+The `accepts[].network` arrives in CAIP-2 (`eip155:8453`) and
+`create_authorization` wants a name (`"base"`). The translation **is asked of the
+`uvd-x402-sdk`'s registry**, which owns it: `get_supported_network_names()` is
+walked and matched by `chain_id`. A local table would be a copy that rots, and
+copying what the SDK already knows is exactly what upstream-first forbids.
 
-`X402Client` satisface `Payer` estructuralmente, sin heredar de nada nuestro.
-Y para los tests eso vale doble: se mockea con un objeto de diez líneas y
-**ningún test toca una clave**.
+Verified 2026-08-30 against `uvd_x402_sdk.networks.base`: the six chains describe
+accepts today — 8453 base, 43114 avalanche, 42161 arbitrum, 10 optimism, 137
+polygon, 42220 celo — all six resolve in the registry.
+
+════════════════════════════════════════════════════════════════════════════
+THE `payer` IS A PROTOCOL, NOT A HARD DEPENDENCY
+════════════════════════════════════════════════════════════════════════════
+`uvd-x402-sdk` is an **extra** (`pip install uvd-describe-sdk[x402]`), not a base
+dependency. A consumer who only uses the free routes — which is the product's
+happy path: the "free-first" rule, and the 402 itself says so: *"if there is no
+reputation there, this charge returns nothing"* — does not drag in `eth-account`
+or anything that signs.
+
+`X402Client` satisfies `Payer` structurally, without inheriting anything of ours.
+And for the tests that counts double: it is mocked with a ten-line object and **no
+test touches a key**.
 """
 
 from __future__ import annotations
@@ -75,11 +75,11 @@ except ImportError:  # pragma: no cover
 
 from .errors import DoNotPayError
 
-#: La tesorería de describe, pinneada. Leída VIVA del challenge de
-#: `GET /reputation/wallet/{w}` el 2026-08-30 (campos `recipient` y
-#: `recipients.evm`, y el `payTo` de las seis entradas de `accepts[]`).
-#: Coincide con `paywall.TREASURY_EVM` del servicio, que la mantiene sincronizada
-#: con `api_docs.PUBLISHED_TREASURY` y con su Terraform (invariante 5 del repo).
+#: describe's treasury, pinned. Read LIVE from the challenge of
+#: `GET /reputation/wallet/{w}` on 2026-08-30 (fields `recipient` and
+#: `recipients.evm`, and the `payTo` of the six `accepts[]` entries). It matches
+#: the service's `paywall.TREASURY_EVM`, which keeps it in sync with
+#: `api_docs.PUBLISHED_TREASURY` and with its Terraform (invariant 5 of the repo).
 TREASURY_EVM = "0xe4dc963c56979E0260fc146b87eE24F18220e545"
 
 #: USDC tiene 6 decimales en las seis cadenas que describe acepta. Se usa SÓLO
@@ -90,19 +90,19 @@ _USDC_DECIMALS = 6
 
 @runtime_checkable
 class Payer(Protocol):
-    """Lo único que este SDK le pide a quien firma.
+    """The only thing this SDK asks of whoever signs.
 
-    `uvd_x402_sdk.X402Client` lo satisface tal cual, sin heredar nada:
+    `uvd_x402_sdk.X402Client` satisfies it as-is, inheriting nothing:
 
         from uvd_x402_sdk import X402Client
         payer = X402Client(recipient_address=TREASURY_EVM)
-        payer.connect_with_private_key(os.environ["MI_CLAVE"], chain="base")
+        payer.connect_with_private_key(os.environ["MY_KEY"], chain="base")
         client = DescribeClient(payer=payer, pay_network="base")
 
-    🔴 La clave sale de una env var o de un signer remoto
-    (`connect_with_signer`). **Jamás se escribe en un archivo**, ni «para
-    probar»: hay bots barriendo GitHub por `0x`+64 hex y drenan en minutos
-    (INC-2026-03-30 de la casa, dos wallets perdidas así).
+    🔴 The key comes from an env var or from a remote signer
+    (`connect_with_signer`). **It is NEVER written into a file**, not even "just
+    to test": there are bots sweeping GitHub for `0x` + 64 hex and they drain in
+    minutes (the house's INC-2026-03-30, two wallets lost that way).
     """
 
     def create_authorization(
@@ -115,15 +115,15 @@ class Payer(Protocol):
         accepted: Optional[Dict[str, Any]] = ...,
         resource: Optional[Any] = ...,
     ) -> str:
-        """Devuelve el valor base64 del header `X-PAYMENT`."""
+        """Returns the base64 value of the `X-PAYMENT` header."""
         ...
 
 
 def _chain_id_of(caip2: str) -> Optional[int]:
-    """`"eip155:8453"` → `8453`. Cualquier otra cosa → `None`.
+    """`"eip155:8453"` → `8453`. Anything else → `None`.
 
-    No se asume el prefijo: un `solana:...` no tiene chain id EVM y devolver
-    algo acá lo mandaría a firmar contra la red equivocada.
+    The prefix is not assumed: a `solana:...` has no EVM chain id and returning
+    something here would send it to sign against the wrong network.
     """
     if not isinstance(caip2, str) or not caip2.startswith("eip155:"):
         return None
@@ -134,18 +134,17 @@ def _chain_id_of(caip2: str) -> Optional[int]:
 
 
 def _registry_available() -> bool:
-    """¿Está instalado el `uvd-x402-sdk`, o sea el dueño del registro de redes?
+    """Is `uvd-x402-sdk` installed — that is, the owner of the network registry?
 
-    Existe como pregunta separada por una lección que este mismo archivo se
-    comió al escribirlo: sin el extra instalado, `chain_name_for` devolvía
-    `None` para las seis cadenas y `select_accept` levantaba **«describe no
-    ofrece pagar en `base`»** — un mensaje que manda a revisar el challenge del
-    servicio cuando el problema es un `pip install` que falta.
+    It exists as a separate question because of a lesson this very file swallowed
+    while being written: without the extra installed, `chain_name_for` returned
+    `None` for all six chains and `select_accept` raised **"describe does not offer
+    paying in `base`"** — a message that sends you to check the service's challenge
+    when the problem is a missing `pip install`.
 
-    Es exactamente el modo de falla que el repo del servicio persigue: *«una
-    entrada que manda al lugar equivocado es peor que ninguna»*, porque el que
-    la lee ejecuta la receta, sigue en rojo y no busca más. Así que la causa se
-    distingue y se dice con su nombre.
+    It is exactly the failure mode the service repo hunts: *"an entry that sends
+    you to the wrong place is worse than none"*, because whoever reads it runs the
+    recipe, stays red, and stops looking. So the cause is told apart and named.
     """
     try:
         import uvd_x402_sdk.networks.base  # noqa: F401
@@ -155,11 +154,11 @@ def _registry_available() -> bool:
 
 
 def chain_name_for(caip2: str) -> Optional[str]:
-    """CAIP-2 → el nombre de red del `uvd-x402-sdk`, preguntándole a su registro.
+    """CAIP-2 → `uvd-x402-sdk`'s network name, by asking its registry.
 
-    Devuelve `None` si el SDK de pagos no está instalado o no conoce esa cadena.
-    Para distinguir esas dos causas está `_registry_available()`. Ninguna tabla
-    local: ver la cabecera del módulo.
+    Returns `None` if the payments SDK is not installed or does not know that
+    chain. `_registry_available()` exists to tell those two causes apart. No local
+    table: see the module header.
     """
     chain_id = _chain_id_of(caip2)
     if chain_id is None:
@@ -180,12 +179,12 @@ def chain_name_for(caip2: str) -> Optional[str]:
 
 
 def _matches(accept: Dict[str, Any], network: str) -> bool:
-    """¿Este accept es la red que pidió quien llama?
+    """Is this accept the network the caller asked for?
 
-    Se acepta el nombre (`"base"`), el CAIP-2 (`"eip155:8453"`) y el chain id
-    (`8453` o `"8453"`). Los dos últimos **no necesitan el registro del SDK de
-    pagos**, así que quien no lo tenga instalado igual puede seleccionar — y el
-    error, si falta algo, va a nombrar lo que de verdad falta.
+    The name (`"base"`), the CAIP-2 (`"eip155:8453"`) and the chain id (`8453` or
+    `"8453"`) are all accepted. The last two **do not need the payments SDK's
+    registry**, so whoever does not have it installed can still select — and the
+    error, if something is missing, will name what is really missing.
     """
     caip2 = str(accept.get("network") or "")
     if network == caip2:
@@ -197,15 +196,16 @@ def _matches(accept: Dict[str, Any], network: str) -> bool:
 
 
 def select_accept(challenge: Dict[str, Any], network: str) -> Dict[str, Any]:
-    """Elegir la entrada de `accepts[]` para la red donde el llamador tiene fondos.
+    """Pick the `accepts[]` entry for the network the caller holds funds on.
 
-    Se devuelve **la entrada tal cual llegó**, sin normalizar ni reconstruir: el
-    `uvd-x402-sdk` la echa de vuelta VERBATIM en el sobre v2 y su propio código
-    lo advierte — *«Reconstructing it instead of echoing is how a payment gets
-    rejected by a server that did nothing wrong»* (`client.py:1799-1802`).
+    **The entry is returned exactly as it arrived**, neither normalised nor
+    rebuilt: `uvd-x402-sdk` echoes it back VERBATIM in the v2 envelope and its own
+    code warns about it — *"Reconstructing it instead of echoing is how a payment
+    gets rejected by a server that did nothing wrong"* (`client.py:1799-1802`).
 
-    Si la red pedida no está entre las ofrecidas, el error **lista las que sí**:
-    un «unsupported network» sin la lista obliga a leer el challenge a mano.
+    If the requested network is not among the offered ones, the error **lists the
+    ones that are**: an "unsupported network" without the list forces you to read
+    the challenge by hand.
     """
     accepts = challenge.get("accepts") or []
     offered: List[str] = []
@@ -219,58 +219,60 @@ def select_accept(challenge: Dict[str, Any], network: str) -> Dict[str, Any]:
 
     falta_el_sdk = (
         "" if _registry_available() else
-        " — ojo: `uvd-x402-sdk` NO está instalado, así que los nombres de red no "
-        "se pueden resolver y arriba ves los CAIP-2 crudos. Instalá el extra: "
-        "`pip install uvd-describe-sdk[x402]`"
+        " — heads up: `uvd-x402-sdk` is NOT installed, so network names cannot be "
+        "resolved and what you see above are the raw CAIP-2 ids. Install the "
+        "extra: `pip install uvd-describe-sdk[x402]`"
     )
     raise DoNotPayError(
-        f"describe no ofrece pagar en `{network}`; ofrece: "
-        f"{', '.join(offered) or '(ninguna)'}{falta_el_sdk}",
+        f"describe does not offer paying in `{network}`; it offers: "
+        f"{', '.join(offered) or '(none)'}{falta_el_sdk}",
         expected=network,
         offered=", ".join(offered),
     )
 
 
 def assert_recipient(accept: Dict[str, Any], treasury: str) -> None:
-    """El chequeo del paso 2. Falla ⇒ `DO_NOT_PAY`, jamás un reintento.
+    """The step 2 check. It fails ⇒ `DO_NOT_PAY`, never a retry.
 
-    La comparación es case-insensitive porque una dirección EVM es la misma con
-    o sin checksum EIP-55 — el challenge la manda con mayúsculas y una wallet
-    puede tenerla en minúsculas. Lo que NO se afloja es la dirección: compara
-    los 20 bytes, no un prefijo.
+    The comparison is case-insensitive because an EVM address is the same with or
+    without the EIP-55 checksum — the challenge sends it with uppercase and a
+    wallet may hold it lowercased. What is NOT loosened is the address: it compares
+    the 20 bytes, not a prefix.
     """
     pay_to = str(accept.get("payTo") or "")
     if not pay_to or pay_to.lower() != treasury.lower():
         raise DoNotPayError(
-            "el 402 pide pagar a una dirección que NO es la tesorería pinneada de "
-            f"describe. NO se paga y NO se reintenta. esperada={treasury} "
-            f"ofrecida={pay_to or '(vacía)'}",
+            "the 402 asks to pay an address that is NOT describe's pinned "
+            "treasury. NOTHING IS PAID and this is NOT retried. "
+            f"expected={treasury} offered={pay_to or '(empty)'}",
             expected=treasury,
             offered=pay_to,
         )
 
 
 def _amount_usd(challenge: Dict[str, Any], accept: Dict[str, Any]) -> Decimal:
-    """El precio en USD, tomado del challenge y **reconciliado** con las unidades base.
+    """The USD price, taken from the challenge and **reconciled** with base units.
 
-    `Decimal`, nunca `float`: un `float("0.01")` ya no es 0,01 y esto es plata.
+    `Decimal`, never `float`: a `float("0.01")` is no longer 0.01 and this is
+    money.
 
-    La reconciliación existe por un modo de falla que la guía publicada nombra:
-    *«A 4xx after paying is almost always a spent credential or one signed for a
-    different amount»*. Si `price_usd` y `accepts[].amount` no cierran, firmar
-    igual produce un pago que el servidor rechaza **después** de que la
-    credencial se consumió. Preferimos negarnos antes.
+    The reconciliation exists because of a failure mode the published guide names:
+    *"A 4xx after paying is almost always a spent credential or one signed for a
+    different amount"*. If `price_usd` and `accepts[].amount` do not match, signing
+    anyway produces a payment the server rejects **after** the credential has been
+    consumed. We would rather refuse first.
 
-    Sólo se reconcilia cuando el token declarado es USDC (6 decimales en las
-    seis cadenas de hoy). Con otro token no se inventa una escala: se firma por
-    `price_usd` y se deja dicho acá que ese caso no está cubierto.
+    Reconciliation only happens when the declared token is USDC (6 decimals on
+    today's six chains). With another token no scale is invented: it signs for
+    `price_usd` and it is stated here that this case is not covered.
     """
     raw_price = challenge.get("price_usd", challenge.get("amount"))
     if raw_price is None:
         raise DoNotPayError(
-            "el 402 no trae `price_usd` ni `amount`: no hay precio que firmar",
+            "the 402 carries neither `price_usd` nor `amount`: there is no price "
+            "to sign for",
             expected="price_usd",
-            offered="(ausente)",
+            offered="(absent)",
         )
     price = Decimal(str(raw_price))
 
@@ -280,10 +282,10 @@ def _amount_usd(challenge: Dict[str, Any], accept: Dict[str, Any]) -> Decimal:
         expected_base = int(price * (10**_USDC_DECIMALS))
         if int(base_units) != expected_base:
             raise DoNotPayError(
-                f"el 402 no cierra consigo mismo: price_usd={price} son "
-                f"{expected_base} unidades base pero `accepts[].amount` dice "
-                f"{base_units}. Firmar por un monto distinto del pedido gasta la "
-                "credencial y el servidor igual contesta 4xx.",
+                f"the 402 does not agree with itself: price_usd={price} is "
+                f"{expected_base} base units but `accepts[].amount` says "
+                f"{base_units}. Signing for an amount other than the one asked for "
+                "spends the credential and the server answers 4xx anyway.",
                 expected=str(expected_base),
                 offered=str(base_units),
             )
@@ -297,15 +299,15 @@ def build_payment_header(
     network: str,
     treasury: str = TREASURY_EVM,
 ) -> str:
-    """Del challenge 402 al valor del header `X-PAYMENT`. La firma la hace el payer.
+    """From the 402 challenge to the `X-PAYMENT` header value. The payer signs.
 
-    Orden deliberado: **primero se verifica a quién se paga, después se firma.**
-    Al revés existiría, aunque sea por un instante, una autorización firmada
-    hacia una dirección no verificada.
+    Deliberate order: **first verify who is being paid, then sign.** The other way
+    round there would exist, if only for an instant, an authorization signed
+    towards an unverified address.
 
-    Todo lo que viaja sale del challenge —monto, token, `payTo`, red, recurso—
-    y nada de una tabla local: paso 1 de la guía publicada, *«Take the values
-    from there, never from a cached table.»*
+    Everything that travels comes out of the challenge — amount, token, `payTo`,
+    network, resource — and nothing from a local table: step 1 of the published
+    guide, *"Take the values from there, never from a cached table."*
     """
     accept = select_accept(challenge, network)
     assert_recipient(accept, treasury)
@@ -317,12 +319,12 @@ def build_payment_header(
         # y no hay forma de derivarlo de un chain id sin quien lo sepa. El
         # mensaje nombra la causa real en vez de mandar a mirar el challenge.
         detalle = (
-            "`uvd-x402-sdk` no está instalado: `pip install uvd-describe-sdk[x402]`"
+            "`uvd-x402-sdk` is not installed: `pip install uvd-describe-sdk[x402]`"
             if not _registry_available()
-            else f"su registro de redes no conoce `{accept.get('network')}`"
+            else f"its network registry does not know `{accept.get('network')}`"
         )
         raise DoNotPayError(
-            f"no se puede firmar para `{accept.get('network')}` — {detalle}",
+            f"cannot sign for `{accept.get('network')}` — {detalle}",
             expected=network,
             offered=str(accept.get("network")),
         )

@@ -1,248 +1,261 @@
-"""La taxonomía de fallas — y la línea que separa «no pude leer» de «no hay dato».
+"""The failure taxonomy — and the line that separates "I could not read" from
+"there is no data".
 
-REGLA R4 DEL CONTRATO NÚCLEO, y es la razón de que este módulo exista:
-**se lanza una excepción SÓLO por transporte o protocolo** (timeout, 5xx, JSON
-inválido, un cuerpo que no tiene la forma prometida). **Nunca por «no hay
-datos».** Una wallet sin calificar es una RESPUESTA — la puerta A2A del servicio
-lo dice con todas las letras: *«That is an answer, not an error»*.
+RULE R4 OF THE CORE CONTRACT, and it is the reason this module exists:
+**an exception is raised ONLY for transport or protocol** (timeout, 5xx, invalid
+JSON, a body that does not have the promised shape). **Never for "there is no
+data".** An unrated wallet is an ANSWER — the service's own A2A door spells it
+out: *"That is an answer, not an error"*.
 
-Por qué importa, medido: el 2026-08-28 en KarmaKadabra un fallo de lectura se
-reportó como si fuera el dato («no pude leer» leído como «no tiene reputación»)
-y costó un reporte equivocado en el gate que decide con quién se comercia
-(`karmakadabra/lib/reputation_scan.py:110-118`, escrito por ese incidente). Esa
-confusión es exactamente lo que esta taxonomía existe para hacer imposible.
+Why it matters, measured: on 2026-08-28 at KarmaKadabra a read failure was
+reported as if it were the data ("I could not read" read as "has no reputation")
+and it cost a wrong report in the gate that decides who to trade with
+(`karmakadabra/lib/reputation_scan.py:110-118`, written because of that
+incident). That confusion is exactly what this taxonomy exists to make
+impossible.
 
 ────────────────────────────────────────────────────────────────────────────
-DE DÓNDE SALEN ESTOS NOMBRES, Y QUÉ CAMBIÓ RESPECTO DE LA REFERENCIA
+WHERE THESE NAMES COME FROM, AND WHAT CHANGED FROM THE REFERENCE
 ────────────────────────────────────────────────────────────────────────────
-La implementación de referencia es
-`execution-market/mcp_server/integrations/describenet/types.py:37-95` (578
-líneas en total con su cliente, el lector HTTP más completo de los tres
-consumidores medidos). Su taxonomía se ABSORBE casi entera:
+The reference implementation is
+`execution-market/mcp_server/integrations/describenet/types.py:37-95` (578 lines
+in total with its client, the most complete HTTP reader of the three measured
+consumers). Its taxonomy is ABSORBED almost whole:
 
     DescribeNetError → Timeout | HTTPError | Unreachable | Unparseable
                      | PartialIndex
 
-y sobre todo se absorbe el mecanismo que la hace útil: **un atributo `kind`
-estable sobre el que se ramifica, nunca el texto del mensaje** — el mismo
-principio que el servicio aplica a `caveats[].code` vs `caveats[].text`.
+and above all what is absorbed is the mechanism that makes it useful: **a stable
+`kind` attribute to branch on, never the message text** — the same principle the
+service applies to `caveats[].code` vs `caveats[].text`.
 
-Dos diferencias, declaradas acá porque quien venga de EM las va a notar y
-merece encontrar la razón en vez de una sorpresa:
+Two differences, declared here because whoever comes from EM will notice them and
+deserves to find the reason instead of a surprise:
 
-1. **`kind = "http_5xx"` se renombra a `"http_error"`.** En EM el bucket se
-   llama `http_5xx` y su propio docstring aclara que ahí caen también el 422 y
-   el 429 «porque todo consumidor trata cualquier non-2xx igual»
-   (`types.py:56-60`). Un nombre que hay que desmentir en su propio docstring es
-   un nombre mal puesto. `status_code` sigue viajando, que es lo que se lee.
-   👉 El `kind` de EM se conserva como alias legible en `HTTP_5XX_LEGACY_KIND`
-   para quien esté migrando un `if err.kind == "http_5xx"`.
+1. **`kind = "http_5xx"` is renamed to `"http_error"`.** In EM the bucket is
+   called `http_5xx` and its own docstring clarifies that 422 and 429 land there
+   too "because every consumer treats any non-2xx the same" (`types.py:56-60`).
+   A name you have to disown in its own docstring is a badly chosen name.
+   `status_code` still travels, which is what actually gets read.
+   👉 EM's `kind` is published as a readable alias in `HTTP_5XX_LEGACY_KIND` for
+   anyone migrating an `if err.kind == "http_5xx"`.
 
-2. **`PartialIndex` NO se porta.** En EM el cliente «nunca la lanza»
-   (`types.py:84-89`): existe para que capas superiores clasifiquen una
-   cobertura parcial dentro de la misma taxonomía. Un índice parcial se sirve
-   como un 200 cuyo `chains[]` simplemente no trae la fila — o sea, es un DATO,
-   y por R4 un dato no puede ser una excepción. Portarla acá sería publicar una
-   excepción que el SDK jamás levanta, invitando a un `except` muerto.
-
-────────────────────────────────────────────────────────────────────────────
-LO QUE EL FAIL-OPEN **NO** TAPA
-────────────────────────────────────────────────────────────────────────────
-`PaymentRequiredError` y `DoNotPayError` heredan de `DescribeError` pero
-`DescribeClient` NO las traga nunca, ni con `fail_open=True`. El fail-open
-existe para la DISPONIBILIDAD del índice («poné un fallback si describe está
-caído» — Saul, 2026-08-28), no para la configuración de quien llama. Tragarlas
-convertiría «te olvidaste de configurar el pago» en «esta wallet no tiene
-reputación», que es la misma mentira que R1 existe para impedir.
-
-Y desde el 2026-08-30 hay un segundo eje: **las rutas PAGAS no las traga el
-fail-open nunca, sea cual sea la excepción y valga lo que valga `fail_open`.**
-Ver `client.py`, bloque «QUÉ MÉTODO ES NULLABLE».
-
-Las dos del riel de partner —`PartnerSigningError` y `PartnerRejectedError`—
-caen en la misma bolsa y por la misma razón: son configuración de quien llama.
-Pero cargan además una afirmación que ninguna otra hace, y es la mitad buena
-del asunto: **`payment_sent is False` es verdad fuerte ahí**. Las dos se
-levantan ANTES de firmar ninguna autorización de pago, así que quien las reciba
-sabe que no gastó — se enteró de que perdió el riel gratis SIN haber gastado el
-USDC que el riel le ahorraba. Esa es toda la decisión del modo partner.
+2. **`PartialIndex` is NOT ported.** In EM the client "never raises it"
+   (`types.py:84-89`): it exists so higher layers can classify partial coverage
+   inside the same taxonomy. A partial index is served as a 200 whose `chains[]`
+   simply lacks the row — that is, it is DATA, and by R4 data cannot be an
+   exception. Porting it here would publish an exception the SDK never raises,
+   inviting a dead `except`.
 
 ────────────────────────────────────────────────────────────────────────────
-🔴 `payment_sent` — LA MARCA QUE DISTINGUE «NO GASTASTE» DE «PUEDE QUE SÍ»
+WHAT THE FAIL-OPEN DOES **NOT** COVER
 ────────────────────────────────────────────────────────────────────────────
-Un `DescribeTimeout` pelado no distingue dos hechos que valen plata distinta:
+`PaymentRequiredError` and `DoNotPayError` inherit from `DescribeError` but
+`DescribeClient` NEVER swallows them, not even with `fail_open=True`. The
+fail-open exists for the AVAILABILITY of the index ("put a fallback in if
+describe is down" — Saul, 2026-08-28), not for the caller's configuration.
+Swallowing them would turn "you forgot to configure payment" into "this wallet
+has no reputation", which is the same lie R1 exists to prevent.
 
-    se cayó ANTES de firmar   → no salió una credencial. No gastaste nada.
-    se cayó DESPUÉS de firmar → la autorización EIP-3009 ya está firmada y
-                                despachada. El USDC pudo haberse movido.
+And since 2026-08-30 there is a second axis: **the METERED routes are never
+swallowed by the fail-open, whatever the exception and whatever `fail_open` is
+worth.** See `client.py`, block "WHICH METHOD IS NULLABLE".
 
-El segundo caso es el que la R5 corregida protege: por eso las rutas pagas
-levantan siempre. Pero levantar no alcanza si la excepción no dice de cuál de
-los dos se trata — quien la reciba tiene que saber si le toca reconciliar.
-
-`payment_sent` y `payment` son esa marca. Las pone `mark_payment_sent()` y sólo
-las pone `DescribeClient` en el tramo posterior a la firma. En toda ruta gratis
-valen `False` / `None`, siempre.
+The two of the partner rail — `PartnerSigningError` and `PartnerRejectedError` —
+fall in the same bag and for the same reason: they are the caller's
+configuration. But they also carry a claim no other one makes, and it is the good
+half of the matter: **`payment_sent is False` is a strong truth there**. Both are
+raised BEFORE any payment authorization is signed, so whoever receives them knows
+they did not spend — they found out they lost the free rail WITHOUT having spent
+the USDC the rail was saving them. That is the whole decision of partner mode.
 
 ────────────────────────────────────────────────────────────────────────────
-🔴 `recovery` — QUÉ HACER EN VEZ DE, Y POR QUÉ VACÍO ES UNA RESPUESTA
+🔴 `payment_sent` — THE MARK THAT TELLS "YOU DID NOT SPEND" FROM "MAYBE YOU DID"
 ────────────────────────────────────────────────────────────────────────────
-Aporte de **Execution Market** (`#agents`, **2026-08-30**), que ese día publicó
-que su 502 pasa a traer `detail.code`, `detail.retryable` y `detail.recovery`
-con diez códigos tipados, y lo dijo textual: *«para que lo codifiquen de su
-lado»*. Su argumento es el que justifica este campo:
+A bare `DescribeTimeout` does not distinguish two facts that are worth different
+money:
 
-    «SIETE de los diez son TERMINALES (retryable:false). Eso es lo que más les
-     sirve: hoy su flota no puede distinguir "reintenta" de "no insistas", y
+    it died BEFORE signing   → no credential left. You spent nothing.
+    it died AFTER signing    → the EIP-3009 authorization is already signed and
+                               dispatched. The USDC may have moved.
+
+The second case is the one the corrected R5 protects: that is why the metered
+routes always raise. But raising is not enough if the exception does not say
+which of the two it is — whoever receives it has to know whether reconciling is
+their job.
+
+`payment_sent` and `payment` are that mark. `mark_payment_sent()` sets them, and
+only `DescribeClient` sets them, in the stretch after the signature. On every
+free route they are `False` / `None`, always.
+
+────────────────────────────────────────────────────────────────────────────
+🔴 `recovery` — WHAT TO DO INSTEAD, AND WHY EMPTY IS AN ANSWER
+────────────────────────────────────────────────────────────────────────────
+Contributed by **Execution Market** (`#agents`, **2026-08-30**), who that day
+published that their 502 would start carrying `detail.code`, `detail.retryable`
+and `detail.recovery` with ten typed codes, and said it verbatim: *"para que lo
+codifiquen de su lado"* ("so you can code it on your side"). Their argument is
+what justifies this field — quoted in the original Spanish, as it was said:
+
+    *"SIETE de los diez son TERMINALES (retryable:false). Eso es lo que más les
+     sirve: hoy su flota no puede distinguir 'reintenta' de 'no insistas', y
      contra AUTHORIZATION_EXPIRED reintentar es quemar llamadas contra una
-     ventana cerrada hace 317 HORAS.»
+     ventana cerrada hace 317 HORAS."*
 
-**Lo que se absorbe es el PATRÓN, no su tabla.** Sus diez códigos son de SU API
-—escrow, release al worker, wallets de payout— y este SDK no envuelve esa API
-sino la de describe. Un consumidor que ramificara por `AUTHORIZATION_EXPIRED`
-contra `api.describe.net` estaría escribiendo código muerto, así que acá se
-recorrieron NUESTROS `kind` uno por uno y se decidió caso por caso.
+    [translation] "SEVEN of the ten are TERMINAL (retryable:false). That is what
+    helps you most: today your fleet cannot tell 'retry' from 'do not insist',
+    and against AUTHORIZATION_EXPIRED retrying is burning calls against a window
+    that closed 317 HOURS ago."
 
-⚠️ **La premisa del aporte se midió y es falsa para este repo, y se deja
-escrito porque cambia el diseño.** El pedido llegó como «ustedes ya tienen
-`transient` y `serviceFault`, les falta la otra mitad». Medido el 2026-08-30 en
-este árbol: `grep -rEni "transient|servicefault" src/` = **0**, igual que
-`recovery`. O sea que `recovery` no llega como la segunda mitad de un par: llega
-solo. Eso NO se arregló inflando el campo —escribir «reintentá» acá convertiría
-`recovery` en un booleano redactado en prosa, que es exactamente el error que EM
-señala— sino dejando el hueco declarado y reportado.
+**What is absorbed is the PATTERN, not their table.** Their ten codes belong to
+THEIR API — escrow, release to the worker, payout wallets — and this SDK does not
+wrap that API but describe's. A consumer branching on `AUTHORIZATION_EXPIRED`
+against `api.describe.net` would be writing dead code, so OUR `kind`s were walked
+one by one and decided case by case.
 
-**La regla, y es la mitad importante de la tarea:**
+⚠️ **The premise of the contribution was measured and is false for this repo, and
+it is left written down because it changes the design.** The request arrived as
+"you already have `transient` and `serviceFault`, you are missing the other
+half". Measured 2026-08-30 in this tree: `grep -rEni "transient|servicefault"
+src/` = **0**, same as `recovery`. So `recovery` does not arrive as the second
+half of a pair: it arrives alone. That was NOT fixed by inflating the field —
+writing "retry" here would turn `recovery` into a boolean written out in prose,
+which is exactly the error EM points at — but by leaving the hole declared and
+reported.
 
-    Si existe una ruta de recuperación REAL, se escribe.
-    Si NO existe, el campo vale `None`. **Inventar una recuperación que no
-    funciona es PEOR que no tener el campo**, porque manda al que llama a hacer
-    algo inútil con confianza. Un `recovery` vacío es honesto.
+**The rule, and it is the important half of the task:**
 
-Y una recuperación **nombra OTRA cosa que hacer**: otra ruta (la gratis que
-contesta la pregunta vecina), otro campo del propio error, otro parámetro del
-constructor, o la condición que hay que arreglar del lado del que llama.
-«Reintentá» no es una recuperación: es un booleano.
+    If a REAL recovery path exists, it gets written.
+    If it does NOT, the field is `None`. **Inventing a recovery that does not
+    work is WORSE than not having the field**, because it sends the caller off to
+    do something useless with confidence. An empty `recovery` is honest.
 
-**TEXTO LIBRE Y NO UN ENUM, y el argumento es que el enum YA EXISTE.** La casa
-tiene un solo patrón para esto y está en dos lugares: `caveats[].code` /
-`caveats[].text` del servicio, y `kind` / mensaje de este módulo. **Se ramifica
-por el código, se lee el texto.** `recovery` es la mitad TEXTO de un par cuya
-mitad CÓDIGO ya es `kind`: un `RecoveryCode` sería un segundo discriminador en
-correspondencia 1:1 con `kind`, o sea una llave duplicada que sólo puede
-desincronizarse. Y el contenido de una recuperación son instrucciones, que no
-tienen vocabulario finito; lo que sí lo tiene es la taxonomía, y ya está tipada.
+And a recovery **names SOMETHING ELSE to do**: another route (the free one that
+answers the neighbouring question), another field of the error itself, another
+constructor parameter, or the condition on the caller's side that has to be
+fixed. "Retry" is not a recovery: it is a boolean.
 
-**DÓNDE VIVE, Y POR QUÉ NO SE VUELVE A TIPEAR EN NINGÚN LADO:** cada clase
-declara la suya **en su cuerpo**, como constante. Ninguna otra superficie
-—ni un dict `RECOVERY_BY_KIND`, ni el test, ni el README— vuelve a escribir esos
-textos: una segunda copia es la que se pudre. El test fija los ANCLAS de cada
-consejo (que el de un 402 nombre `wallet()`, que el del riel nombre el alta),
-no la redacción.
+**FREE TEXT AND NOT AN ENUM, and the argument is that the enum ALREADY EXISTS.**
+The house has one pattern for this and it lives in two places: the service's
+`caveats[].code` / `caveats[].text`, and this module's `kind` / message. **You
+branch on the code, you read the text.** `recovery` is the TEXT half of a pair
+whose CODE half is already `kind`: a `RecoveryCode` would be a second
+discriminator in 1:1 correspondence with `kind`, that is, a duplicate key that
+can only fall out of sync. And the content of a recovery is instructions, which
+have no finite vocabulary; what does have one is the taxonomy, and it is already
+typed.
 
-🔴 **NINGÚN `recovery` INTERPOLA NADA — es la versión SDK del `_redact` del
-servicio.** El repo del índice tiene el guard del otro lado
-(`describenet/chain/rpc.py::_redact`, que borra la URL del proveedor de todo lo
-que va a levantar o loguear, porque la API key vive en el path). Acá el
-equivalente es estructural en vez de defensivo: **el texto lo escribimos
-nosotros y es una constante de clase**, así que no puede arrastrar una URL de
-RPC con su clave, un DSN, ni el mensaje crudo de una excepción ajena. EM avisó
-hoy que un error sin clasificar «puede traer una URL de RPC con su API key
-adentro» y que le pusieron un test con un secreto de mentira que falla si se
-filtra; el nuestro está en `tests/test_recovery.py` y hace lo mismo, con el
-guard extra de que `recovery` tiene que seguir siendo el MISMO objeto que el
-atributo de la clase (una `property` que interpole se pone roja ahí).
+**WHERE IT LIVES, AND WHY IT IS NEVER RE-TYPED ANYWHERE:** each class declares
+its own **in its body**, as a constant. No other surface — not a
+`RECOVERY_BY_KIND` dict, not the test, not the README — writes those texts again:
+a second copy is the one that rots. The test pins the ANCHORS of each piece of
+advice (that a 402's names `wallet()`, that the rail's names the allowlisting),
+not the wording.
 
-⚠️ **Lo que este guard NO cubre, dicho antes de que alguien lo suponga:** el
-MENSAJE de `PartnerSigningError` sí interpola la excepción del firmante
-(`f"… ({type(exc).__name__}: {exc})"`, `partner.py:249`), y eso es deliberado
-—nombrar la causa real fue la lección de `chain_name_for`— pero significa que un
-cliente de KMS que meta su endpoint en el texto lo publica por ahí. Es el
-mensaje, no `recovery`, y se deja anotado en vez de tapado.
+🔴 **NO `recovery` INTERPOLATES ANYTHING — it is the SDK version of the service's
+`_redact`.** The index repo has the guard on the other side
+(`describenet/chain/rpc.py::_redact`, which strips the provider URL from anything
+about to be raised or logged, because the API key lives in the path). Here the
+equivalent is structural rather than defensive: **we write the text and it is a
+class constant**, so it cannot drag along an RPC URL with its key, a DSN, or the
+raw message of somebody else's exception. EM warned that same day that an
+unclassified error "can carry an RPC URL with its API key inside" and that they
+added a test with a fake secret that fails if it leaks; ours is in
+`tests/test_recovery.py` and does the same, with the extra guard that `recovery`
+has to remain the SAME object as the class attribute (a `property` that
+interpolates turns it red).
+
+⚠️ **What this guard does NOT cover, said before anyone assumes it:** the MESSAGE
+of `PartnerSigningError` does interpolate the signer's exception
+(`f"… ({type(exc).__name__}: {exc})"`, `partner.py:249`), and that is deliberate
+— naming the real cause was the lesson of `chain_name_for` — but it means a KMS
+client that puts its endpoint in the text publishes it that way. It is the
+message, not `recovery`, and it is left annotated rather than papered over.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-#: El `kind` que usa `execution-market` para el mismo bucket. Se publica para
-#: que una migración pueda comparar contra los dos sin adivinar.
+#: The `kind` `execution-market` uses for the same bucket. Published so a
+#: migration can compare against both without guessing.
 HTTP_5XX_LEGACY_KIND = "http_5xx"
 
 
 class DescribeError(Exception):
-    """Base de toda falla de transporte o protocolo contra describe.
+    """Base of every transport or protocol failure against describe.
 
-    `kind` es el contrato: se ramifica por ahí (o por la subclase), **jamás por
-    el texto del mensaje**. Los mensajes se reescriben; los `kind` no.
+    `kind` is the contract: you branch on it (or on the subclass), **never on the
+    message text**. Messages get rewritten; `kind`s do not.
 
-    Lo mismo vale para `payment_sent`: se ramifica por el ATRIBUTO, nunca por
-    buscar «después de pagar» en el mensaje.
+    The same goes for `payment_sent`: branch on the ATTRIBUTE, never on searching
+    for "after paying" in the message.
     """
 
     kind: str = "unreachable"
 
-    #: ¿Se levantó esta excepción DESPUÉS de que la credencial de pago firmada
-    #: salió del proceso?
+    #: Was this exception raised AFTER the signed payment credential left the
+    #: process?
     #:
-    #: 🔴 Qué prueba y qué NO prueba, porque la diferencia es la que importa:
+    #: 🔴 What it proves and what it does NOT prove, because the difference is
+    #: what matters:
     #:
-    #:   * `True` prueba que existe una autorización EIP-3009 **firmada y
-    #:     despachada** por el monto de `payment["amount_usd"]`. El settlement
-    #:     PUDO haber ocurrido. Le toca reconciliar a quien llama.
-    #:   * `True` **NO** prueba que el USDC se movió. Eso sólo se prueba con un
-    #:     `payment["transaction_hash"]` presente, y ese hash sólo llega si el
-    #:     servidor alcanzó a contestar con su cabecera `X-Payment-Receipt`.
-    #:   * `False` sí es una afirmación fuerte en el otro sentido: no se firmó
-    #:     nada, no salió ninguna credencial, no se gastó un centavo. Es el valor
-    #:     de toda ruta gratis y del tramo previo al 402 de una ruta paga.
+    #:   * `True` proves an EIP-3009 authorization **signed and dispatched** for
+    #:     the amount in `payment["amount_usd"]` exists. Settlement MAY have
+    #:     happened. Reconciling is the caller's job.
+    #:   * `True` does **NOT** prove the USDC moved. That is only proved by a
+    #:     present `payment["transaction_hash"]`, and that hash only arrives if
+    #:     the server managed to answer with its `X-Payment-Receipt` header.
+    #:   * `False` IS a strong claim in the other direction: nothing was signed,
+    #:     no credential left, not a cent was spent. It is the value of every free
+    #:     route and of the stretch before a metered route's 402.
     payment_sent: bool = False
 
-    #: Detalle de esa credencial cuando `payment_sent` es `True`; `None` si no.
-    #: Claves: `amount_usd` (lo que se firmó, como STRING —es plata—),
-    #: `network`, `resource` (la ruta) y `transaction_hash` (el
-    #: `X-Payment-Receipt`, o `None` si el servidor no llegó a contestar).
+    #: Detail of that credential when `payment_sent` is `True`; `None` otherwise.
+    #: Keys: `amount_usd` (what was signed, as a STRING — it is money),
+    #: `network`, `resource` (the route) and `transaction_hash` (the
+    #: `X-Payment-Receipt`, or `None` if the server never answered).
     payment: Optional[Dict[str, Any]] = None
 
-    #: QUÉ HACER EN VEZ DE. Texto para un humano, estable, **constante de clase**.
+    #: WHAT TO DO INSTEAD. Text for a human, stable, **a class constant**.
     #:
-    #: 🔴 `None` significa *no hay ruta de recuperación real para este fallo*, y
-    #: es una decisión tomada y no un olvido: cada subclase declara la suya en su
-    #: propio cuerpo —también cuando vale `None`— y hay un test que se pone rojo
-    #: si una clase nueva no la declara. Ver el bloque «`recovery`» de la
-    #: cabecera para el porqué del texto libre, del vacío honesto y del guard
-    #: contra filtraciones.
+    #: 🔴 `None` means *there is no real recovery path for this failure*, and it
+    #: is a decision taken rather than an oversight: every subclass declares its
+    #: own in its own body — including when it is `None` — and there is a test
+    #: that turns red if a new class does not declare one. See the "`recovery`"
+    #: block of the header for the why of the free text, the honest empty and the
+    #: leak guard.
     #:
-    #: Se LEE, no se ramifica: para ramificar está `kind`.
+    #: It is READ, not branched on: for branching there is `kind`.
     recovery: Optional[str] = None
 
 
 class DescribeTimeout(DescribeError):
-    """La request superó el timeout del cliente.
+    """The request outlived the client timeout.
 
-    Incluye el arranque en frío del proveedor: su Lambda midió **15,2 s** de
-    cold start (INC-2026-08-19, citado en `client.py:19-23` de EM). Un timeout
-    corto convierte cada arranque en frío en un falso «no hay datos» — por eso
-    el default de este SDK son 30 s (R7) y no 8 s, que ya rompió una
-    integración real.
+    That includes the provider's cold start: their Lambda measured **15,2 s** of
+    cold start (INC-2026-08-19, cited in EM's `client.py:19-23`). A short timeout
+    turns every cold start into a fake "there is no data" — which is why this
+    SDK's default is 30 s (R7) and not 8 s, a value that already broke a real
+    integration.
 
-    🔴 **`recovery` es `None` A PROPÓSITO, y este es EL caso que justifica que el
-    campo pueda estar vacío.** Es el fallo más común del SDK y aun así no hay
-    ninguna OTRA cosa que hacer: la misma pregunta contra el mismo índice no
-    tiene una segunda puerta. Las dos salidas que parecen recuperaciones no lo
-    son, y las dos se descartaron con su medición:
+    🔴 **`recovery` is `None` ON PURPOSE, and this is THE case that justifies the
+    field being allowed to be empty.** It is the SDK's most common failure and
+    even so there is no OTHER thing to do: the same question against the same
+    index has no second door. The two exits that look like recoveries are not,
+    and both were discarded with their measurement:
 
-      * *«subí el timeout»* — el techo no es nuestro: el API Gateway del
-        proveedor corta a **29 s** y el default ya es 30. Pedir más es pedirle
-        al aire (ver R7 en `client.py`).
-      * *«reintentá»* — eso es un booleano, no una recuperación. Escribirlo acá
-        sería exactamente el error que EM señala. Y este SDK **no** publica hoy
-        ese booleano: `transient` no existe (medido 2026-08-30, ver la
-        cabecera), así que el hueco queda declarado y reportado en vez de
-        rellenado con una frase inútil.
+      * *"raise the timeout"* — the ceiling is not ours: the provider's API
+        Gateway cuts at **29 s** and the default is already 30. Asking for more is
+        asking thin air (see R7 in `client.py`).
+      * *"retry"* — that is a boolean, not a recovery. Writing it here would be
+        exactly the error EM points at. And this SDK does **not** publish that
+        boolean today: `transient` does not exist (measured 2026-08-30, see the
+        header), so the hole is left declared and reported instead of filled with
+        a useless sentence.
 
-    `tests/test_recovery.py` fija este `None`: es lo único que impide que
-    alguien «complete la tabla» por prolijidad.
+    `tests/test_recovery.py` pins this `None`: it is the only thing stopping
+    somebody from "completing the table" out of tidiness.
     """
 
     kind = "timeout"
@@ -250,29 +263,30 @@ class DescribeTimeout(DescribeError):
 
 
 class DescribeHTTPError(DescribeError):
-    """describe contestó con un status no-2xx.
+    """describe answered with a non-2xx status.
 
-    El 422 (dirección inválida) y el 429 (rate limit compartido — el presupuesto
-    vivo lo dice la cabecera `Ratelimit-Policy`, no un número copiado acá) caen
-    junto con los 5xx: todo consumidor los trata igual —«no hay respuesta
-    usable»— y lo que se lee para distinguirlos es `status_code`, no el bucket.
+    The 422 (invalid address) and the 429 (shared rate limit — the live budget is
+    stated by the `RateLimit-Policy` header, not by a number copied in here) land
+    together with the 5xx: every consumer treats them the same — "no usable
+    answer" — and what you read to tell them apart is `status_code`, not the
+    bucket.
 
-    Su `recovery` manda a `status_code` y no se disculpa por eso: **el bucket
-    junta tres causas que se arreglan distinto**, así que la recuperación
-    honesta es decir por dónde se separan en vez de dar un consejo promedio que
-    no sirve para ninguna.
+    Its `recovery` sends you to `status_code` and does not apologise for it: **the
+    bucket merges three causes that are fixed differently**, so the honest
+    recovery is to say where they split rather than give an average piece of
+    advice that serves none of them.
     """
 
     kind = "http_error"
 
     recovery = (
-        "Ramificá por `status_code`, no por este `kind`: acá caen causas que se "
-        "arreglan distinto. 4xx es TU request y el cuerpo nombra el campo (un "
-        "422 de dirección se arregla del lado del que llama). 429 es el límite "
-        "COMPARTIDO con los otros consumidores: el presupuesto vivo viaja en la "
-        "cabecera `Ratelimit-Policy` de esa misma respuesta, y se dispersa con "
-        "`jitter=` y se atribuye con `product=`, nunca pidiendo más rápido. 5xx "
-        "es del servicio y de este lado no hay nada que arreglar."
+        "Branch on `status_code`, not on this `kind`: causes that are fixed "
+        "differently land here. A 4xx is YOUR request and the body names the "
+        "field (a 422 on the address is fixed on the caller's side). A 429 is the "
+        "limit SHARED with the other consumers: the live budget travels in the "
+        "`RateLimit-Policy` header of that same response, and it is spread with "
+        "`jitter=` and attributed with `product=`, never by asking faster. A 5xx "
+        "is the service's and there is nothing to fix on this side."
     )
 
     def __init__(self, message: str, status_code: int) -> None:
@@ -281,140 +295,145 @@ class DescribeHTTPError(DescribeError):
 
 
 class DescribeUnreachable(DescribeError):
-    """Falla de transporte antes de cualquier status HTTP (DNS, connect, reset).
+    """Transport failure before any HTTP status (DNS, connect, reset).
 
-    Su `recovery` empuja a mirar la configuración del que llama antes que al
-    índice, y no es un reflejo: acá **nada llegó a describe**, así que el índice
-    es lo único que todavía no se puede acusar. Un host mal escrito no alcanza a
-    dar 404 —no hay servidor que lo conteste— y sale exactamente por acá.
+    Its `recovery` pushes you to look at the caller's configuration before the
+    index, and that is not a reflex: here **nothing reached describe**, so the
+    index is the one thing that cannot yet be blamed. A mistyped host never gets
+    as far as a 404 — no server answers it — and comes out exactly here.
     """
 
     kind = "unreachable"
 
     recovery = (
-        "Nada llegó a describe (o su respuesta no llegó a vos), así que antes de "
-        "culpar al índice revisá lo tuyo: que `base_url` sea "
-        "https://api.describe.net —un host mal escrito no alcanza a dar 404, da "
-        "esto— y que el egress de tu proceso (proxy, DNS, firewall) deje salir. "
-        "Descartado eso, no queda nada que arreglar de este lado."
+        "Nothing reached describe (or its answer did not reach you), so before "
+        "blaming the index check your own side: that `base_url` is "
+        "https://api.describe.net — a mistyped host does not get as far as a 404, "
+        "it gives this — and that your process's egress (proxy, DNS, firewall) "
+        "lets you out. With that ruled out, there is nothing left to fix on this "
+        "side."
     )
 
 
 class DescribeUnparseable(DescribeError):
-    """La respuesta llegó pero no se pudo leer con la forma prometida.
+    """The answer arrived but could not be read into the promised shape.
 
-    Es protocolo, no dato: un `chains: []` es una forma válida que dice «no hay
-    nada», y **no** pasa por acá. Sólo pasa un cuerpo que no es JSON o al que le
-    falta la clave esencial que la ruta promete en su schema.
+    This is protocol, not data: a `chains: []` is a valid shape that says "there
+    is nothing here", and it does **not** come through here. Only a body that is
+    not JSON, or one missing the essential key the route promises in its schema,
+    does.
 
-    Su `recovery` nombra al sospechoso que casi nadie mira primero: **un
-    intermediario**. El repo del servicio ya lo tiene escrito del otro lado —*«a
-    gateway erroring with an HTML page still returns 200 sometimes»*
-    (`describenet/chain/rpc.py`)— y ése es el caso que se ve exactamente así.
+    Its `recovery` names the suspect almost nobody checks first: **an
+    intermediary**. The service repo already has it written on the other side —
+    *"a gateway erroring with an HTML page still returns 200 sometimes"*
+    (`describenet/chain/rpc.py`) — and that case looks exactly like this.
     """
 
     kind = "unparseable"
 
     recovery = (
-        "Llegó un cuerpo pero no es el que la ruta promete: sospechá de un "
-        "intermediario antes que del índice — un proxy corporativo o un portal "
-        "cautivo contesta 200 con una página HTML y se ve idéntico a esto. "
-        "Verificá `base_url` y que no haya un gateway en el medio. Si el cuerpo "
-        "de verdad salió de describe, es un bug del servicio y reintentar no lo "
-        "arregla: reportalo."
+        "A body arrived but it is not the one the route promises: suspect an "
+        "intermediary before the index — a corporate proxy or a captive portal "
+        "answers 200 with an HTML page and it looks identical to this. Check "
+        "`base_url` and that there is no gateway in the middle. If the body really "
+        "did come from describe, it is a service bug and retrying does not fix it: "
+        "report it."
     )
 
 
 class DescribeMalformedHash(DescribeError):
-    """Un campo de hash llegó con algo que **no tiene forma de hash**.
+    """A hash field arrived carrying something that **is not shaped like a hash**.
 
-    Aporte de **KarmaKadabra** (`#agents`, 2026-08-30), del hallazgo que ellos
-    llaman «el 200 sin tx»: *«si nosotros no chequeáramos el tx, habríamos
-    contado 14 ratings que no existen»*. Un 200 que no hizo la cosa es peor que
-    un 503 porque el cliente lo toma por bueno.
+    Contributed by **KarmaKadabra** (`#agents`, 2026-08-30), out of the finding
+    they call *"el 200 sin tx"* ("the 200 with no tx"): *"si nosotros no
+    chequeáramos el tx, habríamos contado 14 ratings que no existen"* — [in
+    English] "if we did not check the tx, we would have counted 14 ratings that do
+    not exist". A 200 that did not do the thing is worse than a 503, because the
+    client takes it for good.
 
-    🔴 **ESTA EXCEPCIÓN NUNCA SE LEVANTA. No escribas un `except` para ella.**
-    Viaja únicamente como argumento de `on_error`, y existe como clase por una
-    razón mecánica: el canal de observación está tipado
-    `Callable[[DescribeError], None]`, así que para reutilizar el canal donde el
-    consumidor YA está mirando —que es lo que pedía KK— el hecho tiene que SER
-    un `DescribeError`. Se ramifica por `kind == "malformed_hash"` o por
-    `isinstance`, jamás por un `try/except` que no se va a disparar nunca.
+    🔴 **THIS EXCEPTION IS NEVER RAISED. Do not write an `except` for it.** It
+    travels only as an argument to `on_error`, and it exists as a class for one
+    mechanical reason: the observation channel is typed
+    `Callable[[DescribeError], None]`, so to reuse the channel the consumer is
+    ALREADY watching — which is what KK asked for — the fact has to BE a
+    `DescribeError`. Branch on `kind == "malformed_hash"` or on `isinstance`,
+    never on a `try/except` that will never fire.
 
-    ⚠️ Y hay una tensión con esta misma taxonomía que se declara en vez de
-    taparse: la cabecera de este módulo explica que `PartialIndex` **no se
-    portó** de Execution Market justamente porque «publicar una excepción que el
-    SDK jamás levanta invita a un `except` muerto». El criterio que separa los
-    dos casos no es «se levanta o no» sino **para qué existe la clase**:
-    `PartialIndex` existía para que alguien la atrapara y nadie la iba a tirar;
-    ésta existe para viajar por un canal ya tipado, y su docstring lo grita en la
-    primera línea. Si algún día `on_error` acepta algo más que un `DescribeError`,
-    esta clase deja de hacer falta.
+    ⚠️ And there is a tension with this very taxonomy that is declared rather than
+    papered over: this module's header explains that `PartialIndex` was **not
+    ported** from Execution Market precisely because "publishing an exception the
+    SDK never raises invites a dead `except`". The criterion separating the two
+    cases is not "is it raised or not" but **what the class is FOR**:
+    `PartialIndex` existed so somebody could catch it and nobody was going to
+    throw it; this one exists to travel down an already-typed channel, and its
+    docstring shouts as much in its first line. If `on_error` ever accepts
+    something wider than a `DescribeError`, this class stops being necessary.
 
-    Por qué el fallo NO tumba la lectura: el resto de la respuesta puede ser
-    perfectamente útil, y romper una descomposición de reputación entera por un
-    campo accesorio sería peor que el bug que se está cazando. El campo tipado
-    queda en `None` —para que nadie arme un link a un explorador con basura— y
-    el valor crudo sobrevive en el `raw` del modelo, que es donde se investiga.
+    Why the failure does NOT take the read down: the rest of the response may be
+    perfectly useful, and breaking an entire reputation breakdown over an
+    accessory field would be worse than the bug being hunted. The typed field is
+    left `None` — so nobody builds an explorer link out of garbage — and the raw
+    value survives in the model's `raw`, which is where it gets investigated.
 
-    🔴 **Ausente y malformado NO son lo mismo, y el modelo los distingue** (R1
-    aplicada un nivel más abajo):
+    🔴 **Absent and malformed are NOT the same thing, and the model keeps them
+    apart** (R1 applied one level further down):
 
-        rating.tx_hash is None y `malformed_hashes` vacío   → NO VINO
-        rating.tx_hash is None y "tx_hash" en malformed     → VINO BASURA
+        rating.tx_hash is None and `malformed_hashes` empty → IT DID NOT COME
+        rating.tx_hash is None and "tx_hash" in malformed   → GARBAGE CAME
 
-    `fields` trae la ubicación de cada uno, con índice cuando está en una lista:
-    `["ratings[3].tx_hash", "snapshot.inputs_digest"]`.
+    `fields` carries the location of each one, with an index when it is inside a
+    list: `["ratings[3].tx_hash", "snapshot.inputs_digest"]`.
     """
 
     kind = "malformed_hash"
 
-    #: La única `recovery` que le habla a un error que NUNCA se levanta, y por
-    #: eso es la más concreta de todas: la respuesta ya está en las manos del
-    #: consumidor, así que hay algo que hacer AHORA y algo que NO hacer.
+    #: The only `recovery` that speaks to an error that is NEVER raised, and that
+    #: is why it is the most concrete of all: the response is already in the
+    #: consumer's hands, so there is something to do NOW and something NOT to do.
     recovery = (
-        "El campo tipado quedó en `None` a propósito y el valor crudo sobrevive "
-        "en el `raw` del modelo; `fields` dice en qué ruta está cada uno. 🔴 No "
-        "lo cuentes como una transacción ni armes un link de explorador con él. "
-        "Y NO descartes la respuesta: el resto llegó bien y ya lo tenés entero."
+        "The typed field was left `None` on purpose and the raw value survives in "
+        "the model's `raw`; `fields` says which path each one is at. 🔴 Do not "
+        "count it as a transaction and do not build an explorer link out of it. "
+        "And do NOT discard the response: the rest arrived fine and you already "
+        "have all of it."
     )
 
     def __init__(self, message: str, fields: Optional[List[str]] = None) -> None:
         super().__init__(message)
-        #: Rutas de los campos que llegaron malformados, en orden de aparición.
+        #: Paths of the fields that arrived malformed, in order of appearance.
         self.fields: List[str] = list(fields or [])
 
 
 class PaymentRequiredError(DescribeError):
-    """Una ruta medida contestó 402 y este cliente no tiene con qué pagar.
+    """A metered route answered 402 and this client has nothing to pay with.
 
-    **No la traga el fail-open.** Que falte un `payer` es configuración de quien
-    llama, no una caída del índice: degradarla a `None` escondería un error de
-    programación detrás del mismo valor que significa «no hay evidencia».
+    **Not swallowed by the fail-open.** A missing `payer` is the caller's
+    configuration, not an index outage: degrading it to `None` would hide a
+    programming error behind the same value that means "there is no evidence".
 
-    `challenge` trae el 402 crudo tal cual llegó — `amount`, `token`,
-    `recipient`, `accepts[]`, `free_preview`, `pricing`. Se guarda entero a
-    propósito: la guía publicada manda tomar los valores del challenge y
-    **nunca de una tabla cacheada** (docs.describe.net, «Paying with x402»,
-    paso 1), así que el SDK no se queda con un resumen suyo.
+    `challenge` carries the raw 402 exactly as it arrived — `amount`, `token`,
+    `recipient`, `accepts[]`, `free_preview`, `pricing`. It is kept whole on
+    purpose: the published guide says to take the values from the challenge and
+    **never from a cached table** (docs.describe.net, "Paying with x402", step 1),
+    so the SDK does not keep a summary of its own.
     """
 
     kind = "payment_required"
 
-    #: 🔴 La recuperación más útil que este SDK puede ofrecer, y por eso nombra
-    #: la ruta GRATIS y no sólo el arreglo de configuración: la mitad de los
-    #: cobros de este índice no había que pagarlos. El propio 402 lo dice —su
-    #: `free_preview` existe justamente para que nadie pague a ciegas por una
-    #: wallet vacía— y por eso el texto manda a leerlo del `challenge` guardado
-    #: en vez de repetir acá una ruta que se pudre
-    #: (`describenet/pricing.py::free_preview`: `{endpoint, gives}`, y la rama
-    #: de agente apunta a `/search/{query}`, no a la de wallet).
+    #: 🔴 The most useful recovery this SDK can offer, and that is why it names
+    #: the FREE door and not just the configuration fix: half the charges on this
+    #: index did not have to be paid. The 402 itself says so — its `free_preview`
+    #: exists precisely so nobody pays blind for an empty wallet — and that is why
+    #: the text sends you to read it from the stored `challenge` instead of
+    #: repeating a route here that would rot
+    #: (`describenet/pricing.py::free_preview`: `{endpoint, gives}`, and the agent
+    #: branch points at `/search/{query}`, not at the wallet one).
     recovery = (
-        "Es una ruta medida y este cliente no tiene con qué pagar: configurá "
-        "`payer=`, o `partner=` si describe dio de alta tu wallet. Pero mirá "
-        "primero si te alcanza la puerta gratis: `wallet()` contesta el score "
-        "global sin pagar ni firmar, y el 402 crudo nombra la puerta gratis de "
-        "ESTE sujeto en `challenge['free_preview']['endpoint']`."
+        "This is a metered route and this client has nothing to pay with: "
+        "configure `payer=`, or `partner=` if describe allowlisted your wallet. "
+        "But look first at whether the free door is enough: `wallet()` answers the "
+        "global score without paying or signing, and the raw 402 names the free "
+        "door for THIS subject in `challenge['free_preview']['endpoint']`."
     )
 
     def __init__(
@@ -427,48 +446,48 @@ class PaymentRequiredError(DescribeError):
 
     @property
     def price_usd(self) -> Optional[str]:
-        """El precio como STRING, tal cual lo mandó el servidor.
+        """The price as a STRING, exactly as the server sent it.
 
-        String y no float a propósito: el precio es plata y un `float("0.01")`
-        ya no es 0,01. Quien vaya a firmar lo pasa a `Decimal`, nunca a `float`.
+        A string and not a float on purpose: the price is money and a
+        `float("0.01")` is no longer 0.01. Whoever is going to sign converts it to
+        `Decimal`, never to `float`.
         """
         value = self.challenge.get("price_usd") or self.challenge.get("amount")
         return str(value) if value is not None else None
 
 
 class PartnerSigningError(DescribeError):
-    """El riel de partner no pudo firmar. **No salió ninguna request.**
+    """The partner rail could not sign. **No request went out.**
 
-    Es configuración de quien llama —el extra sin instalar, un firmante que
-    levanta, un KMS caído, una firma que no es hex— así que no la traga el
-    fail-open, por lo mismo que `PaymentRequiredError`: degradarla a `None`
-    convertiría «tu riel gratis está roto» en «esta wallet no tiene
-    reputación».
+    This is the caller's configuration — the extra not installed, a signer that
+    raises, a KMS that is down, a signature that is not hex — so the fail-open
+    does not swallow it, for the same reason as `PaymentRequiredError`: degrading
+    it to `None` would turn "your free rail is broken" into "this wallet has no
+    reputation".
 
-    🔴 **`payment_sent` es `False` y eso es una afirmación fuerte, no un
-    default**: la firma del riel ocurre ANTES de la primera request, así que
-    cuando esto sale no se pidió nada, no se recibió ningún 402, no se firmó
-    ninguna autorización EIP-3009 y no se movió un centavo. Es la mitad buena
-    de «levanta, no degrada».
+    🔴 **`payment_sent` is `False` and that is a strong claim, not a default**:
+    the rail's signature happens BEFORE the first request, so when this comes out
+    nothing was asked, no 402 was received, no EIP-3009 authorization was signed
+    and not a cent moved. It is the good half of "it raises, it does not degrade".
 
-    `wallet` trae la dirección del firmante si se alcanzó a leer (`None` si el
-    fallo fue justamente al pedirla). Es pública por diseño: es la que va en la
-    allowlist del servicio.
+    `wallet` carries the signer's address if it could be read (`None` if the
+    failure was precisely in asking for it). It is public by design: it is the one
+    that goes on the service's allowlist.
     """
 
     kind = "partner_signing"
 
-    #: El dato que hace útil esta recuperación es el que nadie deduce solo: un
-    #: riel roto **no bloquea nada gratis**. El servicio decide «gratis» ANTES de
-    #: mirar el partner (`describenet/paywall.py:772`, contra :794), así que las
-    #: rutas gratis no se firman nunca y siguen andando con el firmante muerto.
+    #: The fact that makes this recovery useful is the one nobody works out alone:
+    #: a broken rail **blocks nothing that is free**. The service decides "free"
+    #: BEFORE looking at the partner (`describenet/paywall.py:772`, against :794),
+    #: so the free routes are never signed and keep working with a dead signer.
     recovery = (
-        "El riel no llegó a firmar, así que no salió ninguna request y no hay "
-        "nada que reconciliar: arreglá el firmante, o instalá el extra con "
-        "`pip install uvd-describe-sdk[partner]`. Mientras tanto las rutas "
-        "GRATIS siguen andando — `wallet()`, `leaderboard()` y `health()` no se "
-        "firman nunca. Y si de verdad querés pagar, construí el cliente SIN "
-        "`partner=`: no cae solo al camino de pago, a propósito."
+        "The rail never got to sign, so no request went out and there is nothing "
+        "to reconcile: fix the signer, or install the extra with "
+        "`pip install uvd-describe-sdk[partner]`. In the meantime the FREE routes "
+        "keep working — `wallet()`, `leaderboard()` and `health()` are never "
+        "signed. And if you really do want to pay, build the client WITHOUT "
+        "`partner=`: it does not fall through to paying on its own, on purpose."
     )
 
     def __init__(self, message: str, wallet: Optional[str] = None) -> None:
@@ -477,52 +496,55 @@ class PartnerSigningError(DescribeError):
 
 
 class PartnerRejectedError(PaymentRequiredError):
-    """Firmaste como partner y describe **igual pidió que pagues**. No se pagó.
+    """You signed as a partner and describe **asked for money anyway**. Nothing
+    was paid.
 
-    Hereda de `PaymentRequiredError` a propósito, y la herencia dice algo
-    verdadero: los dos casos son «llegó un 402 y este cliente no puso un
-    centavo». Un consumidor que ya escribía `except PaymentRequiredError` la
-    atrapa sin cambiar una línea, y hereda `challenge` y `price_usd` — que acá
-    valen doble, porque dicen **cuánto te iba a costar** el riel roto.
+    It inherits from `PaymentRequiredError` on purpose, and the inheritance says
+    something true: both cases are "a 402 arrived and this client did not put in a
+    cent". A consumer who already wrote `except PaymentRequiredError` catches it
+    without changing a line, and inherits `challenge` and `price_usd` — which are
+    worth double here, because they say **how much the broken rail was going to
+    cost you**.
 
-    🔴 POR QUÉ ESTO LEVANTA EN VEZ DE PAGAR, que es la decisión entera del
-    modo partner:
+    🔴 WHY THIS RAISES INSTEAD OF PAYING, which is the whole decision of partner
+    mode:
 
-        Un partner con `payer=` configurado y el riel caído tiene un camino
-        obvio y silencioso: pagar. Y ahí el bug no se ve nunca — la respuesta
-        llega igual, el código funciona, y la factura de USDC aparece semanas
-        después. Es la misma familia del gate del servicio: *un bug acá no
-        rompe nada, no tira error, y regala/gasta el producto.*
+        A partner with `payer=` configured and the rail down has one obvious,
+        silent path: pay. And there the bug is never seen — the answer arrives
+        anyway, the code works, and the USDC invoice shows up weeks later. It is
+        the same family as the service's gate: *a bug here breaks nothing, raises
+        no error, and gives away / spends the product.*
 
-    Así que un 402 con `partner=` configurado es un FALLO y no una señal de
-    cobro. **El `payer` no se usa aunque esté**, y el mensaje lo dice a gritos.
-    Quien de verdad quiera pagar construye un cliente sin `partner=`: es una
-    línea, es explícita, y queda escrita en su código.
+    So a 402 with `partner=` configured is a FAILURE and not a billing signal.
+    **The `payer` is not used even if it is there**, and the message says so
+    loudly. Whoever really wants to pay builds a client without `partner=`: it is
+    one line, it is explicit, and it stays written in their code.
 
-    Las cuatro causas, todas fail-closed del lado del servicio:
-      * la wallet no está en la allowlist (el alta la hace describe);
-      * se firmó contra otro host (tu `base_url` no es `api.describe.net`);
-      * el reloj del firmante se corrió más de 300 s (la ventana del gate);
-      * la firma no cubría la URL que salió (query incluida).
+    The four causes, all fail-closed on the service's side:
+      * the wallet is not in the allowlist (describe does the allowlisting);
+      * it was signed against another host (your `base_url` is not
+        `api.describe.net`);
+      * the signer's clock drifted more than 300 s (the gate's window);
+      * the signature did not cover the URL that went out (query included).
 
-    `wallet` es la dirección con la que se firmó: es lo primero que hay que
-    mirar y lo que hay que citarle a describe para el alta.
+    `wallet` is the address it was signed with: it is the first thing to look at
+    and what to quote to describe for the allowlisting.
     """
 
     kind = "partner_rejected"
 
-    #: 🔴 El caso de manual del aporte de EM: es TERMINAL. Reintentar contra una
-    #: wallet que no está en la allowlist es la versión describe de sus 317 horas
-    #: contra una ventana cerrada — el alta la hace describe y ninguna cantidad
-    #: de requests la produce.
+    #: 🔴 The textbook case of EM's contribution: it is TERMINAL. Retrying against
+    #: a wallet that is not in the allowlist is the describe version of their 317
+    #: hours against a closed window — describe does the allowlisting and no amount
+    #: of requests produces it.
     recovery = (
-        "El alta la hace describe, no vos: pedile que sume la wallet de "
-        "`exc.wallet` a su allowlist — reintentar no la va a producir. Antes de "
-        "eso descartá las otras tres causas: `base_url` tiene que ser "
-        "https://api.describe.net, el reloj del firmante entra en una ventana de "
-        "300 s, y la firma tiene que cubrir la query que mandaste. Mientras "
-        "tanto `wallet()` sigue gratis y sin firma; si querés pagar de verdad, "
-        "construí el cliente SIN `partner=`."
+        "describe does the allowlisting, not you: ask them to add the wallet in "
+        "`exc.wallet` to their allowlist — retrying will not produce it. Before "
+        "that, rule out the other three causes: `base_url` has to be "
+        "https://api.describe.net, the signer's clock has to fit a 300 s window, "
+        "and the signature has to cover the query you sent. In the meantime "
+        "`wallet()` is still free and unsigned; if you want to pay for real, build "
+        "the client WITHOUT `partner=`."
     )
 
     def __init__(
@@ -536,32 +558,32 @@ class PartnerRejectedError(PaymentRequiredError):
 
 
 class DoNotPayError(DescribeError):
-    """El 402 pide que se pague a una dirección que NO es la tesorería pinneada.
+    """The 402 asks to pay an address that is NOT the pinned treasury.
 
-    **Es `DO_NOT_PAY`, no un retry, y no la traga el fail-open.** Regla 4 de
-    `F0-describe-sdk.md:192-205` y paso 2 de la guía publicada: *«If the
-    challenge names another address, do not pay: either it did not come from
-    describe, or the treasury changed and the server did not find out.»*
+    **This is `DO_NOT_PAY`, not a retry, and the fail-open does not swallow it.**
+    Rule 4 of `F0-describe-sdk.md:192-205` and step 2 of the published guide: *"If
+    the challenge names another address, do not pay: either it did not come from
+    describe, or the treasury changed and the server did not find out."*
 
-    Reintentar acá es lo peor que puede hacer un cliente: convierte un desvío
-    de fondos en un desvío de fondos con reintentos.
+    Retrying here is the worst thing a client can do: it turns a diversion of
+    funds into a diversion of funds with retries.
     """
 
     kind = "do_not_pay"
 
-    #: El bucket junta cinco sitios de `payment.py` que comparten UN hecho —
-    #: los cinco levantan **antes** de `create_authorization()`, o sea sin firmar
-    #: — y se separan por `expected`/`offered`. La recuperación dice el hecho
-    #: común primero (no se gastó nada) y después la bifurcación, porque un
-    #: consejo promedio acá sería el peor de todos: «pagá de otra forma» contra
-    #: una dirección desviada es la línea que este error existe para no escribir.
+    #: The bucket merges five sites in `payment.py` that share ONE fact — all five
+    #: raise **before** `create_authorization()`, that is, without signing — and
+    #: they are told apart by `expected`/`offered`. The recovery states the common
+    #: fact first (nothing was spent) and then the fork, because an average piece
+    #: of advice here would be the worst of all: "pay some other way" against a
+    #: diverted address is the line this error exists in order not to write.
     recovery = (
-        "🔴 No se firmó nada y no se gastó nada, y esto NO se reintenta: "
-        "reintentar un desvío de fondos sólo lo repite. Compará `expected` con "
-        "`offered` — si lo que no cierra es la RED, elegí una de las que "
-        "describe ofrece (`pay_network=`) o instalá el extra x402; si lo que no "
-        "cierra es la DIRECCIÓN, no pagues por ningún camino y avisale a "
-        "describe. `wallet()` sigue contestando el score global gratis."
+        "🔴 Nothing was signed and nothing was spent, and this is NOT retried: "
+        "retrying a diversion of funds only repeats it. Compare `expected` with "
+        "`offered` — if what does not match is the NETWORK, pick one of the ones "
+        "describe offers (`pay_network=`) or install the x402 extra; if what does "
+        "not match is the ADDRESS, do not pay by any route and tell describe. "
+        "`wallet()` still answers the global score for free."
     )
 
     def __init__(self, message: str, expected: str, offered: str) -> None:
@@ -578,18 +600,18 @@ def mark_payment_sent(
     resource: str,
     transaction_hash: Optional[str] = None,
 ) -> None:
-    """Marcar una excepción como posterior a la firma. La llama sólo el cliente.
+    """Mark an exception as post-signature. Only the client calls this.
 
-    Muta el objeto en vez de envolverlo en una excepción nueva a propósito: un
-    `except DescribeTimeout` ya escrito en el código de un consumidor tiene que
-    seguir atrapándola. Cambiar la CLASE para agregar un dato es romper el
-    `except` de todo el mundo por una etiqueta.
+    It mutates the object instead of wrapping it in a new exception on purpose: an
+    `except DescribeTimeout` already written in a consumer's code has to keep
+    catching it. Changing the CLASS to add a datum is breaking everybody's
+    `except` over a label.
 
-    Y el aviso se escribe **también en el mensaje**, no sólo en el atributo,
-    porque quien abre un traceback en un log a las 3 AM no tiene el objeto a
-    mano — tiene una línea de texto. El atributo es para ramificar; el texto es
-    para leer. (Es el mismo par que `caveats[].code` / `caveats[].text` del
-    servicio: se decide por el código, se lee el texto.)
+    And the warning is written **into the message too**, not just the attribute,
+    because whoever opens a traceback in a log at 3 AM does not have the object at
+    hand — they have a line of text. The attribute is for branching; the text is
+    for reading. (It is the same pair as the service's `caveats[].code` /
+    `caveats[].text`: decide on the code, read the text.)
     """
     exc.payment_sent = True
     exc.payment = {
@@ -600,20 +622,20 @@ def mark_payment_sent(
     }
     if transaction_hash:
         prueba = (
-            f" HAY RECIBO: X-Payment-Receipt={transaction_hash} — el settlement "
-            "ocurrió, el gasto está confirmado y es citable."
+            f" THERE IS A RECEIPT: X-Payment-Receipt={transaction_hash} — "
+            "settlement happened, the spend is confirmed and it is citable."
         )
     else:
         prueba = (
-            " NO llegó `X-Payment-Receipt`, así que no hay prueba en ninguno de "
-            "los dos sentidos: este SDK no puede afirmar que se liquidó ni que no."
+            " NO `X-Payment-Receipt` arrived, so there is no proof either way: "
+            "this SDK cannot claim it settled nor that it did not."
         )
     base = str(exc.args[0]) if exc.args else str(exc)
     exc.args = (
-        f"{base} — 🔴 LA CREDENCIAL DE PAGO YA SE FIRMÓ Y SE DESPACHÓ "
-        f"({amount_usd or '?'} USD en {network}, {resource}): esto NO es «no pude "
-        f"preguntar», es «puede que haya pagado y no sé qué recibí».{prueba} "
-        "Reconciliá antes de reintentar: el nonce se consume en el settlement, "
-        "así que reenviar esta credencial no vuelve a pagar y pedir un challenge "
-        "NUEVO cobra otra vez.",
+        f"{base} — 🔴 THE PAYMENT CREDENTIAL WAS ALREADY SIGNED AND DISPATCHED "
+        f"({amount_usd or '?'} USD on {network}, {resource}): this is NOT «I could "
+        f"not ask», it is «I may have paid and I do not know what I got»."
+        f"{prueba} Reconcile before retrying: the nonce is consumed at settlement, "
+        "so resending this credential does not pay again and asking for a NEW "
+        "challenge charges you once more.",
     )

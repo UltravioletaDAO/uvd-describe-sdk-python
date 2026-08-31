@@ -1,57 +1,62 @@
-"""`badge_url()` — la única función del SDK que **no toca la red**.
+"""`badge_url()` — the one function of the SDK that **does not touch the network**.
 
-Construye la URL de `GET /badge/{wallet}.svg` y nada más. No hace request, no
-valida contra el índice, no dice si la wallet existe. Es a propósito: la URL
-sirve para meterla en un `<img>` y que el navegador de quien mira la página
-haga el fetch, no el proceso que la genera.
+It builds the `GET /badge/{wallet}.svg` URL and nothing else. It makes no request,
+does not validate against the index, does not say whether the wallet exists. That
+is on purpose: the URL is meant to go into an `<img>` so the browser of whoever is
+looking at the page does the fetch, not the process that generated it.
 
-Por qué esto es la pieza que más le importa a Saul, textual (2026-08-29):
+Why this is the piece Saul cares about most, verbatim (2026-08-29):
 
-    «investiguen cómo fue el like button de Facebook […] era como un pedacito
+    *«investiguen cómo fue el like button de Facebook […] era como un pedacito
      de JavaScript que se copiaba y se pegaba […] algo que la gente solamente
      con un pedacito pueda copiar y pegar. Ya solo con eso, inmediatamente es
-     como el like button que está por todo lado, pero con su reputación»
+     como el like button que está por todo lado, pero con su reputación»*
 
-La ruta ya está viva. Medida el 2026-08-30:
-`GET /badge/0x97cd…0996.svg` → **HTTP 200, `image/svg+xml`, 602 bytes**, con
-`Cache-Control: public, max-age=3600, stale-if-error=604800`. Ese
-`stale-if-error` de una semana es el fallback de Saul («poné un fallback si es
-que describe está caído») resuelto por el borde: el badge sigue pintando el
-último valor conocido aunque el origen esté caído, sin una línea de código de
-quien lo embebe.
+    [translation] "look into how Facebook's like button worked […] it was like a
+    little piece of JavaScript you copied and pasted […] something people can copy
+    and paste with just a little piece. With that alone it is immediately like the
+    like button that is everywhere, but with its reputation."
 
-⚠️ **Un badge no reemplaza una lectura.** Es una imagen: no trae `caveats[]`, no
-distingue `[]` de `null` y no se puede ramificar sobre él. Para decidir se lee
-`wallet()`; el badge es para MOSTRAR. La documentación publicada lo dice con
-esas palabras — el endpoint libre «answers what the badge cannot: per-chain
-split, `caveats[]`, `[]` vs `null`».
+The route is already live. Measured 2026-08-30:
+`GET /badge/0x97cd…0996.svg` → **HTTP 200, `image/svg+xml`, 602 bytes**, with
+`Cache-Control: public, max-age=3600, stale-if-error=604800`. That week-long
+`stale-if-error` is Saul's fallback ("put a fallback in if describe is down")
+solved at the edge: the badge keeps painting the last known value even with the
+origin down, without a line of code from whoever embeds it.
+
+⚠️ **A badge does not replace a read.** It is an image: it does not carry
+`caveats[]`, it does not distinguish `[]` from `null` and you cannot branch on it.
+To decide you read `wallet()`; the badge is to SHOW. The published documentation
+says it in those words — the free endpoint "answers what the badge cannot:
+per-chain split, `caveats[]`, `[]` vs `null`".
 """
 
 from __future__ import annotations
 
 from urllib.parse import quote
 
-#: Sin barra final. El cliente lo normaliza igual, pero acá se deja explícito
-#: porque `badge_url` es la única superficie que se usa sin instanciar nada.
+#: No trailing slash. The client normalises it anyway, but it is made explicit
+#: here because `badge_url` is the only surface used without instantiating
+#: anything.
 DEFAULT_BASE_URL = "https://api.describe.net"
 
 
 def badge_url(wallet: str, *, base_url: str = DEFAULT_BASE_URL) -> str:
-    """La URL del badge SVG de una wallet. **Cero red.**
+    """The SVG badge URL of a wallet. **Zero network.**
 
     >>> badge_url("0x97cd97cfe21799bacbf39d0a53469e5f82f30996")
     'https://api.describe.net/badge/0x97cd97cfe21799bacbf39d0a53469e5f82f30996.svg'
 
-    La wallet viaja **verbatim**, sin `lower()`. No es un descuido: una EVM el
-    índice la normaliza del lado del servidor (case-insensitive), pero un id
-    Solana es **base58 case-SENSITIVE** y bajarlo a minúsculas nombra una clave
-    distinta — en silencio, con un 200 y un badge vacío. Lo declara el propio
-    schema del servicio: *«a Solana base58 id (case-SENSITIVE — lowercasing it
-    silently names a different key)»*.
+    The wallet travels **verbatim**, with no `lower()`. That is not an oversight:
+    an EVM one is normalised by the index server-side (case-insensitive), but a
+    Solana id is **case-SENSITIVE base58** and lowercasing it names a different key
+    — silently, with a 200 and an empty badge. The service's own schema declares
+    it: *"a Solana base58 id (case-SENSITIVE — lowercasing it silently names a
+    different key)"*.
 
-    Se escapa para URL porque el valor sale de datos de quien llama y termina en
-    un `<img src=...>`. `safe=""` escapa también la barra: sin eso, una wallet
-    con `/` inventada podría apuntar el `<img>` a otra ruta del índice.
+    It is URL-escaped because the value comes from the caller's data and ends up in
+    an `<img src=...>`. `safe=""` escapes the slash too: without that, a made-up
+    wallet containing `/` could point the `<img>` at another route of the index.
     """
     return f"{base_url.rstrip('/')}/badge/{quote(str(wallet), safe='')}.svg"
 
@@ -60,17 +65,17 @@ def badge_img_tag(
     wallet: str,
     *,
     base_url: str = DEFAULT_BASE_URL,
-    alt: str = "Reputación en describe",
+    alt: str = "describe reputation",
     height: int = 20,
 ) -> str:
-    """El `<img>` listo para copiar y pegar. También **cero red**.
+    """The copy-paste-ready `<img>`. Also **zero network**.
 
-    Es el pedacito que se copia y se pega, en su forma más chica: un `<img>`
-    no necesita JavaScript, no necesita permiso, funciona en un foro y en un
-    Markdown de GitHub.
+    It is the little piece that gets copied and pasted, in its smallest form: an
+    `<img>` needs no JavaScript, needs no permission, and works in a forum and in a
+    GitHub Markdown file.
 
-    El `alt` no es decoración: un badge sin texto alternativo es un número que
-    un lector de pantalla no puede leer, y el número es todo el contenido.
+    The `alt` is not decoration: a badge with no alternative text is a number a
+    screen reader cannot read, and the number is the entire content.
     """
     return (
         f'<img src="{badge_url(wallet, base_url=base_url)}" '

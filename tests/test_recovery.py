@@ -200,7 +200,7 @@ def test_la_tabla_de_quien_tiene_ruta_de_recuperacion_y_quien_no() -> None:
 #: nunca un fragmento de la redacción. Si alguien reescribe el texto, esto
 #: sobrevive; si alguien le saca la salida, esto se pone rojo.
 ANCLAJES = {
-    DescribeHTTPError: ["status_code", "Ratelimit-Policy", "jitter="],
+    DescribeHTTPError: ["status_code", "RateLimit-Policy", "jitter="],
     DescribeUnreachable: ["base_url"],
     DescribeUnparseable: ["base_url"],
     DescribeMalformedHash: ["raw", "fields"],

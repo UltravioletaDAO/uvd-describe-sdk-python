@@ -170,5 +170,5 @@ def test_el_docstring_deja_escritas_las_dos_trampas() -> None:
     """
     doc = WalletReputation.resolve_distinct_raters.__doc__
     assert doc is not None
-    for esperado in ("MeshRelay", "2026-08-30", "COTA INFERIOR", "doble-cuenta", "SUBESTIMA"):
+    for esperado in ("MeshRelay", "2026-08-30", "LOWER BOUND", "DOUBLE-COUNT", "UNDERESTIMATES"):
         assert esperado.lower() in doc.lower(), f"falta «{esperado}» en el docstring"

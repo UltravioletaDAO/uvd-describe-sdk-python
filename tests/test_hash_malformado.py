@@ -261,8 +261,8 @@ def test_el_aviso_no_reusa_el_texto_del_fail_open(make_client, caplog) -> None:
             c.agent("base", "25975")
 
     mensaje = " ".join(r.getMessage() for r in caplog.records)
-    assert "forma de identificador on-chain" in mensaje
-    assert "sin reputación" not in mensaje
+    assert "shaped like an on-chain identifier" in mensaje
+    assert "no reputation" not in mensaje
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +301,9 @@ def test_un_recibo_basura_no_se_toma_como_prueba_de_settlement(make_client) -> N
     assert exc.value.payment_sent is True, "la credencial salió: eso no cambia"
     assert exc.value.payment is not None
     assert exc.value.payment["transaction_hash"] is None
-    assert "NO llegó `X-Payment-Receipt`" in str(exc.value) or "no hay prueba" in str(exc.value)
+    assert "NO `X-Payment-Receipt` arrived" in str(exc.value) or "no proof" in str(
+        exc.value
+    )
 
 
 def test_pending_tampoco_prueba_un_settlement(make_client) -> None:
@@ -329,7 +331,7 @@ def test_pending_tampoco_prueba_un_settlement(make_client) -> None:
             c.wallet_breakdown("0xdead")
 
     assert exc.value.payment["transaction_hash"] is None
-    assert "el settlement ocurrió" not in str(exc.value)
+    assert "settlement happened" not in str(exc.value)
 
 
 def test_un_recibo_pending_en_un_200_no_se_marca_como_malformado(make_client) -> None:

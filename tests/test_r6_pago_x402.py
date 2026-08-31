@@ -211,7 +211,7 @@ def test_un_payto_distinto_es_do_not_pay_y_NO_se_firma() -> None:
 
     assert exc.value.expected.lower() == TREASURY_EVM.lower()
     assert exc.value.offered.startswith("0xATACANTE")
-    assert "NO se reintenta" in str(exc.value)
+    assert "NOT retried" in str(exc.value)
 
 
 def test_el_payto_se_compara_case_insensitive_pero_no_por_prefijo() -> None:
@@ -341,7 +341,7 @@ def test_un_4xx_despues_de_pagar_dice_que_no_se_reintente(make_client) -> None:
         with pytest.raises(DescribeHTTPError) as exc:
             c.wallet_breakdown("0xdead")
     assert exc.value.status_code == 409
-    assert "no" in str(exc.value).lower() and "reenvíes" in str(exc.value)
+    assert "do not resend" in str(exc.value)
 
 
 def test_no_hay_reintento_automatico(make_client) -> None:
@@ -394,7 +394,7 @@ def test_un_timeout_ANTES_de_firmar_NO_marca_ningun_pago(make_client) -> None:
 
     assert exc.value.payment_sent is False
     assert exc.value.payment is None
-    assert "CREDENCIAL" not in str(exc.value)
+    assert "CREDENTIAL" not in str(exc.value)
 
 
 def test_un_timeout_DESPUES_de_firmar_dice_que_la_credencial_ya_salio(
@@ -425,11 +425,11 @@ def test_un_timeout_DESPUES_de_firmar_dice_que_la_credencial_ya_salio(
     assert "/reputation/wallet/" in exc.value.payment["resource"]
     # Y el aviso está también en el texto: quien lee un traceback en un log a las
     # 3 AM no tiene el objeto a mano, tiene una línea.
-    assert "CREDENCIAL" in str(exc.value)
+    assert "CREDENTIAL" in str(exc.value)
     # 🔴 El límite conocido, escrito como assert: sin recibo no se puede afirmar
     # que el USDC se movió. El SDK dice «pudo», no «se liquidó».
     assert exc.value.payment["transaction_hash"] is None
-    assert "no hay prueba en ninguno de los dos sentidos" in str(exc.value)
+    assert "no proof either way" in str(exc.value)
 
 
 def test_un_4xx_despues_de_pagar_tambien_sale_marcado(make_client) -> None:
@@ -477,7 +477,7 @@ def test_un_recibo_en_el_fallo_convierte_el_quizas_en_certeza(make_client) -> No
     assert exc.value.payment_sent is True
     assert exc.value.payment is not None
     assert exc.value.payment["transaction_hash"] == RECIBO_REAL
-    assert "el settlement ocurrió" in str(exc.value)
+    assert "settlement happened" in str(exc.value)
 
 
 def test_un_cuerpo_ILEGIBLE_despues_de_pagar_tambien_sale_marcado(make_client) -> None:

@@ -1,19 +1,19 @@
-"""Smoke REAL contra `api.describe.net`. **Sólo rutas GRATIS.**
+"""REAL smoke against `api.describe.net`. **FREE routes only.**
 
-Es el único archivo del repo que toca la red. Existe porque la suite corre con
-un transporte de mentira —lo cual está bien y es rápido— pero un mock sólo
-prueba que el SDK lee bien lo que YO creo que manda el servicio. Este script
-prueba que el servicio manda eso.
+It is the only file in the repo that touches the network. It exists because the
+suite runs with a fake transport — which is fine and fast — but a mock only proves
+the SDK reads correctly what I BELIEVE the service sends. This script proves the
+service sends that.
 
-Es el patrón de `scripts/test_sdk_paridad.py` del servicio con el eje girado:
-allá es vendorizado-vs-instalado, acá es **SDK-vs-API-desplegada**. El modo de
-falla que atrapa es el real de un cliente: la API agrega o renombra un campo y
-el SDK lo descarta en silencio, con un 200 verde.
+It is the pattern of the service's `scripts/test_sdk_paridad.py` with the axis
+rotated: over there it is vendored-vs-installed, here it is
+**SDK-vs-deployed-API**. The failure mode it catches is a client's real one: the
+API adds or renames a field and the SDK silently discards it, with a green 200.
 
-🔴 **NUNCA llama una ruta paga.** `wallet_breakdown()` y `agent()` cuestan USDC
-de verdad, y un script de humo que gasta plata es un script que nadie corre.
-Para la ruta paga se verifica sólo que el **402 llega y se parsea** — pedir el
-challenge es gratis y es el primer movimiento previsto por el servicio.
+🔴 **It NEVER calls a metered route.** `wallet_breakdown()` and `agent()` cost real
+USDC, and a smoke test that spends money is a smoke test nobody runs. For the
+metered route it only verifies that the **402 arrives and parses** — asking for the
+challenge is free and is the first move the service expects.
 
     python examples/smoke_gratis.py
 """
@@ -44,7 +44,7 @@ SEMILLA = "0x97cd97cfe21799bacbf39d0a53469e5f82f30996"
 
 
 def main() -> int:
-    print(f"uvd-describe-sdk {__version__} — smoke contra api.describe.net\n")
+    print(f"uvd-describe-sdk {__version__} — smoke against api.describe.net\n")
     fallas = []
 
     with DescribeClient(product="smoke", fail_open=False) as d:
@@ -61,12 +61,12 @@ def main() -> int:
         if h.status != "ok":
             fallas.append(f"health.status = {h.status}")
         if not h.reading_policy:
-            fallas.append("health.reading_policy vacía: el SDK no la está leyendo")
+            fallas.append("health.reading_policy empty: the SDK is not reading it")
 
         # ── /leaderboard ───────────────────────────────────────────────────
         filas = d.leaderboard()
         assert filas is not None  # ídem: `fail_open=False`
-        print(f"\n  leaderboard     {len(filas)} filas")
+        print(f"\n  leaderboard     {len(filas)} rows")
         top = filas[0]
         print(
             f"                  #1 {top.wallet[:12]}… "
@@ -75,21 +75,21 @@ def main() -> int:
             f"raters={top.distinct_raters:,}"
         )
         if not filas:
-            fallas.append("leaderboard vacío")
+            fallas.append("leaderboard empty")
         # El orden es por la media bayesiana, no por el promedio: se comprueba
         # que `shrunk_score` viaje, que es lo que permite recomputarlo a mano.
         if top.shrunk_score is None:
-            fallas.append("la fila #1 no trae shrunk_score")
+            fallas.append("row #1 does not carry shrunk_score")
 
         # ── /wallets/{w}/chains ────────────────────────────────────────────
         rep = d.wallet(top.wallet)
         if rep is None:
-            fallas.append("wallet() devolvió None sobre la #1 del leaderboard")
+            fallas.append("wallet() returned None on the leaderboard #1")
         else:
             print(
                 f"\n  wallet          {rep.wallet[:12]}… "
                 f"score={format_score(rep.global_score)} "
-                f"identidades={rep.identity_count} "
+                f"identities={rep.identity_count} "
                 f"reviews={rep.total_reviews:,}"
             )
             print(f"                  policy={rep.policy_version} source={rep.source}")
@@ -98,7 +98,7 @@ def main() -> int:
             # R2: el sello de composición tiene que venir SIEMPRE.
             for campo in ("policy_version", "source", "refreshed_at"):
                 if getattr(rep, campo) is None:
-                    fallas.append(f"wallet(): falta {campo} — R2")
+                    fallas.append(f"wallet(): missing {campo} — R2")
             # Campos que la API sirve y el SDK podría estar tirando.
             desconocidos = set(rep.raw) - {
                 "wallet", "chains", "caveats", "identity_count",
@@ -107,20 +107,20 @@ def main() -> int:
                 "refreshed_at",
             }
             if desconocidos:
-                print(f"  ⚠️  campos NUEVOS en la respuesta (llegan por .raw): {sorted(desconocidos)}")
+                print(f"  ⚠️  NEW fields in the response (via .raw): {sorted(desconocidos)}")
 
         # ── una wallet que el índice no conoce ──────────────────────────────
         # R1 en vivo: la ausencia tiene que ser un OBJETO, no un None ni un 0.
         vacia = d.wallet("0x000000000000000000000000000000000000beef")
         if vacia is None:
-            fallas.append("una wallet desconocida devolvió None (debería ser un objeto)")
+            fallas.append("an unknown wallet returned None (it should be an object)")
         else:
             print(
-                f"\n  wallet vacía    identidades={vacia.identity_count} "
-                f"score={vacia.global_score!r} → se muestra «{format_score(vacia.global_score)}»"
+                f"\n  empty wallet    identities={vacia.identity_count} "
+                f"score={vacia.global_score!r} → shown as «{format_score(vacia.global_score)}»"
             )
             if vacia.global_score == 0:
-                fallas.append("🔴 R1 ROTA: una wallet sin datos volvió con score 0")
+                fallas.append("🔴 R1 BROKEN: a wallet with no data came back with score 0")
 
         # ── /badge/{w}.svg ─────────────────────────────────────────────────
         # `badge_url` no toca la red; acá se pide a mano para confirmar que la
@@ -136,11 +136,11 @@ def main() -> int:
         # ── el 402 de una ruta paga: se PIDE, no se paga ───────────────────
         try:
             d.wallet_breakdown(SEMILLA)
-            fallas.append("🔴 una ruta paga contestó SIN pagar — ¿se cobró algo?")
+            fallas.append("🔴 a metered route answered WITHOUT paying — was anything charged?")
         except PaymentRequiredError as exc:
             ch = exc.challenge
             print(
-                f"\n  402 (no pagado) price_usd={exc.price_usd} token={ch.get('token')} "
+                f"\n  402 (unpaid)    price_usd={exc.price_usd} token={ch.get('token')} "
                 f"accepts={len(ch.get('accepts') or [])}"
             )
             print(f"                  recipient={ch.get('recipient')}")
@@ -149,19 +149,19 @@ def main() -> int:
 
             if str(ch.get("recipient", "")).lower() != TREASURY_EVM.lower():
                 fallas.append(
-                    "🔴 la tesorería VIVA no coincide con la pinneada en el SDK: "
-                    f"viva={ch.get('recipient')} pinneada={TREASURY_EVM}"
+                    "🔴 the LIVE treasury does not match the one pinned in the SDK: "
+                    f"live={ch.get('recipient')} pinned={TREASURY_EVM}"
                 )
             else:
-                print("                  ✅ la tesorería viva == la pinneada en el SDK")
+                print("                  ✅ the live treasury == the one pinned in the SDK")
 
     print()
     if fallas:
-        print("❌ FALLAS:")
+        print("❌ FAILURES:")
         for f in fallas:
             print(f"   · {f}")
         return 1
-    print("✅ smoke OK — todas las rutas gratis contestaron y el SDK las leyó.")
+    print("✅ smoke OK — every free route answered and the SDK read them.")
     return 0
 
 
