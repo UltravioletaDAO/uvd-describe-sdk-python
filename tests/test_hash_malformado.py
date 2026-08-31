@@ -352,6 +352,48 @@ def test_un_recibo_pending_en_un_200_no_se_marca_como_malformado(make_client) ->
     assert visto == []
 
 
+def test_pending_ya_no_viaja_dentro_de_transaction_hash(make_client) -> None:
+    """`pending` legítimo, sí — pero en SU campo, no en el asiento de la prueba.
+
+    Hasta 0.1.0 el literal viajaba ADENTRO de `PaymentReceipt.transaction_hash`
+    en un 200: indistinguible de un hash citable sin re-chequear el string, que
+    es la familia exacta del INC-2026-08-26 de Execution Market (un placeholder
+    ocupando el lugar de la prueba). Desde 0.2.0 el centinela se separa:
+    `transaction_hash=None` + `settlement_pending=True`, y sigue SIN marcarse
+    como malformado — es el servicio hablando, no basura.
+    """
+    with make_client(
+        lambda _r: json_response(
+            {"wallet": "0xdead", "final_score": 80.0},
+            headers={"X-Payment-Receipt": "pending"},
+        ),
+        jitter=0,
+    ) as c:
+        b = c.wallet_breakdown("0xdead")
+
+    assert b.receipt is not None
+    assert b.receipt.transaction_hash is None
+    assert b.receipt.settlement_pending is True
+    assert b.receipt.malformed_hashes == ()
+
+
+def test_un_hash_real_no_enciende_settlement_pending(make_client) -> None:
+    """El contraste del de arriba: con hash citable, la bandera queda apagada."""
+    with make_client(
+        lambda _r: json_response(
+            {"wallet": "0xdead", "final_score": 80.0},
+            headers={"X-Payment-Receipt": TX_BASE},
+        ),
+        jitter=0,
+    ) as c:
+        b = c.wallet_breakdown("0xdead")
+
+    assert b.receipt is not None
+    assert b.receipt.transaction_hash == TX_BASE
+    assert b.receipt.settlement_pending is False
+    assert b.receipt.malformed_hashes == ()
+
+
 # ---------------------------------------------------------------------------
 # 🔴 EL CONTRASTE — el test más importante del archivo
 # ---------------------------------------------------------------------------

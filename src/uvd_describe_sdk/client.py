@@ -213,6 +213,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 from urllib.parse import quote
@@ -294,6 +295,16 @@ def _jitter_seconds(jitter: float) -> float:
     if jitter <= 0:
         return 0.0
     return _RNG.uniform(0.0, jitter)
+
+#: Anything shaped like a URL inside a server-written error body. The scheme
+#: prefix (`[a-z][a-z0-9+.-]*://`) is RFC 3986's, not a guess: it catches
+#: `https://`, `postgresql://`, `wss://` — every place a credential travels in a
+#: path or in userinfo. IGNORECASE because RFC 3986 §3.1 declares schemes
+#: case-insensitive and a server echoing `WSS://…` deserves the same scrub (the
+#: 2026-08-31 symmetry re-check caught the TS twin redacting it while this side
+#: let it through). Used by `_server_reason`; see its docstring for why the
+#: redaction runs BEFORE the truncation.
+_URL_EN_CUERPO = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
 
 #: Called with the exception being swallowed. See `_observe`.
 ErrorObserver = Callable[[DescribeError], None]
@@ -553,6 +564,51 @@ class DescribeClient:
         except ValueError as exc:
             raise DescribeUnparseable(f"GET {path} did not return JSON") from exc
 
+    @staticmethod
+    def _server_reason(response: httpx.Response) -> Optional[str]:
+        """What the server SAID, not just the number it said it with.
+
+        Contributed by Execution Market (verified additive, 2026-08-31): the
+        `recovery` of `DescribeHTTPError` has promised since day one that "the
+        body names the field" — and then the exception threw that body away and
+        carried the bare status. Whoever caught a 422 had to re-request to learn
+        which field was wrong. This reads `error` / `code` / `message` from the
+        JSON body — tolerant: a non-JSON or non-dict body is `None`, never a
+        second exception on top of the one being raised.
+
+        🔴 Two guards, in this order, and the order is the point:
+
+        * **URLs are redacted first** (`[a-z][a-z0-9+.-]*://…` →
+          `[url-redacted]`, the same token the TS twin writes — one text,
+          two twins). The body is written by the SERVER: a 5xx can echo
+          an upstream URL that carries an API key in its path — the exact shape
+          the service scrubs on its own side (`chain/rpc.py::_redact`, because
+          the key lives in the path). We do not get to assume they always did.
+        * **Truncation to ~300 chars runs AFTER the redaction.** The other order
+          could cut the string in the middle of a URL and leave the scheme and
+          key standing while amputating only the tail the regex needed.
+
+        Nothing here is ever interpolated into `recovery`: that stays the class
+        constant `tests/test_recovery.py` pins by object identity.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        if not isinstance(body, dict):
+            return None
+        partes: List[str] = []
+        for clave in ("error", "code", "message"):
+            valor = body.get(clave)
+            if valor is not None:
+                partes.append(f"{clave}={valor}")
+        if not partes:
+            return None
+        razon = _URL_EN_CUERPO.sub("[url-redacted]", " · ".join(partes))
+        if len(razon) > 300:
+            razon = razon[:300] + "…"
+        return razon
+
     def _get_json(
         self, path: str, *, params: Optional[Dict[str, Any]] = None
     ) -> Any:
@@ -562,6 +618,7 @@ class DescribeClient:
             raise DescribeHTTPError(
                 f"GET {path} → HTTP {response.status_code}",
                 status_code=response.status_code,
+                server_reason=self._server_reason(response),
             )
         return self._json(response, path)
 
@@ -835,6 +892,7 @@ class DescribeClient:
                 raise DescribeHTTPError(
                     f"GET {path} → HTTP {response.status_code}",
                     status_code=response.status_code,
+                    server_reason=self._server_reason(response),
                 )
             # Un 200 sin pagar: el servicio decidió no cobrar (o hay un caché
             # delante). No hubo credencial, así que no hay nada que marcar.
@@ -910,10 +968,21 @@ class DescribeClient:
         #     lo contrario — el settlement TODAVÍA no reportó nada;
         #   * cualquier basura, que es el «200 sin tx» de KK dentro del camino
         #     del dinero, donde miente más caro que en ningún otro lado.
-        # Con `None` la excepción usa su otra rama, que es la honesta: «no hay
-        # prueba en ninguno de los dos sentidos». Preferir el silencio a una
-        # afirmación fuerte que no se puede sostener.
+        # ⚠️ CORRECCIÓN (2026-08-31, revisión de simetría con el gemelo TS): la
+        # versión anterior de esta nota cerraba con «con `None` la excepción usa
+        # su otra rama, que es la honesta: no hay prueba en ninguno de los dos
+        # sentidos» — y para `pending` esa rama era OTRA mentira, más chica:
+        # decía que no llegó ningún `X-Payment-Receipt` cuando la cabecera SÍ
+        # llegó y el vendedor SÍ declaró el estado (cobró; el hash todavía no
+        # se reportó). `None` se queda — el campo del hash jamás carga el
+        # centinela (INC-2026-08-26 de Execution Market) — pero ahora el estado
+        # se DICE en vez de fingir silencio: `pendiente` viaja a
+        # `mark_payment_sent` como `settlement_pending` y el mensaje toma su
+        # propia rama, igual que `settlementPending` en el `PaymentAttempt` del
+        # gemelo. La basura sigue cayendo a «no hay prueba», que para ella sí
+        # es la rama honesta.
         recibo: Optional[str] = None
+        pendiente = False
         try:
             # 🔴 `disperse=False`: NO se duerme entre firmar la autorización
             # EIP-3009 y despacharla. El jitter dispersa un rebaño, y este
@@ -924,6 +993,7 @@ class DescribeClient:
                 path, params=params, headers={"X-PAYMENT": header}, disperse=False
             )
             cabecera = paid.headers.get("X-Payment-Receipt")
+            pendiente = cabecera is not None and str(cabecera) == SETTLEMENT_PENDING
             if cabecera is not None and looks_like_onchain_id(str(cabecera)):
                 recibo = str(cabecera)
             if paid.status_code >= 400:
@@ -932,6 +1002,7 @@ class DescribeClient:
                     "credential is already consumed: ask for a new challenge, do "
                     "not resend this one.",
                     status_code=paid.status_code,
+                    server_reason=self._server_reason(paid),
                 )
             pagado = parse(self._json(paid, path), self._receipt(paid))
             # Observar DESPUÉS de parsear y ANTES de devolver: si el observador
@@ -946,6 +1017,7 @@ class DescribeClient:
                 network=self._pay_network,
                 resource=path,
                 transaction_hash=recibo,
+                settlement_pending=pendiente,
             )
             raise
 

@@ -289,9 +289,28 @@ class DescribeHTTPError(DescribeError):
         "is the service's and there is nothing to fix on this side."
     )
 
-    def __init__(self, message: str, status_code: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int,
+        *,
+        server_reason: Optional[str] = None,
+    ) -> None:
+        """`server_reason` is what the body SAID (Execution Market's
+        contribution, 2026-08-31): the `recovery` above has promised since day
+        one that "the body names the field", and until today the exception threw
+        the body away and carried only the bare status. It arrives already
+        redacted and truncated by `client._server_reason` — the body is
+        server-written text and may echo URLs with keys in the path — and it is
+        appended to the MESSAGE, never to `recovery`, which
+        `tests/test_recovery.py` pins as a class constant by object identity.
+        Keyword-only so every existing positional call keeps meaning what it
+        meant."""
+        if server_reason:
+            message = f"{message} — the server says: {server_reason}"
         super().__init__(message)
         self.status_code = status_code
+        self.server_reason = server_reason
 
 
 class DescribeUnreachable(DescribeError):
@@ -599,6 +618,7 @@ def mark_payment_sent(
     network: str,
     resource: str,
     transaction_hash: Optional[str] = None,
+    settlement_pending: bool = False,
 ) -> None:
     """Mark an exception as post-signature. Only the client calls this.
 
@@ -612,6 +632,17 @@ def mark_payment_sent(
     hand — they have a line of text. The attribute is for branching; the text is
     for reading. (It is the same pair as the service's `caveats[].code` /
     `caveats[].text`: decide on the code, read the text.)
+
+    ⚠️ CORRECTION (2026-08-31, symmetry review against the TS twin): until
+    0.2.0 this function knew only two states — a citable hash, or "NO
+    `X-Payment-Receipt` arrived, so there is no proof either way". A seller
+    answering the literal `pending` fell into the second, and on `pending`
+    that sentence is FALSE: the header DID arrive and the seller DID state
+    the settlement — charged, hash not reported yet. `transaction_hash`
+    stays `None` (the hash field never carries the sentinel — Execution
+    Market's INC-2026-08-26, a placeholder in the proof column gets archived
+    as proof), but the state now travels in `settlement_pending` and gets its
+    own sentence, mirroring `settlementPending` on the TS `PaymentAttempt`.
     """
     exc.payment_sent = True
     exc.payment = {
@@ -619,11 +650,19 @@ def mark_payment_sent(
         "network": network,
         "resource": resource,
         "transaction_hash": transaction_hash,
+        "settlement_pending": settlement_pending,
     }
     if transaction_hash:
         prueba = (
             f" THERE IS A RECEIPT: X-Payment-Receipt={transaction_hash} — "
             "settlement happened, the spend is confirmed and it is citable."
+        )
+    elif settlement_pending:
+        prueba = (
+            " The seller DECLARED the settlement `pending`: it charged, and "
+            "the transaction hash has not been reported yet. That is a stated "
+            "state, not a missing header — the hash, once it exists, lives on "
+            "the chain, not in this response."
         )
     else:
         prueba = (

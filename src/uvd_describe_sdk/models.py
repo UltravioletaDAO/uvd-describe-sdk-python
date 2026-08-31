@@ -344,6 +344,19 @@ class WalletReputation:
 
 def parse_wallet_reputation(payload: Any) -> WalletReputation:
     body = _require(payload, "wallet", "GET /wallets/{wallet}/chains")
+    # 🔴 Wrong-parser guard, mirrored from the TypeScript twin (spirit measured
+    # here on 2026-08-31): fed the body of the METERED route, this parser used
+    # to succeed SILENTLY — `global_score=None` — turning a score that exists
+    # and was paid for into "not yet rated". The discriminator is the pair of
+    # top-level markers, not one key alone, so a future payload carrying both
+    # stays additive-tolerant and does not fire.
+    if "final_score" in body and "global_score" not in body:
+        raise DescribeUnparseable(
+            "this payload has `final_score` and no `global_score`: it is the "
+            "body of the METERED route GET /reputation/wallet/{wallet}. Parse "
+            "it with `parse_breakdown`, not `parse_wallet_reputation` — "
+            "until today this succeeded silently with `global_score=None`."
+        )
     try:
         chains = [
             ChainReputation(
@@ -730,6 +743,17 @@ class Breakdown:
 
 def parse_breakdown(payload: Any, receipt: Optional[PaymentReceipt] = None) -> Breakdown:
     body = _require(payload, "wallet", "GET /reputation/wallet/{wallet}")
+    # 🔴 Wrong-parser guard, mirrored from the TypeScript twin (spirit measured
+    # here on 2026-08-31): fed the body of the FREE route, this parser used to
+    # succeed SILENTLY — `final_score=None`, `total_reviews=0` — a paid-looking
+    # object built out of the free preview. Both markers, same reason as above.
+    if "global_score" in body and "final_score" not in body:
+        raise DescribeUnparseable(
+            "this payload has `global_score` and no `final_score`: it is the "
+            "body of the FREE route GET /wallets/{wallet}/chains. Parse it "
+            "with `parse_wallet_reputation`, not `parse_breakdown` — until "
+            "today this succeeded silently with `final_score=None`."
+        )
     try:
         per_chain = {
             str(net): ChainScore(

@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 215 pasan, 14,9 s, SIN RED (medido 2026-08-30)
+.venv/Scripts/python -m pytest                     # 229 pasan, 16,9 s, SIN RED (re-medido 2026-08-31 tras la rama `pending` del camino post-pago; eran 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build

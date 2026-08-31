@@ -76,6 +76,14 @@ def format_score(score: Optional[float], *, placeholder: str = NO_SCORE_PLACEHOL
     significant digits (`1234567.891` → `'1.23457e+06'`). It is irrelevant for a
     score, which lives in `[0, 100]`, and it is written down so nobody reuses this
     function as a general-purpose formatter.
+
+    🔴 Migration trap, measured by mesh (`meshrelayserv/describenet.js@04f2ecf`):
+    this returns a **STRING**. MeshRelay's own pre-SDK `formatScore` applied the
+    same rule but returned a NUMBER, straight into JSON — adopting the SDK's by
+    name would have silently turned `"score": 87` into `"score": "87"` for every
+    consumer of theirs. Same rule, same value, different type. If your legacy
+    formatter fed JSON, what you want is the NUMBER (`round(score, 2)` — the
+    TypeScript twin ships it as `roundScore`), not this function's string.
     """
     if score is None:
         return placeholder

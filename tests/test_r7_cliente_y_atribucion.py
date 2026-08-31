@@ -102,6 +102,23 @@ def test_un_user_agent_explicito_gana() -> None:
     c.close()
 
 
+def test_una_clave_desconocida_del_constructor_es_type_error() -> None:
+    """Fija lo que el constructor YA hace: keyword-only y sin `**kwargs`.
+
+    El caso que importa es el migrante del gemelo TypeScript tipeando
+    `userAgent=` (camelCase) de memoria: con un `**kwargs` tolerante el typo se
+    tragaría en silencio y el cliente saldría con el UA default — atribución
+    perdida contra un rate limit COMPARTIDO, y nadie lo ve hasta mirar los logs
+    del proveedor. Hoy revienta en la línea del typo, que es donde se arregla.
+    Este test existe para que agregar `**kwargs` «por flexibilidad» sea un rojo.
+
+    (La diferencia real con el gemelo queda en el README: TS sólo acepta
+    `product`; acá viven `product` Y `user_agent`, y `user_agent` pisa.)
+    """
+    with pytest.raises(TypeError):
+        DescribeClient(userAgent="mi-cosa/9.9")  # type: ignore[call-arg]
+
+
 # ---------------------------------------------------------------------------
 # Passthrough — se tipa lo conocido y se CONSERVA lo desconocido
 # ---------------------------------------------------------------------------

@@ -595,6 +595,53 @@ being ignored.
 
 ---
 
+## Trampas de migración (medidas por los equipos)
+
+Mirror of the TypeScript twin's section. None of these are hypothetical: every
+entry was hit — or dodged in writing — by a real consumer (mesh's adapter spec
+lives in `meshrelayserv/describenet.js@04f2ecf`; Execution Market's is
+INC-2026-08-26).
+
+1. **`format_score` returns a STRING; mesh's legacy `formatScore` returned a
+   NUMBER.** Same rule, same value, different type: adopting the SDK's by name
+   would have silently turned `"score": 87` into `"score": "87"` in every JSON
+   surface of theirs (measured by mesh, `describenet.js@04f2ecf`). If your
+   formatter feeds JSON, you want the number — `round(score, 2)`; the TypeScript
+   twin ships it as `roundScore`, this package deliberately ships only the display
+   string.
+
+2. **The constructor takes `product=`, and an unknown key is a `TypeError` at the
+   line of the typo.** Keyword-only, no `**kwargs`: `DescribeClient(userAgent=…)`
+   — the camelCase reflex from the TS twin — blows up instead of silently
+   shipping an unattributed client against the SHARED rate limit.
+   **Where the twins differ:** TypeScript only accepts `product`; Python accepts
+   `product` **and** `user_agent`, and `user_agent` wins when both are passed
+   (`client.py:390`). Migrating TS→py you lose nothing; migrating py→TS a custom
+   `user_agent` has no seat and the UA is rebuilt from `product`.
+
+3. **Do not re-parse what a method already parsed.** `wallet()` returns a
+   `WalletReputation`, not a dict; feeding it back into `parse_wallet_reputation`
+   raises `DescribeUnparseable` (measured 2026-08-31, and pinned by
+   `tests/test_parser_equivocado.py` so it stays loud). The raw body, if you need
+   it, is on `.raw`.
+
+4. **The wrong parser now FAILS LOUD.** The free body
+   (`global_score`, no `final_score`) fed to `parse_breakdown` — or the metered
+   body fed to `parse_wallet_reputation` — used to succeed silently with the
+   score evaporated into `None`, which R1 teaches you to read as "not yet
+   rated". Since 0.2.0 both directions raise `DescribeUnparseable` naming the
+   parser you wanted.
+
+5. **`pending` no longer travels inside `transaction_hash`.** Until 0.1.0 a 200
+   could carry `receipt.transaction_hash == "pending"` — a placeholder sitting in
+   the seat of the proof, the exact family of Execution Market's INC-2026-08-26.
+   Since 0.2.0 it arrives as `transaction_hash=None` +
+   `settlement_pending=True` (and the sentinel is exported as
+   `SETTLEMENT_PENDING`, as the TS twin always did). If you were string-matching
+   `"pending"`, branch on the flag instead.
+
+---
+
 ## Development
 
 ```bash

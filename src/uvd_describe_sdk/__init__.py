@@ -177,6 +177,10 @@ __all__ = [
     # hash shape validation — contributed by KarmaKadabra
     "looks_like_onchain_id",
     "looks_like_settlement_receipt",
+    # The sentinel the receipt header may legally carry. The TypeScript twin
+    # exported it from day one; not exporting it here was asymmetry, not design
+    # (fixed 2026-08-31, same commit that stopped it travelling as a hash).
+    "SETTLEMENT_PENDING",
     "malformed_hash_report",
     # payment (R6)
     "Payer",
