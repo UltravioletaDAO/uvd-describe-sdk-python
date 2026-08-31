@@ -82,7 +82,7 @@ jobs:
           # dispara el __init__ que trae httpx, y en este paso las deps aun no
           # estan instaladas — el run 1 murio con ModuleNotFoundError aqui,
           # ANTES de llegar al OIDC que venia a probar.
-          VER="$(sed -n 's/^__version__ = "\(.*\)"//p' src/uvd_describe_sdk/version.py)"
+          VER="$(grep -oP '(?<=__version__ = ")[^"]+' src/uvd_describe_sdk/version.py)"
           echo "tag=$TAG  version.py=$VER"
           if [ "$TAG" != "$VER" ]; then
             echo "::error::el tag ($TAG) no coincide con version.__version__ ($VER)"
