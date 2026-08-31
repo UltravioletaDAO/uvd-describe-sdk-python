@@ -78,7 +78,11 @@ jobs:
       - name: El tag coincide con la versión del código
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          VER="$(python -c 'import sys; sys.path.insert(0, "src"); from uvd_describe_sdk.version import __version__; print(__version__)')"
+          # Se lee el ARCHIVO, no se importa el paquete: importar uvd_describe_sdk
+          # dispara el __init__ que trae httpx, y en este paso las deps aun no
+          # estan instaladas — el run 1 murio con ModuleNotFoundError aqui,
+          # ANTES de llegar al OIDC que venia a probar.
+          VER="$(python -c 'import re, pathlib; print(re.search(r"__version__ = .([^'"]+).", pathlib.Path("src/uvd_describe_sdk/version.py").read_text()).group(1))')"
           echo "tag=$TAG  version.py=$VER"
           if [ "$TAG" != "$VER" ]; then
             echo "::error::el tag ($TAG) no coincide con version.__version__ ($VER)"
