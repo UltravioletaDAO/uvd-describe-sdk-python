@@ -83,6 +83,82 @@ los dos se trata — quien la reciba tiene que saber si le toca reconciliar.
 `payment_sent` y `payment` son esa marca. Las pone `mark_payment_sent()` y sólo
 las pone `DescribeClient` en el tramo posterior a la firma. En toda ruta gratis
 valen `False` / `None`, siempre.
+
+────────────────────────────────────────────────────────────────────────────
+🔴 `recovery` — QUÉ HACER EN VEZ DE, Y POR QUÉ VACÍO ES UNA RESPUESTA
+────────────────────────────────────────────────────────────────────────────
+Aporte de **Execution Market** (`#agents`, **2026-08-30**), que ese día publicó
+que su 502 pasa a traer `detail.code`, `detail.retryable` y `detail.recovery`
+con diez códigos tipados, y lo dijo textual: *«para que lo codifiquen de su
+lado»*. Su argumento es el que justifica este campo:
+
+    «SIETE de los diez son TERMINALES (retryable:false). Eso es lo que más les
+     sirve: hoy su flota no puede distinguir "reintenta" de "no insistas", y
+     contra AUTHORIZATION_EXPIRED reintentar es quemar llamadas contra una
+     ventana cerrada hace 317 HORAS.»
+
+**Lo que se absorbe es el PATRÓN, no su tabla.** Sus diez códigos son de SU API
+—escrow, release al worker, wallets de payout— y este SDK no envuelve esa API
+sino la de describe. Un consumidor que ramificara por `AUTHORIZATION_EXPIRED`
+contra `api.describe.net` estaría escribiendo código muerto, así que acá se
+recorrieron NUESTROS `kind` uno por uno y se decidió caso por caso.
+
+⚠️ **La premisa del aporte se midió y es falsa para este repo, y se deja
+escrito porque cambia el diseño.** El pedido llegó como «ustedes ya tienen
+`transient` y `serviceFault`, les falta la otra mitad». Medido el 2026-08-30 en
+este árbol: `grep -rEni "transient|servicefault" src/` = **0**, igual que
+`recovery`. O sea que `recovery` no llega como la segunda mitad de un par: llega
+solo. Eso NO se arregló inflando el campo —escribir «reintentá» acá convertiría
+`recovery` en un booleano redactado en prosa, que es exactamente el error que EM
+señala— sino dejando el hueco declarado y reportado.
+
+**La regla, y es la mitad importante de la tarea:**
+
+    Si existe una ruta de recuperación REAL, se escribe.
+    Si NO existe, el campo vale `None`. **Inventar una recuperación que no
+    funciona es PEOR que no tener el campo**, porque manda al que llama a hacer
+    algo inútil con confianza. Un `recovery` vacío es honesto.
+
+Y una recuperación **nombra OTRA cosa que hacer**: otra ruta (la gratis que
+contesta la pregunta vecina), otro campo del propio error, otro parámetro del
+constructor, o la condición que hay que arreglar del lado del que llama.
+«Reintentá» no es una recuperación: es un booleano.
+
+**TEXTO LIBRE Y NO UN ENUM, y el argumento es que el enum YA EXISTE.** La casa
+tiene un solo patrón para esto y está en dos lugares: `caveats[].code` /
+`caveats[].text` del servicio, y `kind` / mensaje de este módulo. **Se ramifica
+por el código, se lee el texto.** `recovery` es la mitad TEXTO de un par cuya
+mitad CÓDIGO ya es `kind`: un `RecoveryCode` sería un segundo discriminador en
+correspondencia 1:1 con `kind`, o sea una llave duplicada que sólo puede
+desincronizarse. Y el contenido de una recuperación son instrucciones, que no
+tienen vocabulario finito; lo que sí lo tiene es la taxonomía, y ya está tipada.
+
+**DÓNDE VIVE, Y POR QUÉ NO SE VUELVE A TIPEAR EN NINGÚN LADO:** cada clase
+declara la suya **en su cuerpo**, como constante. Ninguna otra superficie
+—ni un dict `RECOVERY_BY_KIND`, ni el test, ni el README— vuelve a escribir esos
+textos: una segunda copia es la que se pudre. El test fija los ANCLAS de cada
+consejo (que el de un 402 nombre `wallet()`, que el del riel nombre el alta),
+no la redacción.
+
+🔴 **NINGÚN `recovery` INTERPOLA NADA — es la versión SDK del `_redact` del
+servicio.** El repo del índice tiene el guard del otro lado
+(`describenet/chain/rpc.py::_redact`, que borra la URL del proveedor de todo lo
+que va a levantar o loguear, porque la API key vive en el path). Acá el
+equivalente es estructural en vez de defensivo: **el texto lo escribimos
+nosotros y es una constante de clase**, así que no puede arrastrar una URL de
+RPC con su clave, un DSN, ni el mensaje crudo de una excepción ajena. EM avisó
+hoy que un error sin clasificar «puede traer una URL de RPC con su API key
+adentro» y que le pusieron un test con un secreto de mentira que falla si se
+filtra; el nuestro está en `tests/test_recovery.py` y hace lo mismo, con el
+guard extra de que `recovery` tiene que seguir siendo el MISMO objeto que el
+atributo de la clase (una `property` que interpole se pone roja ahí).
+
+⚠️ **Lo que este guard NO cubre, dicho antes de que alguien lo suponga:** el
+MENSAJE de `PartnerSigningError` sí interpola la excepción del firmante
+(`f"… ({type(exc).__name__}: {exc})"`, `partner.py:249`), y eso es deliberado
+—nombrar la causa real fue la lección de `chain_name_for`— pero significa que un
+cliente de KMS que meta su endpoint en el texto lo publica por ahí. Es el
+mensaje, no `recovery`, y se deja anotado en vez de tapado.
 """
 
 from __future__ import annotations
@@ -128,6 +204,18 @@ class DescribeError(Exception):
     #: `X-Payment-Receipt`, o `None` si el servidor no llegó a contestar).
     payment: Optional[Dict[str, Any]] = None
 
+    #: QUÉ HACER EN VEZ DE. Texto para un humano, estable, **constante de clase**.
+    #:
+    #: 🔴 `None` significa *no hay ruta de recuperación real para este fallo*, y
+    #: es una decisión tomada y no un olvido: cada subclase declara la suya en su
+    #: propio cuerpo —también cuando vale `None`— y hay un test que se pone rojo
+    #: si una clase nueva no la declara. Ver el bloque «`recovery`» de la
+    #: cabecera para el porqué del texto libre, del vacío honesto y del guard
+    #: contra filtraciones.
+    #:
+    #: Se LEE, no se ramifica: para ramificar está `kind`.
+    recovery: Optional[str] = None
+
 
 class DescribeTimeout(DescribeError):
     """La request superó el timeout del cliente.
@@ -137,9 +225,28 @@ class DescribeTimeout(DescribeError):
     corto convierte cada arranque en frío en un falso «no hay datos» — por eso
     el default de este SDK son 30 s (R7) y no 8 s, que ya rompió una
     integración real.
+
+    🔴 **`recovery` es `None` A PROPÓSITO, y este es EL caso que justifica que el
+    campo pueda estar vacío.** Es el fallo más común del SDK y aun así no hay
+    ninguna OTRA cosa que hacer: la misma pregunta contra el mismo índice no
+    tiene una segunda puerta. Las dos salidas que parecen recuperaciones no lo
+    son, y las dos se descartaron con su medición:
+
+      * *«subí el timeout»* — el techo no es nuestro: el API Gateway del
+        proveedor corta a **29 s** y el default ya es 30. Pedir más es pedirle
+        al aire (ver R7 en `client.py`).
+      * *«reintentá»* — eso es un booleano, no una recuperación. Escribirlo acá
+        sería exactamente el error que EM señala. Y este SDK **no** publica hoy
+        ese booleano: `transient` no existe (medido 2026-08-30, ver la
+        cabecera), así que el hueco queda declarado y reportado en vez de
+        rellenado con una frase inútil.
+
+    `tests/test_recovery.py` fija este `None`: es lo único que impide que
+    alguien «complete la tabla» por prolijidad.
     """
 
     kind = "timeout"
+    recovery = None
 
 
 class DescribeHTTPError(DescribeError):
@@ -149,9 +256,24 @@ class DescribeHTTPError(DescribeError):
     vivo lo dice la cabecera `Ratelimit-Policy`, no un número copiado acá) caen
     junto con los 5xx: todo consumidor los trata igual —«no hay respuesta
     usable»— y lo que se lee para distinguirlos es `status_code`, no el bucket.
+
+    Su `recovery` manda a `status_code` y no se disculpa por eso: **el bucket
+    junta tres causas que se arreglan distinto**, así que la recuperación
+    honesta es decir por dónde se separan en vez de dar un consejo promedio que
+    no sirve para ninguna.
     """
 
     kind = "http_error"
+
+    recovery = (
+        "Ramificá por `status_code`, no por este `kind`: acá caen causas que se "
+        "arreglan distinto. 4xx es TU request y el cuerpo nombra el campo (un "
+        "422 de dirección se arregla del lado del que llama). 429 es el límite "
+        "COMPARTIDO con los otros consumidores: el presupuesto vivo viaja en la "
+        "cabecera `Ratelimit-Policy` de esa misma respuesta, y se dispersa con "
+        "`jitter=` y se atribuye con `product=`, nunca pidiendo más rápido. 5xx "
+        "es del servicio y de este lado no hay nada que arreglar."
+    )
 
     def __init__(self, message: str, status_code: int) -> None:
         super().__init__(message)
@@ -159,9 +281,23 @@ class DescribeHTTPError(DescribeError):
 
 
 class DescribeUnreachable(DescribeError):
-    """Falla de transporte antes de cualquier status HTTP (DNS, connect, reset)."""
+    """Falla de transporte antes de cualquier status HTTP (DNS, connect, reset).
+
+    Su `recovery` empuja a mirar la configuración del que llama antes que al
+    índice, y no es un reflejo: acá **nada llegó a describe**, así que el índice
+    es lo único que todavía no se puede acusar. Un host mal escrito no alcanza a
+    dar 404 —no hay servidor que lo conteste— y sale exactamente por acá.
+    """
 
     kind = "unreachable"
+
+    recovery = (
+        "Nada llegó a describe (o su respuesta no llegó a vos), así que antes de "
+        "culpar al índice revisá lo tuyo: que `base_url` sea "
+        "https://api.describe.net —un host mal escrito no alcanza a dar 404, da "
+        "esto— y que el egress de tu proceso (proxy, DNS, firewall) deje salir. "
+        "Descartado eso, no queda nada que arreglar de este lado."
+    )
 
 
 class DescribeUnparseable(DescribeError):
@@ -170,9 +306,23 @@ class DescribeUnparseable(DescribeError):
     Es protocolo, no dato: un `chains: []` es una forma válida que dice «no hay
     nada», y **no** pasa por acá. Sólo pasa un cuerpo que no es JSON o al que le
     falta la clave esencial que la ruta promete en su schema.
+
+    Su `recovery` nombra al sospechoso que casi nadie mira primero: **un
+    intermediario**. El repo del servicio ya lo tiene escrito del otro lado —*«a
+    gateway erroring with an HTML page still returns 200 sometimes»*
+    (`describenet/chain/rpc.py`)— y ése es el caso que se ve exactamente así.
     """
 
     kind = "unparseable"
+
+    recovery = (
+        "Llegó un cuerpo pero no es el que la ruta promete: sospechá de un "
+        "intermediario antes que del índice — un proxy corporativo o un portal "
+        "cautivo contesta 200 con una página HTML y se ve idéntico a esto. "
+        "Verificá `base_url` y que no haya un gateway en el medio. Si el cuerpo "
+        "de verdad salió de describe, es un bug del servicio y reintentar no lo "
+        "arregla: reportalo."
+    )
 
 
 class DescribeMalformedHash(DescribeError):
@@ -219,6 +369,16 @@ class DescribeMalformedHash(DescribeError):
 
     kind = "malformed_hash"
 
+    #: La única `recovery` que le habla a un error que NUNCA se levanta, y por
+    #: eso es la más concreta de todas: la respuesta ya está en las manos del
+    #: consumidor, así que hay algo que hacer AHORA y algo que NO hacer.
+    recovery = (
+        "El campo tipado quedó en `None` a propósito y el valor crudo sobrevive "
+        "en el `raw` del modelo; `fields` dice en qué ruta está cada uno. 🔴 No "
+        "lo cuentes como una transacción ni armes un link de explorador con él. "
+        "Y NO descartes la respuesta: el resto llegó bien y ya lo tenés entero."
+    )
+
     def __init__(self, message: str, fields: Optional[List[str]] = None) -> None:
         super().__init__(message)
         #: Rutas de los campos que llegaron malformados, en orden de aparición.
@@ -240,6 +400,22 @@ class PaymentRequiredError(DescribeError):
     """
 
     kind = "payment_required"
+
+    #: 🔴 La recuperación más útil que este SDK puede ofrecer, y por eso nombra
+    #: la ruta GRATIS y no sólo el arreglo de configuración: la mitad de los
+    #: cobros de este índice no había que pagarlos. El propio 402 lo dice —su
+    #: `free_preview` existe justamente para que nadie pague a ciegas por una
+    #: wallet vacía— y por eso el texto manda a leerlo del `challenge` guardado
+    #: en vez de repetir acá una ruta que se pudre
+    #: (`describenet/pricing.py::free_preview`: `{endpoint, gives}`, y la rama
+    #: de agente apunta a `/search/{query}`, no a la de wallet).
+    recovery = (
+        "Es una ruta medida y este cliente no tiene con qué pagar: configurá "
+        "`payer=`, o `partner=` si describe dio de alta tu wallet. Pero mirá "
+        "primero si te alcanza la puerta gratis: `wallet()` contesta el score "
+        "global sin pagar ni firmar, y el 402 crudo nombra la puerta gratis de "
+        "ESTE sujeto en `challenge['free_preview']['endpoint']`."
+    )
 
     def __init__(
         self,
@@ -282,6 +458,19 @@ class PartnerSigningError(DescribeError):
 
     kind = "partner_signing"
 
+    #: El dato que hace útil esta recuperación es el que nadie deduce solo: un
+    #: riel roto **no bloquea nada gratis**. El servicio decide «gratis» ANTES de
+    #: mirar el partner (`describenet/paywall.py:772`, contra :794), así que las
+    #: rutas gratis no se firman nunca y siguen andando con el firmante muerto.
+    recovery = (
+        "El riel no llegó a firmar, así que no salió ninguna request y no hay "
+        "nada que reconciliar: arreglá el firmante, o instalá el extra con "
+        "`pip install uvd-describe-sdk[partner]`. Mientras tanto las rutas "
+        "GRATIS siguen andando — `wallet()`, `leaderboard()` y `health()` no se "
+        "firman nunca. Y si de verdad querés pagar, construí el cliente SIN "
+        "`partner=`: no cae solo al camino de pago, a propósito."
+    )
+
     def __init__(self, message: str, wallet: Optional[str] = None) -> None:
         super().__init__(message)
         self.wallet = wallet
@@ -322,6 +511,20 @@ class PartnerRejectedError(PaymentRequiredError):
 
     kind = "partner_rejected"
 
+    #: 🔴 El caso de manual del aporte de EM: es TERMINAL. Reintentar contra una
+    #: wallet que no está en la allowlist es la versión describe de sus 317 horas
+    #: contra una ventana cerrada — el alta la hace describe y ninguna cantidad
+    #: de requests la produce.
+    recovery = (
+        "El alta la hace describe, no vos: pedile que sume la wallet de "
+        "`exc.wallet` a su allowlist — reintentar no la va a producir. Antes de "
+        "eso descartá las otras tres causas: `base_url` tiene que ser "
+        "https://api.describe.net, el reloj del firmante entra en una ventana de "
+        "300 s, y la firma tiene que cubrir la query que mandaste. Mientras "
+        "tanto `wallet()` sigue gratis y sin firma; si querés pagar de verdad, "
+        "construí el cliente SIN `partner=`."
+    )
+
     def __init__(
         self,
         message: str,
@@ -345,6 +548,21 @@ class DoNotPayError(DescribeError):
     """
 
     kind = "do_not_pay"
+
+    #: El bucket junta cinco sitios de `payment.py` que comparten UN hecho —
+    #: los cinco levantan **antes** de `create_authorization()`, o sea sin firmar
+    #: — y se separan por `expected`/`offered`. La recuperación dice el hecho
+    #: común primero (no se gastó nada) y después la bifurcación, porque un
+    #: consejo promedio acá sería el peor de todos: «pagá de otra forma» contra
+    #: una dirección desviada es la línea que este error existe para no escribir.
+    recovery = (
+        "🔴 No se firmó nada y no se gastó nada, y esto NO se reintenta: "
+        "reintentar un desvío de fondos sólo lo repite. Compará `expected` con "
+        "`offered` — si lo que no cierra es la RED, elegí una de las que "
+        "describe ofrece (`pay_network=`) o instalá el extra x402; si lo que no "
+        "cierra es la DIRECCIÓN, no pagues por ningún camino y avisale a "
+        "describe. `wallet()` sigue contestando el score global gratis."
+    )
 
     def __init__(self, message: str, expected: str, offered: str) -> None:
         super().__init__(message)
