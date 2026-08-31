@@ -86,7 +86,7 @@ from .errors import (
     PartnerSigningError,
     PaymentRequiredError,
 )
-from .hashes import looks_like_onchain_id, looks_like_settlement_receipt
+from .hashes import SETTLEMENT_PENDING, looks_like_onchain_id, looks_like_settlement_receipt
 from .models import (
     Activity,
     AgentReputation,
@@ -120,6 +120,7 @@ from .payment import TREASURY_EVM, Payer, build_payment_header, chain_name_for
 from .version import USER_AGENT_NAME, __version__, default_user_agent
 
 __all__ = [
+    "SETTLEMENT_PENDING",
     # client
     "DescribeClient",
     "DEFAULT_BASE_URL",

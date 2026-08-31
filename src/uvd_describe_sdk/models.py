@@ -574,6 +574,22 @@ class PaymentReceipt:
     hash yet. `pending` is LEGITIMATE and is not marked — treating it as garbage
     would turn the happy path of every freshly settled payment into an alarm, and
     an alarm that fires on the happy path gets learned into being ignored.
+
+    **But legitimate is not the same as a hash, and it must not sit in the field
+    named after one.** `pending` now travels in `settlement_pending` and
+    `transaction_hash` stays `None`, because the two answers a caller needs are
+    different: *is this payment settled?* and *can I name the transaction?* A
+    single field cannot hold both, and the shape it took — a word occupying the
+    place of a proof — is the one that reads as a proof to everything downstream.
+
+    That failure has a price tag. In Execution Market (INC-2026-08-26) a
+    placeholder string, `"timeout-verified-onchain"`, lived in the column that
+    held the payment hash. Six executors were recorded as paid and **no money had
+    moved**; three separate sites read the field as truthy and agreed. The lesson
+    they wrote into their schema is the one applied here: a payment may only be
+    recorded when the transaction that made it can be named, and when it cannot,
+    the honest value is NULL. This SDK is upstream of every consumer's database —
+    whatever it puts in `transaction_hash` is what ends up in that column.
     """
 
     transaction_hash: Optional[str] = None
@@ -582,6 +598,11 @@ class PaymentReceipt:
     #: `("transaction_hash",)` if the header brought something that is neither a
     #: hash nor `pending`. Empty in the normal case.
     malformed_hashes: Tuple[str, ...] = ()
+    #: The service charged and settlement has not reported its hash **yet**.
+    #: True only for the literal `pending` sentinel. Distinct from
+    #: `transaction_hash is None` with this flag false, which means the header
+    #: was absent or malformed — an absence, not a promise.
+    settlement_pending: bool = False
 
 
 def _parse_confidence(raw: Any) -> Optional[Confidence]:

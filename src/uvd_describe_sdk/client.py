@@ -231,7 +231,11 @@ from .errors import (
     PaymentRequiredError,
     mark_payment_sent,
 )
-from .hashes import looks_like_onchain_id, looks_like_settlement_receipt
+from .hashes import (
+    SETTLEMENT_PENDING,
+    looks_like_onchain_id,
+    looks_like_settlement_receipt,
+)
 from .models import (
     AgentReputation,
     Breakdown,
@@ -702,13 +706,27 @@ class DescribeClient:
         The receipt is shape-checked with its own rule: here `pending` is a
         LEGITIMATE value the OpenAPI declares ("settlement has not reported one")
         and it is not marked. See `hashes.looks_like_settlement_receipt`.
+
+        🔴 **`pending` is legitimate, and it is still not a hash.** It reports in
+        `settlement_pending` and leaves `transaction_hash` as `None`, because a
+        field named after a transaction must never hold a word instead of one.
+        Before this, `receipt.transaction_hash == "pending"` was truthy, so the
+        most natural check a consumer writes —`if receipt.transaction_hash:`—
+        read a payment with no known hash as a payment with a hash. Whatever
+        this SDK puts in that field is what lands in the consumer's column; see
+        `PaymentReceipt` for the incident that priced this exact shape.
         """
         crudo = response.headers.get("X-Payment-Receipt")
         malos: List[str] = []
         recibo: Optional[str] = None
+        pendiente = False
         if crudo is not None:
-            if looks_like_settlement_receipt(str(crudo)):
-                recibo = str(crudo)
+            texto = str(crudo)
+            if texto == SETTLEMENT_PENDING:
+                # Not malformed and not a hash: its own answer.
+                pendiente = True
+            elif looks_like_settlement_receipt(texto):
+                recibo = texto
             else:
                 malos.append("transaction_hash")
         return PaymentReceipt(
@@ -716,6 +734,7 @@ class DescribeClient:
             reused=str(response.headers.get("X-Payment-Reused", "")).lower() == "true",
             pricing_version=response.headers.get("X-Pricing-Version"),
             malformed_hashes=tuple(malos),
+            settlement_pending=pendiente,
         )
 
     def _partner_signature(
