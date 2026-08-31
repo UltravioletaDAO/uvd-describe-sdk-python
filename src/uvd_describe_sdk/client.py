@@ -215,6 +215,7 @@ import logging
 import random
 import re
 import time
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 from urllib.parse import quote
 
@@ -309,6 +310,23 @@ _URL_EN_CUERPO = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
 #: Called with the exception being swallowed. See `_observe`.
 ErrorObserver = Callable[[DescribeError], None]
 
+#: Lector de RESPALDO, opcional y apagado por defecto. Recibe la dirección tal
+#: cual se pidió y devuelve una `WalletReputation` o `None`.
+#:
+#: POR QUÉ EXISTE, y por qué no alcanza con `fail_open`. `fail_open=True`
+#: responde `None` cuando el índice no contesta, y ese `None` es honesto: dice
+#: «no pude preguntar». Pero para un consumidor cuyo GATE depende de la
+#: reputación —a quién le compro, a quién le asigno trabajo— «no pude preguntar»
+#: y «no tiene reputación» terminan en la misma rama del código, y un gate sin
+#: datos no se abstiene: aprueba a cualquiera. Ese consumidor necesita una
+#: SEGUNDA fuente, no un valor nulo mejor explicado.
+#:
+#: Lo aportó KarmaKadabra, que ya operaba así en producción: cuando el índice no
+#: responde, lee ERC-8004 directo de su facilitador sobre las 9 EVM de escrow. El
+#: SDK no trae esa fuente ni la impone —sería una dependencia que la mayoría no
+#: quiere—; trae el ENGANCHE para que quien tenga una la conecte.
+FallbackReader = Callable[[str], Optional["WalletReputation"]]
+
 #: El modelo que devuelve una ruta paga. Existe para que `_paid` sea una sola
 #: función y no dos copias: donde vive la marca de «esto falló DESPUÉS de
 #: pagar» no puede haber dos versiones que se desincronicen.
@@ -350,6 +368,7 @@ class DescribeClient:
         treasury: str = TREASURY_EVM,
         partner: Optional[PartnerSigner] = None,
         transport: Optional[httpx.BaseTransport] = None,
+        fallback_reader: Optional[FallbackReader] = None,
     ) -> None:
         """
         Args:
@@ -396,6 +415,7 @@ class DescribeClient:
         self._timeout = timeout
         self._user_agent = user_agent or default_user_agent(product)
         self._fail_open = fail_open
+        self._fallback_reader = fallback_reader
         self._on_error = on_error
         self._jitter = jitter
         self._payer = payer
@@ -666,6 +686,40 @@ class DescribeClient:
             # leer», que es la confusión que R1 persigue en otro plano.
             if isinstance(exc, DescribeHTTPError) and exc.status_code == 404:
                 self._observe(exc, path)
+                return None
+            # ── RESPALDO: sólo ante un FALLO DE SERVICIO, nunca ante un 404 ────
+            # El 404 ya salió arriba a propósito. Un 404 es una RESPUESTA («no
+            # tengo ese sujeto»), y consultar una segunda fuente para
+            # contradecirla convertiría el respaldo en una forma de buscar el
+            # número que a uno le gusta más. El respaldo es para cuando NO HUBO
+            # respuesta, no para cuando la respuesta no gustó.
+            #
+            # Corre ANTES de decidir `fail_open`: si el respaldo contesta, no hay
+            # nada sobre lo que fallar, y negarse a devolverlo con
+            # `fail_open=False` sería castigar al que sí trajo un dato.
+            if self._fallback_reader is not None:
+                self._observe(exc, path)
+                try:
+                    respaldo = self._fallback_reader(address)
+                except Exception:  # noqa: BLE001
+                    # Un respaldo que revienta NO puede tumbar la lectura: deja
+                    # al consumidor peor que sin respaldo. Se sigue al camino
+                    # normal, que ya sabe decir «no pude preguntar».
+                    respaldo = None
+                if respaldo is not None:
+                    # Se MARCA de dónde vino, con `replace` y no mutando: el
+                    # modelo es un dataclass CONGELADO, y además el objeto es del
+                    # que lo construyó — devolverle una copia marcada es más
+                    # honesto que escribirle encima.
+                    # Sin la marca, un consumidor no puede distinguir el índice de
+                    # su plan B y terminaría publicando como canónico un número
+                    # que describe.net no firmó — la misma enfermedad que R1
+                    # persigue con `None` vs `0`.
+                    if not respaldo.source:
+                        respaldo = replace(respaldo, source="fallback")
+                    return respaldo
+                if not self._fail_open:
+                    raise
                 return None
             if not self._fail_open:
                 raise
