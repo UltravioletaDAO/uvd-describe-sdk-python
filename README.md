@@ -343,6 +343,7 @@ DescribeClient(
     product="mi-app",      # → User-Agent. Pasalo.
     fail_open=True,
     on_error=None,         # se llama con la excepción tragada
+    jitter=0.4,            # dispersión antes de cada GET. PRENDIDO. `0` lo apaga
     payer=None,            # sólo para las rutas medidas
     pay_network="base",
     treasury=TREASURY_EVM,
@@ -356,10 +357,94 @@ proveedor midió 15,2 s, su API Gateway corta a 29 s, y 30 es *deliberadamente
 distinto* de los 45 s del facilitator para que los dos relojes nunca expiren el
 mismo segundo (INC-2026-08-19).
 
-**Pasá `product`.** El rate limit son **20 rps compartidos** entre todos los
-consumidores y no hay bucket por partner: sin atribución en el User-Agent, nadie
-puede saber quién se lo gastó. Un request anónimo contra un límite compartido es
-free-riding.
+**Pasá `product`.** El rate limit es **compartido** entre todos los consumidores
+y no hay bucket por partner: sin atribución en el User-Agent, nadie puede saber
+quién se lo gastó. Un request anónimo contra un límite compartido es free-riding.
+
+🔴 **El número no se tipea en este SDK, y esta línea es la razón**: hasta hoy
+cuatro superficies de acá decían «20 rps», heredado de la documentación vieja.
+El límite se subió el **2026-08-28** y ninguna se enteró. La autoridad viva es la
+cabecera **`Ratelimit-Policy`** que la API manda en cada respuesta — medida el
+2026-08-30 vale `50;w=1;burst=40`. Leela de la respuesta, no de un README.
+
+### 🔴 `jitter` viene PRENDIDO (0,4 s) — el trade-off, escrito
+
+Aporte de **KarmaKadabra** (2026-08-30), que opera 27 agentes: *«27 agentes
+despiertan al MISMO tiempo por EventBridge y pegan simultáneo contra su límite de
+rps COMPARTIDO con los otros consumidores. Sin jitter, un enjambre es un DDoS
+educado.»* El SDK duerme `uniform(0, jitter)` antes de cada GET.
+
+Los dos lados son reales: una librería que duerme sin que se lo pidan sorprende,
+y quien escribe un script suelto paga 0,2 s de mediana por un problema que no
+tiene. Lo que rompe el empate es **quién paga el error**. El costo de tenerlo
+prendido lo paga quien eligió el default; el de tenerlo apagado lo pagan
+**terceros** — el límite es compartido, así que un enjambre sin dispersar le come
+el presupuesto a MeshRelay y a Execution Market, que no eligieron nada. Un
+default cuyo daño cae sobre quien no lo eligió no es un default, es una trampa.
+
+Apagarlo es explícito y queda escrito en tu código: `DescribeClient(jitter=0)`.
+
+**Dispersa, no cede.** El jitter no es un backoff: dispersa un rebaño que todavía
+no pidió nada, mientras que un backoff cede ante un servicio que ya dijo que no.
+Y **nunca** se aplica al tramo del 402 posterior a la firma — dormir con una
+autorización EIP-3009 firmada en la mano quema ventana de settlement a cambio de
+cero dispersión.
+
+---
+
+## Contar calificadores: `max_distinct_raters()`
+
+Aporte de **MeshRelay** (2026-08-30). Las dos formas obvias de derivarlo están
+mal, en direcciones **opuestas**, y por eso el helper existe:
+
+| Forma | Qué pasa | Caso medido |
+|---|---|---|
+| **Sumar** por cadena | doble-cuenta a quien calificó en dos redes | karma-hello: **9** global, **11** sumando |
+| **Máximo** por cadena | subestima | 3 en `base` + 4 distintos en `avalanche` = **7** reales, el máximo dice **4** |
+
+```python
+rep.max_distinct_raters()   # el global si vino: LA respuesta
+                            # si no vino: el máximo, que es una COTA INFERIOR
+                            # None si no hay ni global ni cadenas (R1)
+```
+
+🔴 **El máximo sirve SÓLO como cota inferior / fallback. Jamás como la
+respuesta.** Corroborado el 2026-08-30 contra el índice vivo: en las **3 de 3**
+wallets multi-cadena del leaderboard disparan las dos trampas.
+
+---
+
+## Campos de hash: forma validada, nunca en silencio
+
+Aporte de **KarmaKadabra** (2026-08-30), del hallazgo «el 200 sin tx»: *«Un 200
+que no hizo la cosa es peor que un 503, porque el cliente lo toma por bueno: si
+nosotros no chequeáramos el tx, habríamos contado 14 ratings que no existen.»*
+
+`tx_hash`, `feedback_hash`, `revoked_tx`, `inputs_digest` y el
+`X-Payment-Receipt` se validan **por forma**. Un valor sin forma de identificador
+on-chain:
+
+1. deja el campo tipado en `None` (para que nadie arme un link de explorador con
+   basura) — el valor crudo sigue en `.raw`;
+2. entra en `malformed_hashes` del modelo;
+3. **se avisa por `on_error` + WARNING**, el mismo canal del fail-open;
+4. y **no levanta**: el resto de la respuesta llega entero. Romper una
+   descomposición ya pagada por un campo accesorio sería peor que el bug.
+
+🔴 **Ausente y malformado NO son lo mismo** (R1, un nivel más abajo):
+
+```python
+r.tx_hash is None and not r.malformed_hashes      # NO VINO (normal: el backfill
+                                                  # todavía no llegó)
+r.tx_hash is None and "tx_hash" in r.malformed_hashes   # VINO BASURA
+```
+
+**Se valida la UNIÓN de las formas vivas, no la intersección** — medido el
+2026-08-30: EVM son `0x`+64 hex (66 chars), **Solana es base58 de 87–88 chars**,
+`inputs_digest` es un sha256 **pelado** sin `0x`, y `X-Payment-Receipt` puede
+valer el literal `pending`. Una regex de hash EVM habría marcado como malformada
+toda calificación de Solana, y una alarma que suena en el camino feliz se aprende
+a ignorar.
 
 ---
 

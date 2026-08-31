@@ -32,6 +32,14 @@ from uvd_describe_sdk import (
 
 from .conftest import BREAKDOWN, CHALLENGE_402, json_response
 
+#: Un hash de settlement con FORMA de hash. Capturado de `GET /feed` de
+#: api.describe.net el 2026-08-30. Desde el aporte ③ de KarmaKadabra el recibo se
+#: valida por forma antes de contar como prueba de que el USDC se movió, así que
+#: los placeholders que este archivo usaba (`0xabc123`, `0xdeadbeef`) ya no
+#: sirven: no eran hashes, y afirmar «pagué, acá está la prueba» sobre 8 hex es
+#: justo el «200 que no hizo la cosa» dentro del camino del dinero.
+RECIBO_REAL = "0x3768f3d40807148dd29b47457dfc2a37ee5c4846d70e46a7ed0d11013a4f1b2e"
+
 
 class PayerEspia:
     """Satisface `payment.Payer` estructuralmente. Registra y devuelve un token.
@@ -125,7 +133,7 @@ def test_el_baile_del_402_completo(make_client) -> None:
         return json_response(
             BREAKDOWN,
             headers={
-                "X-Payment-Receipt": "0xabc123",
+                "X-Payment-Receipt": RECIBO_REAL,
                 "X-Payment-Reused": "false",
                 "X-Pricing-Version": "cost-tiered@5",
             },
@@ -142,7 +150,7 @@ def test_el_baile_del_402_completo(make_client) -> None:
 
     # y el resultado trae el recibo, que hasta hoy ningún cliente leía
     assert br.receipt is not None
-    assert br.receipt.transaction_hash == "0xabc123"
+    assert br.receipt.transaction_hash == RECIBO_REAL
     assert br.receipt.reused is False
     assert br.receipt.pricing_version == "cost-tiered@5"
 
@@ -456,7 +464,10 @@ def test_un_recibo_en_el_fallo_convierte_el_quizas_en_certeza(make_client) -> No
         return json_response(
             {"detail": "el índice se cayó DESPUÉS de cobrar"},
             status=500,
-            headers={"X-Payment-Receipt": "0xdeadbeef"},
+            # Ver la nota del `test_el_baile_del_402_completo`: hash real, no
+            # placeholder. «O llegó la cabecera o no llegó» se afinó a «o llegó
+            # un HASH o no llegó» — una cabecera con basura no prueba nada.
+            headers={"X-Payment-Receipt": RECIBO_REAL},
         )
 
     with make_client(handler, payer=PayerEspia()) as c:
@@ -465,7 +476,7 @@ def test_un_recibo_en_el_fallo_convierte_el_quizas_en_certeza(make_client) -> No
 
     assert exc.value.payment_sent is True
     assert exc.value.payment is not None
-    assert exc.value.payment["transaction_hash"] == "0xdeadbeef"
+    assert exc.value.payment["transaction_hash"] == RECIBO_REAL
     assert "el settlement ocurrió" in str(exc.value)
 
 

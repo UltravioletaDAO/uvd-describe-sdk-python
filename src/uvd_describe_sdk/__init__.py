@@ -66,6 +66,7 @@ from .caveats import (
 )
 from .client import (
     DEFAULT_BASE_URL,
+    DEFAULT_JITTER_S,
     DEFAULT_PAY_NETWORK,
     DEFAULT_TIMEOUT_S,
     DescribeClient,
@@ -76,6 +77,7 @@ from .errors import (
     HTTP_5XX_LEGACY_KIND,
     DescribeError,
     DescribeHTTPError,
+    DescribeMalformedHash,
     DescribeTimeout,
     DescribeUnparseable,
     DescribeUnreachable,
@@ -84,6 +86,7 @@ from .errors import (
     PartnerSigningError,
     PaymentRequiredError,
 )
+from .hashes import looks_like_onchain_id, looks_like_settlement_receipt
 from .models import (
     Activity,
     AgentReputation,
@@ -104,6 +107,7 @@ from .models import (
     SelfRated,
     Snapshot,
     WalletReputation,
+    malformed_hash_report,
 )
 from .partner import (
     PARTNER_AUTHORITY,
@@ -121,6 +125,8 @@ __all__ = [
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT_S",
     "DEFAULT_PAY_NETWORK",
+    # jitter — aporte de KarmaKadabra (27 agentes), PRENDIDO por default
+    "DEFAULT_JITTER_S",
     "ErrorObserver",
     # display (R8)
     "format_score",
@@ -140,6 +146,8 @@ __all__ = [
     "DescribeHTTPError",
     "DescribeUnreachable",
     "DescribeUnparseable",
+    # 🔴 NUNCA se levanta: viaja por `on_error`. Ver su docstring.
+    "DescribeMalformedHash",
     "PaymentRequiredError",
     "DoNotPayError",
     "PartnerSigningError",
@@ -165,6 +173,10 @@ __all__ = [
     "Ownership",
     "Rating",
     "PaymentReceipt",
+    # validación de forma de los hashes — aporte de KarmaKadabra
+    "looks_like_onchain_id",
+    "looks_like_settlement_receipt",
+    "malformed_hash_report",
     # pago (R6)
     "Payer",
     "TREASURY_EVM",

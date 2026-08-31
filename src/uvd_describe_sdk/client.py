@@ -140,11 +140,71 @@ detrás (`execution-market/.../client.py:19-23`, INC-2026-08-19):
 KarmaKadabra usa 25 s con la misma medición del cold start y dejó escrito que
 su default viejo de 12 s «convertía cada arranque en frío en un ilegible».
 30 gana porque cubre el cold start con margen y no empata con nada.
+
+════════════════════════════════════════════════════════════════════════════
+🔴 EL JITTER VIENE PRENDIDO — Y ACÁ ESTÁ EL TRADE-OFF, NO UNA PREFERENCIA
+════════════════════════════════════════════════════════════════════════════
+Aporte de **KarmaKadabra** (`#agents`, **2026-08-30**), que opera una flota de
+27 agentes. Su medición, textual:
+
+    «27 agentes despiertan al MISMO tiempo por EventBridge y pegan simultáneo
+    contra su límite de rps COMPARTIDO con los otros consumidores. Sin jitter,
+    un enjambre es un DDoS educado.»
+
+Su implementación es `random.uniform(0, 0.4)` antes de cada lectura del índice
+(`karmakadabra/lib/reputation_scan.py:120-123`). El default de acá **es ese
+mismo 0,4**, y el número se hereda con su procedencia en vez de inventarse uno
+nuevo que nadie midió.
+
+**Por qué prendido y no opt-in, que era la decisión de verdad:** los dos lados
+son reales y se pesaron.
+
+    A FAVOR de apagado   Una librería que duerme sin que se lo pidan sorprende.
+                         Quien escribe un script suelto paga 0,2 s de mediana
+                         por un problema que no tiene: el jitter no le sirve de
+                         nada a un solo llamador, sólo sirve cuando hay muchos.
+
+    A FAVOR de prendido  El que escribe ese script suelto **no se entera de que
+                         el problema existe** hasta que tiene flota, y para
+                         entonces ya le pegó al límite de otro.
+
+Lo que rompe el empate no es cuál cuesta más sino **quién paga**. El costo de
+tenerlo prendido lo paga quien eligió el default, y son 0,2 s de mediana. El
+costo de tenerlo apagado lo pagan **terceros**: el límite es compartido con los
+otros dos consumidores del ecosistema, así que un enjambre sin dispersar les
+come el presupuesto a MeshRelay y a Execution Market, que no eligieron nada. Un
+default cuyo daño cae sobre alguien que no lo eligió no es un default, es una
+trampa — y es el mismo criterio con el que R5 decide qué traga el fail-open.
+
+Apagarlo es una línea explícita y queda escrita en el código de quien la pone:
+
+    DescribeClient(product="mi-script", jitter=0)
+
+**Sólo dispersa, nunca cede.** El jitter va antes de la request y NADA MÁS: no
+es un backoff. Son dos cosas distintas y confundirlas cuesta plata — el jitter
+dispersa un rebaño que todavía no pidió nada; el backoff cede ante un servicio
+que ya dijo que no. Este SDK no reintenta (ver `_paid`), así que no hay backoff
+que escribir. Y hay un lugar donde el jitter está **explícitamente prohibido**:
+el segundo tramo del baile del 402, el posterior a la firma. Dormir entre firmar
+una autorización EIP-3009 y despacharla quema ventana de settlement
+(`maxTimeoutSeconds: 120` en el challenge) a cambio de CERO dispersión — el
+rebaño ya se dispersó en el primer tramo. Ver `_request(disperse=...)`.
+
+🔴 **La aleatoriedad NO es criptográfica, y es deliberado**: esto es dispersión,
+no un secreto. `secrets` acá sería cargo cult — más lento y sin comprar nada.
+
+Sobre el número del rate limit: no se tipea en este SDK. La autoridad viva es la
+cabecera **`Ratelimit-Policy`** que la API manda en CADA respuesta. Medida hoy
+(2026-08-30) vale `50;w=1;burst=40`; KK citó 20 porque la documentación vieja
+decía eso y el límite se subió el 2026-08-28. Ese desfasaje es exactamente la
+razón de remitir al header en vez de copiar el número a un cuarto archivo.
 """
 
 from __future__ import annotations
 
 import logging
+import random
+import time
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 from urllib.parse import quote
 
@@ -154,6 +214,7 @@ from .badge import badge_url as _badge_url
 from .errors import (
     DescribeError,
     DescribeHTTPError,
+    DescribeMalformedHash,
     DescribeTimeout,
     DescribeUnparseable,
     DescribeUnreachable,
@@ -161,6 +222,7 @@ from .errors import (
     PaymentRequiredError,
     mark_payment_sent,
 )
+from .hashes import looks_like_onchain_id, looks_like_settlement_receipt
 from .models import (
     AgentReputation,
     Breakdown,
@@ -168,6 +230,7 @@ from .models import (
     LeaderboardRow,
     PaymentReceipt,
     WalletReputation,
+    malformed_hash_report,
     parse_agent_reputation,
     parse_breakdown,
     parse_health,
@@ -191,7 +254,33 @@ DEFAULT_TIMEOUT_S = 30.0
 #: probar gastaría credenciales.
 DEFAULT_PAY_NETWORK = "base"
 
+#: Techo del sueño de dispersión, en SEGUNDOS. Es el valor que KarmaKadabra mide
+#: y usa en producción con 27 agentes (`reputation_scan.py:123`), heredado tal
+#: cual. Ver el bloque «EL JITTER VIENE PRENDIDO» en la cabecera del módulo para
+#: el trade-off completo; `jitter=0` lo apaga.
+DEFAULT_JITTER_S = 0.4
+
 logger = logging.getLogger("uvd_describe_sdk")
+
+#: 🔴 Generador PROPIO, no el global de `random`, y no es un detalle de estilo.
+#: Una flota corre N veces la misma imagen, y basta con que el proceso llame a
+#: `random.seed(0)` —para hacer reproducible cualquier otra cosa— para que los 27
+#: agentes duerman EXACTAMENTE lo mismo: dispersión cero, o sea el bug que el
+#: jitter existe para evitar, reintroducido por una línea que ni lo menciona. Una
+#: instancia propia sin semilla se siembra del SO y es inmune a eso.
+#: NO es criptográfica a propósito: es dispersión, no un secreto.
+_RNG = random.Random()
+
+
+def _jitter_seconds(jitter: float) -> float:
+    """Cuánto dormir antes de una request. Puro y testeable sin dormir.
+
+    `<= 0` desactiva —es el opt-out explícito— y con eso un valor negativo por
+    error tampoco puede convertirse en un `sleep` que levante.
+    """
+    if jitter <= 0:
+        return 0.0
+    return _RNG.uniform(0.0, jitter)
 
 #: Se llama con la excepción que se está tragando. Ver `_observe`.
 ErrorObserver = Callable[[DescribeError], None]
@@ -231,6 +320,7 @@ class DescribeClient:
         user_agent: Optional[str] = None,
         fail_open: bool = True,
         on_error: Optional[ErrorObserver] = None,
+        jitter: float = DEFAULT_JITTER_S,
         payer: Optional[Payer] = None,
         pay_network: str = DEFAULT_PAY_NETWORK,
         treasury: str = TREASURY_EVM,
@@ -240,10 +330,12 @@ class DescribeClient:
         """
         Args:
             product: quién consume (`"karmakadabra"`, `"meshrelay"`…). Va al
-                User-Agent. Pasalo: el rate limit son 20 rps COMPARTIDOS sin
-                bucket por partner, y sin atribución nadie puede saber quién lo
-                gastó. Un request anónimo contra un límite compartido es
-                free-riding.
+                User-Agent. Pasalo: el rate limit es COMPARTIDO entre todos
+                los consumidores y no hay bucket por partner, así que sin
+                atribución nadie puede saber quién lo gastó. Un request anónimo
+                contra un límite compartido es free-riding. (El número vivo lo
+                manda la API en `Ratelimit-Policy` en cada respuesta; no se
+                copia acá — ver `jitter`.)
             fail_open: default `True`. Cubre las rutas **GRATIS** —`wallet()`,
                 `leaderboard()`, `health()`— que ante un fallo de servicio
                 devuelven `None` (nunca `[]`) y siempre observado. **No cubre
@@ -252,7 +344,14 @@ class DescribeClient:
                 una credencial gastada sin recibo. Ver la cabecera del módulo.
             on_error: se llama con la excepción **cada vez** que el fail-open
                 traga una. Si no se pasa, igual se loguea en WARNING. No existe
-                el modo silencioso.
+                el modo silencioso. Por acá viaja también —sin que nada se
+                levante— el `DescribeMalformedHash` de un campo de hash que
+                llegó con basura.
+            jitter: segundos de dispersión aleatoria ANTES de cada request.
+                Default `0.4`, **prendido**, heredado de la medición de
+                KarmaKadabra con 27 agentes. `jitter=0` lo apaga. No es un
+                backoff y no se aplica al tramo posterior a la firma de un pago.
+                Ver el bloque «EL JITTER VIENE PRENDIDO» en la cabecera.
             payer: quien firma el 402. Sólo hace falta para las rutas medidas.
                 Ver `payment.Payer`.
             treasury: la dirección a la que se acepta pagar. Configurable para
@@ -274,6 +373,7 @@ class DescribeClient:
         self._user_agent = user_agent or default_user_agent(product)
         self._fail_open = fail_open
         self._on_error = on_error
+        self._jitter = jitter
         self._payer = payer
         self._pay_network = pay_network
         self._treasury = treasury
@@ -339,12 +439,69 @@ class DescribeClient:
             except Exception:  # noqa: BLE001
                 logger.exception("el on_error de quien llama levantó una excepción")
 
+    def _notify(self, exc: DescribeError) -> None:
+        """Avisar sin el texto del fail-open. Mismo canal, otro hecho.
+
+        `_observe` cierra su mensaje con «se devuelve None, que NO significa sin
+        reputación», y eso acá sería mentira: la respuesta llegó y se devuelve
+        entera. Compartir el canal (que es lo que pedía KK: *«el contrato debería
+        decirlo»*, y por el canal donde el consumidor ya está mirando) no es
+        compartir el mensaje — un aviso que describe mal lo que pasó manda a
+        investigar al lugar equivocado, que es la falla que este repo persigue.
+        """
+        logger.warning("describe: %s", exc)
+        if self._on_error is not None:
+            try:
+                self._on_error(exc)
+            except Exception:  # noqa: BLE001
+                logger.exception("el on_error de quien llama levantó una excepción")
+
+    def _check_hashes(self, resultado: Any, path: str) -> None:
+        """Observar los campos de hash que llegaron con basura. **No levanta.**
+
+        Aporte de **KarmaKadabra** (`#agents`, 2026-08-30): *«Un 200 que no hizo
+        la cosa es peor que un 503, porque el cliente lo toma por bueno: si
+        nosotros no chequeáramos el tx, habríamos contado 14 ratings que no
+        existen.»*
+
+        Las tres salidas posibles se pesaron y ésta es la única que no reproduce
+        el bug o lo empeora:
+
+          * **levantar** — un `tx_hash` podrido tumbaría una descomposición
+            entera que por lo demás llegó bien, y encima YA PAGADA. Romper por un
+            campo accesorio es peor que el bug que se está cazando.
+          * **anular en silencio** — es exactamente lo que mordió a KK: el
+            consumidor lo toma por bueno y cuenta ratings que no existen.
+          * **dejar pasar el valor con una marca** — el camino por defecto, que
+            es el que nadie revisa, sigue armando links a un explorador con
+            basura. Marcar algo que igual se entrega no protege a nadie.
+
+        Así que: el campo tipado queda en `None`, el crudo sobrevive en `raw`, y
+        el hecho sale por `on_error` + WARNING, que es donde el consumidor ya
+        está mirando. Nada se levanta.
+        """
+        fields = malformed_hash_report(resultado)
+        if not fields:
+            return
+        self._notify(
+            DescribeMalformedHash(
+                f"GET {path} trajo {len(fields)} campo(s) de hash con algo que NO "
+                f"tiene forma de identificador on-chain: {', '.join(fields)}. Esos "
+                "campos quedaron en None (el valor crudo sigue en `.raw`) y el "
+                "RESTO de la respuesta es válido y se devuelve entero. 🔴 No los "
+                "cuentes como transacciones ni armes un link de explorador con "
+                "ellos: un 200 que no hizo la cosa se toma por bueno.",
+                fields=fields,
+            )
+        )
+
     def _request(
         self,
         path: str,
         *,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
+        disperse: bool = True,
     ) -> httpx.Response:
         """GET con la taxonomía tipada. **Nunca deja escapar una `httpx.*`.**
 
@@ -352,7 +509,14 @@ class DescribeClient:
         deliberado: quien llama no debería tener que importar `httpx` para
         escribir su `except`, ni verse obligado a cambiarlo el día que este SDK
         cambie de cliente HTTP.
+
+        `disperse=False` salta el jitter. Lo usa **un solo** llamador: el tramo
+        del baile del 402 posterior a la firma. Ver la cabecera del módulo.
         """
+        if disperse:
+            espera = _jitter_seconds(self._jitter)
+            if espera > 0:
+                time.sleep(espera)
         url = f"{self._base_url}{path}"
         try:
             return self._http.get(url, params=params, headers=headers)
@@ -518,11 +682,24 @@ class DescribeClient:
         sirve para conciliar) y `X-Payment-Reused: true` dice que se reusó un
         recibo en vez de cobrar de nuevo. Verificado en el servicio:
         `paywall.py:1059-1062` los escribe, `api.py:2226` los expone por CORS.
+
+        El recibo se valida por FORMA con su regla propia: acá `pending` es un
+        valor LEGÍTIMO que el OpenAPI declara («settlement has not reported one»)
+        y no se marca. Ver `hashes.looks_like_settlement_receipt`.
         """
+        crudo = response.headers.get("X-Payment-Receipt")
+        malos: List[str] = []
+        recibo: Optional[str] = None
+        if crudo is not None:
+            if looks_like_settlement_receipt(str(crudo)):
+                recibo = str(crudo)
+            else:
+                malos.append("transaction_hash")
         return PaymentReceipt(
-            transaction_hash=response.headers.get("X-Payment-Receipt"),
+            transaction_hash=recibo,
             reused=str(response.headers.get("X-Payment-Reused", "")).lower() == "true",
             pricing_version=response.headers.get("X-Pricing-Version"),
+            malformed_hashes=tuple(malos),
         )
 
     def _partner_signature(
@@ -625,7 +802,9 @@ class DescribeClient:
                 )
             # Un 200 sin pagar: el servicio decidió no cobrar (o hay un caché
             # delante). No hubo credencial, así que no hay nada que marcar.
-            return parse(self._json(response, path), self._receipt(response))
+            gratis = parse(self._json(response, path), self._receipt(response))
+            self._check_hashes(gratis, path)
+            return gratis
 
         # ══ EL RIEL SE ROMPIÓ, Y ACÁ SE LEVANTA EN VEZ DE PAGAR ══════════════
         # Firmamos como partner y describe igual pide plata. Las cuatro causas
@@ -687,10 +866,30 @@ class DescribeClient:
         # es el que se firmó, no una aproximación. String y no float: es plata.
         firmado = challenge.get("price_usd", challenge.get("amount"))
         monto = str(firmado) if firmado is not None else None
+        # 🔴 Sólo un hash CITABLE cuenta como prueba de settlement, y esto no es
+        # celo: `mark_payment_sent` dice, textual, «HAY RECIBO … el settlement
+        # ocurrió, el gasto está confirmado y es citable». Esa frase es FALSA
+        # sobre dos valores que llegan por esta misma cabecera:
+        #   * `pending`, que el OpenAPI declara legítimo y significa justamente
+        #     lo contrario — el settlement TODAVÍA no reportó nada;
+        #   * cualquier basura, que es el «200 sin tx» de KK dentro del camino
+        #     del dinero, donde miente más caro que en ningún otro lado.
+        # Con `None` la excepción usa su otra rama, que es la honesta: «no hay
+        # prueba en ninguno de los dos sentidos». Preferir el silencio a una
+        # afirmación fuerte que no se puede sostener.
         recibo: Optional[str] = None
         try:
-            paid = self._request(path, params=params, headers={"X-PAYMENT": header})
-            recibo = paid.headers.get("X-Payment-Receipt")
+            # 🔴 `disperse=False`: NO se duerme entre firmar la autorización
+            # EIP-3009 y despacharla. El jitter dispersa un rebaño, y este
+            # rebaño ya se dispersó en el primer tramo; dormir acá sólo quema
+            # ventana de settlement (`maxTimeoutSeconds: 120`) con la credencial
+            # firmada en la mano. Ver la cabecera del módulo.
+            paid = self._request(
+                path, params=params, headers={"X-PAYMENT": header}, disperse=False
+            )
+            cabecera = paid.headers.get("X-Payment-Receipt")
+            if cabecera is not None and looks_like_onchain_id(str(cabecera)):
+                recibo = str(cabecera)
             if paid.status_code >= 400:
                 raise DescribeHTTPError(
                     f"GET {path} → HTTP {paid.status_code} DESPUÉS de pagar. "
@@ -698,7 +897,12 @@ class DescribeClient:
                     "reenvíes esta.",
                     status_code=paid.status_code,
                 )
-            return parse(self._json(paid, path), self._receipt(paid))
+            pagado = parse(self._json(paid, path), self._receipt(paid))
+            # Observar DESPUÉS de parsear y ANTES de devolver: si el observador
+            # de quien llama explota, `_notify` ya lo aísla — pero además nada de
+            # esto puede impedir que la respuesta PAGADA llegue a sus manos.
+            self._check_hashes(pagado, path)
+            return pagado
         except DescribeError as exc:
             mark_payment_sent(
                 exc,

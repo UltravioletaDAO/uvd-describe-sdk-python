@@ -87,7 +87,7 @@ valen `False` / `None`, siempre.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 #: El `kind` que usa `execution-market` para el mismo bucket. Se publica para
 #: que una migración pueda comparar contra los dos sin adivinar.
@@ -145,8 +145,9 @@ class DescribeTimeout(DescribeError):
 class DescribeHTTPError(DescribeError):
     """describe contestó con un status no-2xx.
 
-    El 422 (dirección inválida) y el 429 (rate limit compartido de 20 rps) caen
-    acá junto con los 5xx: todo consumidor los trata igual —«no hay respuesta
+    El 422 (dirección inválida) y el 429 (rate limit compartido — el presupuesto
+    vivo lo dice la cabecera `Ratelimit-Policy`, no un número copiado acá) caen
+    junto con los 5xx: todo consumidor los trata igual —«no hay respuesta
     usable»— y lo que se lee para distinguirlos es `status_code`, no el bucket.
     """
 
@@ -172,6 +173,56 @@ class DescribeUnparseable(DescribeError):
     """
 
     kind = "unparseable"
+
+
+class DescribeMalformedHash(DescribeError):
+    """Un campo de hash llegó con algo que **no tiene forma de hash**.
+
+    Aporte de **KarmaKadabra** (`#agents`, 2026-08-30), del hallazgo que ellos
+    llaman «el 200 sin tx»: *«si nosotros no chequeáramos el tx, habríamos
+    contado 14 ratings que no existen»*. Un 200 que no hizo la cosa es peor que
+    un 503 porque el cliente lo toma por bueno.
+
+    🔴 **ESTA EXCEPCIÓN NUNCA SE LEVANTA. No escribas un `except` para ella.**
+    Viaja únicamente como argumento de `on_error`, y existe como clase por una
+    razón mecánica: el canal de observación está tipado
+    `Callable[[DescribeError], None]`, así que para reutilizar el canal donde el
+    consumidor YA está mirando —que es lo que pedía KK— el hecho tiene que SER
+    un `DescribeError`. Se ramifica por `kind == "malformed_hash"` o por
+    `isinstance`, jamás por un `try/except` que no se va a disparar nunca.
+
+    ⚠️ Y hay una tensión con esta misma taxonomía que se declara en vez de
+    taparse: la cabecera de este módulo explica que `PartialIndex` **no se
+    portó** de Execution Market justamente porque «publicar una excepción que el
+    SDK jamás levanta invita a un `except` muerto». El criterio que separa los
+    dos casos no es «se levanta o no» sino **para qué existe la clase**:
+    `PartialIndex` existía para que alguien la atrapara y nadie la iba a tirar;
+    ésta existe para viajar por un canal ya tipado, y su docstring lo grita en la
+    primera línea. Si algún día `on_error` acepta algo más que un `DescribeError`,
+    esta clase deja de hacer falta.
+
+    Por qué el fallo NO tumba la lectura: el resto de la respuesta puede ser
+    perfectamente útil, y romper una descomposición de reputación entera por un
+    campo accesorio sería peor que el bug que se está cazando. El campo tipado
+    queda en `None` —para que nadie arme un link a un explorador con basura— y
+    el valor crudo sobrevive en el `raw` del modelo, que es donde se investiga.
+
+    🔴 **Ausente y malformado NO son lo mismo, y el modelo los distingue** (R1
+    aplicada un nivel más abajo):
+
+        rating.tx_hash is None y `malformed_hashes` vacío   → NO VINO
+        rating.tx_hash is None y "tx_hash" en malformed     → VINO BASURA
+
+    `fields` trae la ubicación de cada uno, con índice cuando está en una lista:
+    `["ratings[3].tx_hash", "snapshot.inputs_digest"]`.
+    """
+
+    kind = "malformed_hash"
+
+    def __init__(self, message: str, fields: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        #: Rutas de los campos que llegaron malformados, en orden de aparición.
+        self.fields: List[str] = list(fields or [])
 
 
 class PaymentRequiredError(DescribeError):

@@ -36,34 +36,56 @@ from .conftest import WALLET_CON_REPUTACION
 # R2 — ningún método devuelve un número pelado
 # ---------------------------------------------------------------------------
 
-#: Anotaciones de retorno que serían una violación de R2. Se comparan como
-#: STRING porque todo el SDK usa `from __future__ import annotations` y las
-#: anotaciones llegan sin evaluar.
+#: Anotaciones de retorno que serían una violación de R2 **en cualquier lado**.
+#: Se comparan como STRING porque todo el SDK usa `from __future__ import
+#: annotations` y las anotaciones llegan sin evaluar.
+#:
+#: Son los tipos en los que se expresa un SCORE (y el dinero): un `float` pelado
+#: es exactamente el `get_score()` que R2 existe para impedir.
 _RETORNOS_PROHIBIDOS = {
     "float",
-    "int",
     "Optional[float]",
-    "Optional[int]",
     "float | None",
-    "int | None",
     "Decimal",
     "Optional[Decimal]",
 }
 
+#: Enteros: prohibidos en una función SUELTA, permitidos como método/propiedad
+#: de un modelo.
+#:
+#: ⚠️ CORRECCIÓN 2026-08-30, y se deja escrita en vez de borrarse. Hasta hoy
+#: `int` y `Optional[int]` estaban en el set de arriba, o sea prohibidos en todas
+#: partes — **contradiciendo el docstring de este mismo test**, que ya decía
+#: «se permiten los `@property` de contadores/booleanos de los modelos: `int` y
+#: `bool` no son scores». La contradicción nunca se vio porque ninguna superficie
+#: devolvía un entero, hasta que llegó `WalletReputation.max_distinct_raters()`
+#: (aporte de MeshRelay). La regla escrita era la correcta y la lista estaba de
+#: más; se alinea la lista, no el docstring.
+#:
+#: Por qué la distinción es la correcta y no una excusa para pasar el test: R2
+#: prohíbe **entregar el número en lugar del objeto que lo contextualiza**. Un
+#: método de instancia no puede hacer eso — para llamarlo hay que TENER el objeto,
+#: con su `policy_version` y sus `caveats` en la mano. Una función suelta sí:
+#: `distinct_raters_of("0x…") -> int` devolvería el número y nada más, y sigue
+#: prohibida. Y `distinct_raters` no es un score: es uno de los CALIFICADORES
+#: cuya ausencia es la que vuelve rumor a un score.
+_ENTEROS = {"int", "Optional[int]", "int | None"}
+
 
 def _publicos():
+    """Cada superficie pública, con si es miembro de una clase o función suelta."""
     for nombre in sdk.__all__:
         objeto = getattr(sdk, nombre)
         if inspect.isfunction(objeto):
-            yield f"{nombre}()", objeto
+            yield f"{nombre}()", objeto, False
         elif inspect.isclass(objeto):
             for metodo, fn in vars(objeto).items():
                 if metodo.startswith("_"):
                     continue
                 if inspect.isfunction(fn):
-                    yield f"{nombre}.{metodo}()", fn
+                    yield f"{nombre}.{metodo}()", fn, True
                 elif isinstance(fn, property) and fn.fget is not None:
-                    yield f"{nombre}.{metodo}", fn.fget
+                    yield f"{nombre}.{metodo}", fn.fget, True
 
 
 def test_ningun_publico_devuelve_un_numero() -> None:
@@ -78,13 +100,15 @@ def test_ningun_publico_devuelve_un_numero() -> None:
     número** en lugar del objeto que lo contextualiza.
     """
     prohibidos = {p.replace(" ", "") for p in _RETORNOS_PROHIBIDOS}
+    enteros = {p.replace(" ", "") for p in _ENTEROS}
     violaciones = []
-    for etiqueta, fn in _publicos():
+    for etiqueta, fn, es_miembro in _publicos():
         anotacion = inspect.signature(fn).return_annotation
         if anotacion is inspect.Signature.empty:
             continue
         texto = anotacion if isinstance(anotacion, str) else getattr(anotacion, "__name__", "")
-        if texto.replace(" ", "") in prohibidos:
+        limpio = texto.replace(" ", "")
+        if limpio in prohibidos or (limpio in enteros and not es_miembro):
             violaciones.append(f"{etiqueta} -> {texto}")
     assert not violaciones, (
         "R2 violada: estas superficies públicas devuelven un número pelado, sin "

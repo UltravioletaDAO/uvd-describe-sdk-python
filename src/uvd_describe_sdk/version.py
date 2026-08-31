@@ -21,10 +21,10 @@ Y por eso también el User-Agent se arma acá. La lección es de MeshRelay, que
 lee su versión del `package.json` en vez de tipearla, con la razón escrita:
 **«a User-Agent that lies about the version is worse than none»**
 (`meshrelay/meshrelayserv/describenet.js:39`). El UA es lo único que el
-proveedor puede loguear para atribuir tráfico —su rate limit son 20 rps
-COMPARTIDOS entre todos los consumidores y no hay bucket por partner— así que
-un UA anónimo contra un límite compartido es free-riding, y uno que miente es
-peor: manda a mirar la versión equivocada.
+proveedor puede loguear para atribuir tráfico —su rate limit es COMPARTIDO
+entre todos los consumidores y no hay bucket por partner— así que un UA anónimo
+contra un límite compartido es free-riding, y uno que miente es peor: manda a
+mirar la versión equivocada.
 """
 
 from __future__ import annotations

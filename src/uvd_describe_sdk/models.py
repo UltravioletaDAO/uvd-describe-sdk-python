@@ -70,9 +70,10 @@ una forma válida que dice «no hay nada» y no pasa por ahí — R4.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .errors import DescribeUnparseable
+from .hashes import looks_like_onchain_id
 
 # ---------------------------------------------------------------------------
 # Primitivas de parseo
@@ -107,6 +108,37 @@ def _int0(value: Any) -> int:
     contable. Nunca se usa para un SCORE.
     """
     return int(value or 0)
+
+
+def _hash_field(row: Dict[str, Any], key: str, malformed: List[str]) -> Optional[str]:
+    """Un campo de hash: se devuelve si tiene FORMA de hash, si no `None` + marca.
+
+    Aporte de **KarmaKadabra** (`#agents`, 2026-08-30), del hallazgo «el 200 sin
+    tx»: *«si nosotros no chequeáramos el tx, habríamos contado 14 ratings que no
+    existen»*. Ver `hashes.py` para las cuatro formas legítimas medidas y para
+    por qué una regex de hash EVM sola habría marcado toda Solana.
+
+    🔴 **AUSENTE Y MALFORMADO NO SON LO MISMO.** Es R1 un nivel más abajo, y es
+    la razón de que exista la lista `malformed` en vez de devolver `None` a secas:
+
+        no vino      → `None`, y `key` NO entra en `malformed`. Es lo normal:
+                       el propio schema dice que `tx_hash` es *«null until the
+                       log scan reaches this entry, not null forever»*.
+        vino basura  → `None` **y** `key` en `malformed`. Ese es el que grita.
+
+    Se devuelve `None` y no el valor crudo a propósito: quien tenga el campo lo
+    va a meter en la URL de un explorador, y un link a basura es el mismo 200
+    mentiroso una capa más arriba. El valor tal cual llegó sobrevive igual en el
+    `raw` del modelo (tolerancia aditiva), que es donde se investiga.
+    """
+    value = row.get(key)
+    if value is None:
+        return None
+    text = str(value)
+    if looks_like_onchain_id(text):
+        return text
+    malformed.append(key)
+    return None
 
 
 def _require(payload: Any, key: str, what: str) -> Dict[str, Any]:
@@ -223,6 +255,61 @@ class WalletReputation:
         """Sólo los `code`. Atajo para ramificar sin tocar `text`."""
         return [c.code for c in self.caveats]
 
+    def max_distinct_raters(self) -> Optional[int]:
+        """Cuántos calificadores DISTINTOS tiene esta wallet. Prefiere el global.
+
+        Aporte de **MeshRelay** (`#agents`, **2026-08-30**). Lo que vale de este
+        helper no son sus siete líneas: son las DOS trampas que MeshRelay midió
+        antes de escribirlo, y que sin quedar acá escritas hacen que parezca
+        trivial y se use mal.
+
+        ════════════════════════════════════════════════════════════════════
+        🔴 TRAMPA 1 — SUMAR POR CADENA DOBLE-CUENTA
+        ════════════════════════════════════════════════════════════════════
+        Un mismo calificador que te calificó en dos redes se cuenta dos veces.
+        Caso medido por MeshRelay: la wallet de **karma-hello** lee **9**
+        `distinct_raters` global y **11** sumando las cadenas.
+
+        ════════════════════════════════════════════════════════════════════
+        🔴 TRAMPA 2 — EL MÁXIMO SUBESTIMA
+        ════════════════════════════════════════════════════════════════════
+        Caso medido por MeshRelay: **3** raters en `base` y **4 DISTINTOS** en
+        `avalanche` son **7** reales, y el máximo dice **4**.
+
+        O sea que las dos formas obvias de derivarlo están mal en direcciones
+        opuestas, y **el máximo sirve SÓLO como cota inferior / fallback cuando
+        no está el global. JAMÁS como la respuesta.**
+
+        Corroborado de nuestro lado el 2026-08-30 contra `api.describe.net`, en
+        las **3 de 3** wallets multi-cadena del `GET /leaderboard`: las dos
+        trampas disparan en todas, sin una sola excepción.
+
+            wallet          global   suma   máximo
+            0xcc28cee3…        129    134      113
+            0xf9d1d63f…       1542   1555     1513
+            0x0d68a153…         40     41       35
+
+        Por eso este método **prefiere el global** (`distinct_raters`, que la
+        ruta gratis ya sirve vivo) y sólo cae al máximo cuando no vino. No hay
+        —ni va a haber— un helper que sume: la suma no es una aproximación
+        peor, es una afirmación falsa.
+
+        Returns:
+            El global si el índice lo mandó: **la respuesta**, exacta.
+
+            Si no vino, el máximo por cadena: una **COTA INFERIOR**, nunca el
+            número real. `>=` es lo único que se puede afirmar con él.
+
+            `None` si no hay global ni cadenas — R1: sin datos no es cero.
+            Un `0` acá afirmaría «nadie la calificó» sobre una wallet de la que
+            no sabemos nada.
+        """
+        if self.distinct_raters is not None:
+            return self.distinct_raters
+        if not self.chains:
+            return None
+        return max(c.distinct_raters for c in self.chains)
+
 
 def parse_wallet_reputation(payload: Any) -> WalletReputation:
     body = _require(payload, "wallet", "GET /wallets/{wallet}/chains")
@@ -329,9 +416,15 @@ class Snapshot:
     """
 
     id: Optional[int] = None
+    #: `None` si no vino **o si vino algo sin forma de digest** — cuál de las dos
+    #: lo dice `malformed_hashes`. Es un sha256 hexdigest PELADO (64 hex, sin
+    #: `0x`): `aggregate.py:1920`. Ver `hashes.py`.
     inputs_digest: Optional[str] = None
     policy_version: Optional[str] = None
     computed_at: Optional[str] = None
+    #: Los campos de hash que llegaron malformados. Vacío = todo bien **o** todo
+    #: ausente; las dos cosas se separan mirando el campo. Ver `_hash_field`.
+    malformed_hashes: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -392,6 +485,13 @@ class Rating:
     (`client`), cuántas veces, en qué transacción (`tx_hash`) y quién escribió
     la entrada (`issuer_host`). Es la respuesta física a *«un score sin sus
     calificadores es un rumor»*.
+
+    🔴 **Los tres campos de hash llegan validados POR FORMA** (`tx_hash`,
+    `feedback_hash`, `revoked_tx`) — aporte de KarmaKadabra, 2026-08-30, del
+    hallazgo «el 200 sin tx»: *«habríamos contado 14 ratings que no existen»*.
+    Un valor sin forma de identificador on-chain queda en `None` y su nombre
+    entra en `malformed_hashes`. Ausente y malformado NO son lo mismo — ver
+    `_hash_field` y `hashes.py`.
     """
 
     client: str
@@ -403,6 +503,9 @@ class Rating:
     tag2: Optional[str] = None
     is_revoked: bool = False
     is_self: bool = False
+    #: La transacción que escribió esta calificación. `None` si no vino **o** si
+    #: vino malformada; `malformed_hashes` dice cuál de las dos. Que sea `None`
+    #: es normal y esperable: *«null until the log scan reaches this entry»*.
     tx_hash: Optional[str] = None
     block_number: Optional[int] = None
     log_index: Optional[int] = None
@@ -410,8 +513,13 @@ class Rating:
     issuer_host: Optional[str] = None
     issuer: Optional[str] = None
     issuer_org: Optional[str] = None
+    #: NULL a propósito en Solana (`solana_indexer.py:27`): un hueco acá es
+    #: correcto, no una falta.
     feedback_hash: Optional[str] = None
     revoked_tx: Optional[str] = None
+    #: Cuáles de los tres de arriba llegaron con algo que no es un hash. Vacío en
+    #: el caso normal. 🔴 Se ramifica por acá, no por `tx_hash is None`.
+    malformed_hashes: Tuple[str, ...] = ()
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -427,11 +535,21 @@ class PaymentReceipt:
     `api.py:2226` los pone en `expose_headers` de CORS.
 
     Exponerlos es la diferencia entre «pagué» y «puedo probar que pagué».
+
+    🔴 `transaction_hash` también se valida por forma, pero con una regla PROPIA
+    (`hashes.looks_like_settlement_receipt`): el OpenAPI vivo declara que esta
+    cabecera puede valer el literal **`pending`** cuando el settlement todavía no
+    reportó su hash. `pending` es LEGÍTIMO y no se marca — tratarlo como basura
+    convertiría el camino feliz de todo pago recién liquidado en una alarma, y
+    una alarma que suena en el camino feliz se aprende a ignorar.
     """
 
     transaction_hash: Optional[str] = None
     reused: bool = False
     pricing_version: Optional[str] = None
+    #: `("transaction_hash",)` si la cabecera trajo algo que no es ni un hash ni
+    #: `pending`. Vacío en el caso normal.
+    malformed_hashes: Tuple[str, ...] = ()
 
 
 def _parse_confidence(raw: Any) -> Optional[Confidence]:
@@ -473,6 +591,24 @@ def _parse_self_rated(raw: Any) -> SelfRated:
         count=_int0(raw.get("count")),
         score=_opt_float(raw.get("score")),
         gap=_opt_float(raw.get("gap")),
+    )
+
+
+def _parse_snapshot(raw: Dict[str, Any]) -> Snapshot:
+    """El snapshot, con su `inputs_digest` validado por forma.
+
+    Un digest malformado no puede tumbar una descomposición ya PAGADA — sería
+    cobrarle al llamador y devolverle una excepción por un campo accesorio. Pero
+    tampoco puede pasar callado: es justo lo que hace incitable un snapshot que
+    se compró para poder citarlo.
+    """
+    malos: List[str] = []
+    return Snapshot(
+        id=_opt_int(raw.get("id")),
+        inputs_digest=_hash_field(raw, "inputs_digest", malos),
+        policy_version=raw.get("policy_version"),
+        computed_at=raw.get("computed_at"),
+        malformed_hashes=tuple(malos),
     )
 
 
@@ -572,12 +708,7 @@ def parse_breakdown(payload: Any, receipt: Optional[PaymentReceipt] = None) -> B
             caveats=parse_caveats(body.get("caveats")),
             policy_version=body.get("policy_version"),
             snapshot=(
-                Snapshot(
-                    id=_opt_int(snapshot_raw.get("id")),
-                    inputs_digest=snapshot_raw.get("inputs_digest"),
-                    policy_version=snapshot_raw.get("policy_version"),
-                    computed_at=snapshot_raw.get("computed_at"),
-                )
+                _parse_snapshot(snapshot_raw)
                 if isinstance(snapshot_raw, dict)
                 else None
             ),
@@ -632,6 +763,38 @@ class AgentReputation:
         return [c.code for c in self.caveats]
 
 
+def _parse_rating(row: Dict[str, Any]) -> Rating:
+    """Una calificación, con sus TRES campos de hash validados por forma.
+
+    Los tres se acumulan en la misma lista para que un rating con dos campos
+    podridos se reporte entero y no de a uno: quien investigue quiere ver el
+    daño completo de una fila, no descubrirlo por goteo.
+    """
+    malos: List[str] = []
+    return Rating(
+        client=str(row.get("client") or ""),
+        feedback_index=_int0(row.get("feedback_index")),
+        value=_int0(row.get("value")),
+        value_decimals=_int0(row.get("value_decimals")),
+        normalized_value=_opt_float(row.get("normalized_value")),
+        tag1=row.get("tag1"),
+        tag2=row.get("tag2"),
+        is_revoked=bool(row.get("is_revoked")),
+        is_self=bool(row.get("is_self")),
+        tx_hash=_hash_field(row, "tx_hash", malos),
+        block_number=_opt_int(row.get("block_number")),
+        log_index=_opt_int(row.get("log_index")),
+        feedback_uri=row.get("feedback_uri"),
+        issuer_host=row.get("issuer_host"),
+        issuer=row.get("issuer"),
+        issuer_org=row.get("issuer_org"),
+        feedback_hash=_hash_field(row, "feedback_hash", malos),
+        revoked_tx=_hash_field(row, "revoked_tx", malos),
+        malformed_hashes=tuple(malos),
+        raw=dict(row),
+    )
+
+
 def parse_agent_reputation(
     payload: Any, receipt: Optional[PaymentReceipt] = None
 ) -> AgentReputation:
@@ -639,27 +802,7 @@ def parse_agent_reputation(
     try:
         ownership_raw = body.get("ownership")
         ratings = [
-            Rating(
-                client=str(row.get("client") or ""),
-                feedback_index=_int0(row.get("feedback_index")),
-                value=_int0(row.get("value")),
-                value_decimals=_int0(row.get("value_decimals")),
-                normalized_value=_opt_float(row.get("normalized_value")),
-                tag1=row.get("tag1"),
-                tag2=row.get("tag2"),
-                is_revoked=bool(row.get("is_revoked")),
-                is_self=bool(row.get("is_self")),
-                tx_hash=row.get("tx_hash"),
-                block_number=_opt_int(row.get("block_number")),
-                log_index=_opt_int(row.get("log_index")),
-                feedback_uri=row.get("feedback_uri"),
-                issuer_host=row.get("issuer_host"),
-                issuer=row.get("issuer"),
-                issuer_org=row.get("issuer_org"),
-                feedback_hash=row.get("feedback_hash"),
-                revoked_tx=row.get("revoked_tx"),
-                raw=dict(row),
-            )
+            _parse_rating(row)
             for row in (body.get("ratings") or [])
             if isinstance(row, dict)
         ]
@@ -706,6 +849,37 @@ def parse_agent_reputation(
         raise DescribeUnparseable(
             f"GET /reputation/agent no pasó el parse tipado: {exc}"
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# El informe de hashes malformados — lo que el cliente observa
+# ---------------------------------------------------------------------------
+
+
+def malformed_hash_report(result: Any) -> List[str]:
+    """Todos los campos de hash malformados de un resultado, con su ubicación.
+
+    Existe para que `DescribeClient` pueda OBSERVAR el hecho por el mismo canal
+    que ya usa el fail-open (`on_error` + WARNING) sin que `models.py` deje de
+    ser puro: acá no hay reloj, ni red, ni observador — sólo se recoge lo que los
+    parsers ya marcaron. La decisión de a quién avisarle vive donde vive el
+    observador, que es el cliente.
+
+    Devuelve rutas legibles, con índice cuando el campo está en una lista:
+
+        ["ratings[3].tx_hash", "snapshot.inputs_digest", "receipt.transaction_hash"]
+
+    Lista vacía = ningún campo llegó con basura. **No** significa que todos
+    vinieron: un hash ausente es legítimo y no se reporta acá.
+    """
+    fields: List[str] = []
+    for i, rating in enumerate(getattr(result, "ratings", None) or []):
+        fields.extend(f"ratings[{i}].{name}" for name in rating.malformed_hashes)
+    for attr in ("snapshot", "receipt"):
+        parte = getattr(result, attr, None)
+        if parte is not None:
+            fields.extend(f"{attr}.{name}" for name in parte.malformed_hashes)
+    return fields
 
 
 # ---------------------------------------------------------------------------
