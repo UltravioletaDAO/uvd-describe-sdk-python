@@ -255,13 +255,32 @@ class WalletReputation:
         """Sólo los `code`. Atajo para ramificar sin tocar `text`."""
         return [c.code for c in self.caveats]
 
-    def max_distinct_raters(self) -> Optional[int]:
+    def resolve_distinct_raters(self) -> Optional[int]:
         """Cuántos calificadores DISTINTOS tiene esta wallet. Prefiere el global.
 
         Aporte de **MeshRelay** (`#agents`, **2026-08-30**). Lo que vale de este
         helper no son sus siete líneas: son las DOS trampas que MeshRelay midió
         antes de escribirlo, y que sin quedar acá escritas hacen que parezca
         trivial y se use mal.
+
+        🔴 **EL NOMBRE ES PARTE DEL APORTE, y no es el que trae el original.**
+        En MeshRelay la función se llama `maxDistinctRaters`, y ellos mismos
+        pidieron que acá NO se llamara así. Cito el pedido porque explica el
+        cambio mejor que cualquier resumen: *«ese nombre invita a creer que el
+        máximo es la respuesta correcta, cuando es el último recurso. El mío
+        está mal nombrado y lo arrastro de cuando el nivel wallet no existía»*.
+
+        Es el aporte más barato de todos y uno de los más útiles: alguien te
+        pasa una función **y te avisa de no copiarle el nombre**. Un `max…()`
+        se lee como «dame el máximo» —que es justo lo que NO hay que hacer— y
+        un `resolve…()` se lee como «resolvé cuál es el bueno», que es lo que
+        hace. Si algún día se renombra, que sea sabiendo por qué se movió la
+        primera vez.
+
+        (Corrección 2026-08-31: este método nació acá como `max_distinct_raters`
+        y se renombró el mismo día. El twin de TypeScript nació ya con el nombre
+        bueno porque el pedido de MeshRelay le llegó a tiempo y a este lado no
+        — la asimetría es del canal entre agentes, no del criterio.)
 
         ════════════════════════════════════════════════════════════════════
         🔴 TRAMPA 1 — SUMAR POR CADENA DOBLE-CUENTA

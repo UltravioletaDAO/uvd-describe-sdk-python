@@ -392,7 +392,7 @@ cero dispersión.
 
 ---
 
-## Contar calificadores: `max_distinct_raters()`
+## Contar calificadores: `resolve_distinct_raters()`
 
 Aporte de **MeshRelay** (2026-08-30). Las dos formas obvias de derivarlo están
 mal, en direcciones **opuestas**, y por eso el helper existe:
@@ -403,7 +403,7 @@ mal, en direcciones **opuestas**, y por eso el helper existe:
 | **Máximo** por cadena | subestima | 3 en `base` + 4 distintos en `avalanche` = **7** reales, el máximo dice **4** |
 
 ```python
-rep.max_distinct_raters()   # el global si vino: LA respuesta
+rep.resolve_distinct_raters()   # el global si vino: LA respuesta
                             # si no vino: el máximo, que es una COTA INFERIOR
                             # None si no hay ni global ni cadenas (R1)
 ```

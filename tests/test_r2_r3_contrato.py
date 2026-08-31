@@ -58,7 +58,7 @@ _RETORNOS_PROHIBIDOS = {
 #: partes — **contradiciendo el docstring de este mismo test**, que ya decía
 #: «se permiten los `@property` de contadores/booleanos de los modelos: `int` y
 #: `bool` no son scores». La contradicción nunca se vio porque ninguna superficie
-#: devolvía un entero, hasta que llegó `WalletReputation.max_distinct_raters()`
+#: devolvía un entero, hasta que llegó `WalletReputation.resolve_distinct_raters()`
 #: (aporte de MeshRelay). La regla escrita era la correcta y la lista estaba de
 #: más; se alinea la lista, no el docstring.
 #:

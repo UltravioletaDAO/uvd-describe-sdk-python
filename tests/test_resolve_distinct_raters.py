@@ -1,4 +1,4 @@
-"""② `max_distinct_raters()` — las DOS trampas medidas por MeshRelay.
+"""② `resolve_distinct_raters()` — las DOS trampas medidas por MeshRelay.
 
 Aporte de **MeshRelay** (`#agents`, **2026-08-30**). Lo que vale no son las
 siete líneas del helper sino las dos trampas que lo rodean, y este archivo
@@ -74,8 +74,8 @@ def test_prefiere_el_global_y_NO_suma_las_cadenas() -> None:
     """
     rep = _wallet(global_raters=9, por_cadena=[6, 5])  # suma 11, global 9
 
-    assert rep.max_distinct_raters() == 9
-    assert rep.max_distinct_raters() != 11, (
+    assert rep.resolve_distinct_raters() == 9
+    assert rep.resolve_distinct_raters() != 11, (
         "sumar por cadena doble-cuenta a quien calificó en dos redes "
         "(MeshRelay, 2026-08-30: karma-hello lee 9 global y 11 sumando)"
     )
@@ -90,7 +90,7 @@ def test_el_global_gana_aunque_el_maximo_sea_mayor() -> None:
     """
     rep = _wallet(global_raters=9, por_cadena=[40])
 
-    assert rep.max_distinct_raters() == 9
+    assert rep.resolve_distinct_raters() == 9
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ def test_sin_global_el_maximo_es_una_COTA_INFERIOR_que_subestima() -> None:
     """
     rep = _wallet(global_raters=None, por_cadena=[3, 4])
 
-    cota = rep.max_distinct_raters()
+    cota = rep.resolve_distinct_raters()
     assert cota == 4
     assert cota is not None and cota < 7, (
         "el máximo SUBESTIMA cuando los calificadores de cada cadena son "
@@ -126,8 +126,8 @@ def test_el_fallback_solo_entra_cuando_el_global_no_vino() -> None:
     Es el contraste que hace que los dos tests de arriba prueben algo distinto:
     mismo `por_cadena`, y el resultado cambia SÓLO por si vino el global.
     """
-    assert _wallet(global_raters=9, por_cadena=[3, 4]).max_distinct_raters() == 9
-    assert _wallet(global_raters=None, por_cadena=[3, 4]).max_distinct_raters() == 4
+    assert _wallet(global_raters=9, por_cadena=[3, 4]).resolve_distinct_raters() == 9
+    assert _wallet(global_raters=None, por_cadena=[3, 4]).resolve_distinct_raters() == 4
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ def test_sin_global_y_sin_cadenas_es_None_nunca_cero() -> None:
     """
     rep = _wallet(global_raters=None, por_cadena=[])
 
-    assert rep.max_distinct_raters() is None
+    assert rep.resolve_distinct_raters() is None
 
 
 def test_un_global_en_cero_SI_es_un_cero_legitimo() -> None:
@@ -157,7 +157,7 @@ def test_un_global_en_cero_SI_es_un_cero_legitimo() -> None:
     """
     rep = _wallet(global_raters=0, por_cadena=[0])
 
-    assert rep.max_distinct_raters() == 0
+    assert rep.resolve_distinct_raters() == 0
 
 
 def test_el_docstring_deja_escritas_las_dos_trampas() -> None:
@@ -168,7 +168,7 @@ def test_el_docstring_deja_escritas_las_dos_trampas() -> None:
     procedencia al código: rojo si alguien recorta el docstring a «devuelve los
     raters distintos».
     """
-    doc = WalletReputation.max_distinct_raters.__doc__
+    doc = WalletReputation.resolve_distinct_raters.__doc__
     assert doc is not None
     for esperado in ("MeshRelay", "2026-08-30", "COTA INFERIOR", "doble-cuenta", "SUBESTIMA"):
         assert esperado.lower() in doc.lower(), f"falta «{esperado}» en el docstring"
