@@ -241,6 +241,7 @@ from .hashes import (
 from .models import (
     AgentReputation,
     Breakdown,
+    WalletHistory,
     IndexHealth,
     LeaderboardRow,
     PaymentReceipt,
@@ -248,6 +249,7 @@ from .models import (
     malformed_hash_report,
     parse_agent_reputation,
     parse_breakdown,
+    parse_history,
     parse_health,
     parse_leaderboard,
     parse_wallet_reputation,
@@ -1106,6 +1108,33 @@ class DescribeClient:
         path = f"/reputation/wallet/{quote(str(address), safe='')}"
         params = {"snapshot": "true"} if snapshot else None
         return self._paid(path, parse_breakdown, params=params)
+
+    def wallet_history(self, address: str) -> WalletHistory:
+        """`GET /reputation/wallet/{wallet}/history` — **$0.03**.
+
+        How the score MOVED, bucketed and dated by on-chain time. `wallet()`
+        answers "what is it now"; this one answers "is it going up or down",
+        which is the question that changes a decision — and the one a caller
+        cannot reconstruct by polling, because a first read has nothing to
+        compare against.
+
+        🔴 **Read `series_is_decidable` before diffing anything.** Ratings with
+        no on-chain date are missing from the series but counted in the profile,
+        so with enough of them the last point sits legitimately below
+        `final_score` and a diff reports a fall that never happened. The service
+        says this in its own catalogue; the flag exists so no caller has to
+        remember it. `change_over()` already refuses to answer in that case,
+        returning `None` rather than a `0.0` that would read as "it did not move".
+
+        Same payment semantics as `wallet_breakdown`: not nullable, the fail-open
+        does not swallow it, and a `partner` signer makes it free.
+
+        Raises:
+            `PaymentRequiredError` if there is no `payer` and no partner access.
+            `DescribeError` on any service failure.
+        """
+        path = f"/reputation/wallet/{quote(str(address), safe='')}/history"
+        return self._paid(path, parse_history)
 
     def agent(self, network: str, agent_id: str) -> AgentReputation:
         """`GET /reputation/agent/{network}/{agent_id}` — **$0.02**.

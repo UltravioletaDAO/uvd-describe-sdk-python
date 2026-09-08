@@ -1130,3 +1130,145 @@ def parse_health(payload: Any) -> IndexHealth:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise DescribeUnparseable(f"GET /health did not pass the typed parse: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class HistoryPoint:
+    """One bucket of `GET /reputation/wallet/{w}/history`.
+
+    `score` is that bucket's own average; `cumulative_score` is the running one,
+    and it is the series that lines up with the profile's `final_score`. Reading
+    `score` where `cumulative_score` belongs turns a quiet week into a crash.
+    """
+
+    period: str
+    score: Optional[float]
+    review_count: Optional[int]
+    cumulative_score: Optional[float]
+
+
+@dataclass(frozen=True)
+class ScoreChange:
+    """How much a score moved, and on what grounds — R2 applied to a difference.
+
+    A bare `-1.87` is as much a rumour as a bare score: whoever repeats "it
+    dropped two points" has to be able to say over what span and on how many
+    dated ratings. `direction` is there so the common case does not turn into
+    a sign comparison at every call site.
+    """
+
+    delta: float
+    from_period: str
+    to_period: str
+    buckets: int
+    dated_reviews: Optional[int]
+    undated_reviews: Optional[int]
+
+    @property
+    def direction(self) -> str:
+        """`"up"`, `"down"`, or `"flat"` for a move under half a point."""
+        if abs(self.delta) < 0.5:
+            return "flat"
+        return "up" if self.delta > 0 else "down"
+
+
+@dataclass(frozen=True)
+class WalletHistory:
+    """`GET /reputation/wallet/{w}/history` — how a score MOVED, on chain time.
+
+    The service's own warning, kept here because a caller who does not read it
+    will publish a fall that never happened: **check `undated_reviews` first.**
+    Ratings without an on-chain date are absent from the series but present in
+    the profile, so with a high `undated_reviews` the last point can legitimately
+    sit below `final_score`, and a diff over the series is not a real change.
+    `series_is_decidable` answers exactly that question, so no caller has to
+    remember the rule.
+    """
+
+    wallet: str
+    bucket: str
+    points: Tuple[HistoryPoint, ...]
+    dated_reviews: Optional[int]
+    undated_reviews: Optional[int]
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def series_is_decidable(self) -> bool:
+        """Whether the series carries enough dated ratings to reason over.
+
+        False when every rating is undated (nothing real to plot) or when the
+        undated ones are a third or more of the total: past that, a move in the
+        series says more about ingestion than about the wallet.
+        """
+        dated = self.dated_reviews or 0
+        undated = self.undated_reviews or 0
+        total = dated + undated
+        if not total or not dated:
+            return False
+        return (undated / total) < (1 / 3)
+
+    @property
+    def latest(self) -> Optional[HistoryPoint]:
+        """The most recent bucket, or None on an empty series."""
+        return self.points[-1] if self.points else None
+
+    def change_over(self, buckets: int = 1) -> Optional["ScoreChange"]:
+        """Cumulative-score change over the last `buckets` buckets, WITH its grounds.
+
+        Returns a `ScoreChange`, not a float, and that is R2 applied to a
+        difference: a bare `-1.87` is as much a rumour as a bare score. Whoever
+        publishes "it dropped two points" has to be able to say over what span
+        and on how many dated ratings, and here they get all of it in one object.
+
+        `None` when the series cannot decide (see `series_is_decidable`) or when
+        there is not enough history — never a zero delta, which would read as "it
+        did not move" and is a different statement from "I cannot tell".
+        """
+        if buckets < 1 or not self.series_is_decidable or len(self.points) <= buckets:
+            return None
+        fin, ini = self.points[-1], self.points[-1 - buckets]
+        if fin.cumulative_score is None or ini.cumulative_score is None:
+            return None
+        return ScoreChange(
+            delta=fin.cumulative_score - ini.cumulative_score,
+            from_period=ini.period,
+            to_period=fin.period,
+            buckets=buckets,
+            dated_reviews=self.dated_reviews,
+            undated_reviews=self.undated_reviews,
+        )
+
+
+def parse_history(payload: Any, receipt: Optional[PaymentReceipt] = None) -> WalletHistory:
+    body = _require(payload, "wallet", "GET /reputation/wallet/{wallet}/history")
+    # Wrong-parser guard, same shape as `parse_breakdown`: the breakdown body also
+    # carries `wallet`, so without this a breakdown fed here would parse into an
+    # empty series and read as "this wallet has no history".
+    if "points" not in body:
+        raise DescribeUnparseable(
+            "this payload has no `points`: it is not the body of "
+            "GET /reputation/wallet/{wallet}/history. A breakdown parsed here "
+            "would look like a wallet with an empty series."
+        )
+    try:
+        coverage = body.get("coverage") or {}
+        return WalletHistory(
+            wallet=str(body["wallet"]),
+            bucket=str(body.get("bucket") or ""),
+            points=tuple(
+                HistoryPoint(
+                    period=str(p.get("period") or ""),
+                    score=_opt_float(p.get("score")),
+                    review_count=_opt_int(p.get("review_count")),
+                    cumulative_score=_opt_float(p.get("cumulative_score")),
+                )
+                for p in (body.get("points") or [])
+            ),
+            dated_reviews=_opt_int(coverage.get("dated_reviews")),
+            undated_reviews=_opt_int(coverage.get("undated_reviews")),
+            raw=dict(body),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DescribeUnparseable(
+            f"GET /reputation/wallet/{{wallet}}/history did not pass the typed parse: {exc}"
+        ) from exc
