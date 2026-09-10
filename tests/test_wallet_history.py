@@ -21,7 +21,6 @@ from uvd_describe_sdk import HistoryPoint, WalletHistory
 from uvd_describe_sdk.errors import DescribeUnparseable
 from uvd_describe_sdk.models import parse_history
 
-
 CUERPO = {
     "wallet": "0x76e9be89a3be6c1bf581a1f4519cb82dca9c57b3",
     "bucket": "week",
