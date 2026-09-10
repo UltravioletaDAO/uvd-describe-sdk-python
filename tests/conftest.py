@@ -235,6 +235,29 @@ BREAKDOWN: Dict[str, Any] = {
         "first_rating_at": "2026-07-01T00:00:00Z",
         "last_rating_at": "2026-08-30T00:00:00Z",
     },
+    # `freshness` entra con describe.net 2026-09-10 (DE-001). Las dos fechas
+    # DIFIEREN a proposito en este fixture: el ultimo NewFeedback real es de
+    # septiembre y el ultimo que sostiene el score es de agosto, o sea que a
+    # esta wallet la describieron hace poco y el numero no lo refleja. Si
+    # fueran iguales, un parser que leyera el campo equivocado pasaria igual.
+    "freshness": {
+        "scope": {
+            "kind": "wallet",
+            "direction": "received",
+            "id": "0x97cd97cfe21799bacbf39d0a53469e5f82f30996",
+        },
+        "last_received_feedback_at": "2026-09-05T00:00:00Z",
+        "last_eligible_rating_at": "2026-08-30T00:00:00Z",
+        "dated_feedback_count": 7548,
+        "undated_feedback_count": 12,
+        "timestamp_coverage": "partial",
+        "eligible_dated_count": 7548,
+        "eligible_undated_count": 0,
+        "eligible_timestamp_coverage": "complete",
+        "refreshed_at": "2026-09-10T16:00:00Z",
+        "indexer_checked_at": "2026-09-10T16:48:00Z",
+        "freshness_version": "freshness@1",
+    },
     "caveats": [{"code": "campaign-per-rater", "text": "…"}],
     "policy_version": "equal-weight-per-chain@2",
     "snapshot": None,

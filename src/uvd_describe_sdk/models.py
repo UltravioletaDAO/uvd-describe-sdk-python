@@ -446,8 +446,109 @@ class SelfRated:
 
 @dataclass(frozen=True)
 class Activity:
+    """First and last rating by ON-CHAIN time.
+
+    `last_rating_at` is the last **eligible** rating -- the one that holds up the
+    score being shown. Since describe.net 2026-09-10 it is documented as a
+    compatibility alias of ``Freshness.last_eligible_rating_at`` and keeps that
+    exact meaning for the life of v1. Read `Breakdown.freshness` for the
+    question this pair never could answer: *was this subject described recently,
+    whether or not it counts?*
+    """
+
     first_rating_at: Optional[str] = None
     last_rating_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FreshnessScope:
+    """WHAT the dates are about. A date without a scope is a date that lies.
+
+    `direction` is the field that matters most: `received` is reputation the
+    subject GOT, `emitted` is the ratings a wallet WROTE
+    (`GET /reputation/rater/{wallet}`). Reading the second as the first turns a
+    busy rater into a much-described subject.
+    """
+
+    kind: Optional[str] = None
+    direction: Optional[str] = None
+    id: Optional[str] = None
+    network: Optional[str] = None
+    declared_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Freshness:
+    """WHEN this subject was last described. Two dates, because two questions.
+
+    * `last_received_feedback_at` -- the last real NewFeedback in scope, whether
+      or not it feeds the score.
+    * `last_eligible_rating_at` -- the last rating that holds up the number you
+      are shown.
+
+    When the most recent rating was revoked the two differ, and **that
+    difference is the information**: there was recent activity and the score does
+    not reflect it.
+
+    NEITHER is `refreshed_at`, which is when the index recomputed its own view
+    and says nothing about the subject.
+
+    R1 APPLIES HERE TOO: **null is never zero.** No date means we do not know,
+    and `timestamp_coverage == "none"` means there is nothing to date -- two
+    different facts, kept apart on purpose.
+
+    NO RELATIVE TEXT, deliberately. The API publishes UTC and nothing else, so
+    "3 days ago" is derived at the edge with the reader's clock. A serialised
+    relative string freezes in the first cache; see `describe.net`'s badge,
+    served with `max-age=3600`.
+    """
+
+    scope: FreshnessScope = field(default_factory=FreshnessScope)
+    last_received_feedback_at: Optional[str] = None
+    last_eligible_rating_at: Optional[str] = None
+    dated_feedback_count: int = 0
+    undated_feedback_count: int = 0
+    timestamp_coverage: Optional[str] = None
+    eligible_dated_count: int = 0
+    eligible_undated_count: int = 0
+    eligible_timestamp_coverage: Optional[str] = None
+    refreshed_at: Optional[str] = None
+    indexer_checked_at: Optional[str] = None
+    freshness_version: Optional[str] = None
+
+
+def _parse_freshness(value: Any) -> Optional[Freshness]:
+    """`None` when the block is absent, never an empty `Freshness`.
+
+    A server that does not publish it yet, and a server that publishes it with
+    everything null, are different facts -- and only the second one is telling
+    you it has no dates. Same rule as R1: a default that looks like data is how
+    a client stops being able to tell.
+    """
+    if not isinstance(value, dict):
+        return None
+    ambito = value.get("scope")
+    ambito = ambito if isinstance(ambito, dict) else {}
+    return Freshness(
+        scope=FreshnessScope(
+            kind=ambito.get("kind"),
+            direction=ambito.get("direction"),
+            id=ambito.get("id"),
+            network=ambito.get("network"),
+            declared_type=ambito.get("declared_type"),
+        ),
+        last_received_feedback_at=value.get("last_received_feedback_at"),
+        last_eligible_rating_at=value.get("last_eligible_rating_at"),
+        dated_feedback_count=_int0(value.get("dated_feedback_count")),
+        undated_feedback_count=_int0(value.get("undated_feedback_count")),
+        timestamp_coverage=value.get("timestamp_coverage"),
+        eligible_dated_count=_int0(value.get("eligible_dated_count")),
+        eligible_undated_count=_int0(value.get("eligible_undated_count")),
+        eligible_timestamp_coverage=value.get("eligible_timestamp_coverage"),
+        refreshed_at=value.get("refreshed_at"),
+        indexer_checked_at=value.get("indexer_checked_at"),
+        freshness_version=value.get("freshness_version"),
+    )
 
 
 @dataclass(frozen=True)
@@ -730,6 +831,10 @@ class Breakdown:
     concentration: Optional[Concentration] = None
     confidence: Optional[Confidence] = None
     activity: Activity = field(default_factory=Activity)
+    # WHEN, with its scope. Additive: `activity` above keeps its exact
+    # meaning. `None` when the server does not publish the block yet --
+    # never an empty `Freshness`, see `_parse_freshness`.
+    freshness: Optional[Freshness] = None
     caveats: List[Caveat] = field(default_factory=list)
     policy_version: Optional[str] = None
     snapshot: Optional[Snapshot] = None
@@ -782,6 +887,7 @@ def parse_breakdown(payload: Any, receipt: Optional[PaymentReceipt] = None) -> B
                 first_rating_at=activity_raw.get("first_rating_at"),
                 last_rating_at=activity_raw.get("last_rating_at"),
             ),
+            freshness=_parse_freshness(body.get("freshness")),
             caveats=parse_caveats(body.get("caveats")),
             policy_version=body.get("policy_version"),
             snapshot=(

@@ -90,6 +90,8 @@ from .errors import (
 from .hashes import SETTLEMENT_PENDING, looks_like_onchain_id, looks_like_settlement_receipt
 from .models import (
     Activity,
+    Freshness,
+    FreshnessScope,
     AgentReputation,
     Breakdown,
     HistoryPoint,
@@ -181,6 +183,8 @@ __all__ = [
     "Concentration",
     "SelfRated",
     "Activity",
+    "Freshness",
+    "FreshnessScope",
     "Snapshot",
     "ChainScore",
     "Facet",
