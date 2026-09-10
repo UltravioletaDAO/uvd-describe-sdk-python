@@ -1318,7 +1318,7 @@ class WalletHistory:
         """The most recent bucket, or None on an empty series."""
         return self.points[-1] if self.points else None
 
-    def change_over(self, buckets: int = 1) -> Optional["ScoreChange"]:
+    def change_over(self, buckets: int = 1) -> Optional[ScoreChange]:
         """Cumulative-score change over the last `buckets` buckets, WITH its grounds.
 
         Returns a `ScoreChange`, not a float, and that is R2 applied to a

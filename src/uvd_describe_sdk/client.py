@@ -241,16 +241,16 @@ from .hashes import (
 from .models import (
     AgentReputation,
     Breakdown,
-    WalletHistory,
     IndexHealth,
     LeaderboardRow,
     PaymentReceipt,
+    WalletHistory,
     WalletReputation,
     malformed_hash_report,
     parse_agent_reputation,
     parse_breakdown,
-    parse_history,
     parse_health,
+    parse_history,
     parse_leaderboard,
     parse_wallet_reputation,
 )
