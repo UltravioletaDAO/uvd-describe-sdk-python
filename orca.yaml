@@ -1,0 +1,51 @@
+# Generado por c0der (PM del stack Ultravioleta DAO): deja un worktree nuevo de
+# uvd-describe-sdk-python usable —venv propio, suite verde— sin tocar una tecla.
+
+scripts:
+  # Medido 2026-08-31 en un checkout limpio simulado: 11,0 s en frio (cache de uv
+  # tibia) y 2,6 s al re-correrlo; despues del setup la suite da 235 passed en
+  # 16,9 s sin red. Idempotente: `uv venv` no pisa un .venv existente y
+  # `uv pip install -e` solo reconstruye el editable. No interactivo. `uv` se
+  # invoca como token unico del PATH, asi que corre igual en cmd, pwsh y bash
+  # (`.venv/Scripts/python` NO: cmd lo rechaza, medido).
+  setup: 'uv venv && uv pip install -e ".[dev]"'
+  # Cada worktree carga su propio .venv de ~146 MB (ver el porque abajo). Al
+  # archivar se devuelve el disco. Acotado por pathspec a proposito: `git clean`
+  # sin rutas se llevaria tambien un archivo nuevo sin commitear.
+  archive: 'git clean -xdf -- .venv .mypy_cache .ruff_cache .pytest_cache dist src/uvd_describe_sdk.egg-info'
+
+# `wait-for-setup` y no `start-immediately`, contra el default sano, por una
+# medicion: C:\Python311\Lib\site-packages\__editable__.uvd_describe_sdk-0.1.0.pth
+# apunta a Z:\ultravioleta\dao\uvd-describe-sdk-python\src, o sea al repo
+# PRINCIPAL. En un worktree sin .venv, `python -c "import uvd_describe_sdk"`
+# importa el codigo de main y responde en VERDE. El modo de falla no es un error
+# ruidoso sino una verificacion contra el arbol equivocado — justo lo que la
+# seccion «Verificacion discriminante» del CLAUDE.md existe para impedir.
+# El precio de esperar son 11 s.
+setupAgentStartupPolicy: wait-for-setup
+
+defaultTabs:
+  # El bucle central del repo: la suite entera corre sin red (el unico seam es
+  # `transport=` con httpx.MockTransport, tests/conftest.py).
+  - title: Tests (sin red)
+    color: "#a855f7"
+    command: 'uv run --no-sync python -m pytest'
+  # Los dos jobs del `lint` de .github/workflows/ci.yml, en el mismo orden.
+  - title: Lint + tipos
+    color: "#737373"
+    command: 'uv run --no-sync python -m ruff check src tests && uv run --no-sync python -m mypy src/uvd_describe_sdk'
+  # Lo unico que la suite mockeada no puede probar: que api.describe.net manda
+  # lo que el SDK cree. Solo rutas GRATIS — no gasta USDC y no pide secretos.
+  - title: Smoke API viva (gratis)
+    color: "#3b82f6"
+    command: 'uv run --no-sync python examples/smoke_gratis.py'
+
+# SIN `worktree.sharedDirectories`, y es la decision de fondo:
+# .venv NO se puede compartir. Su
+# .venv/Lib/site-packages/__editable__.uvd_describe_sdk-0.1.0.pth contiene la
+# ruta ABSOLUTA del repo fuente; symlinkeado, cada worktree importaria el src de
+# main en vez del suyo, y un `pip install -e` adentro del worktree reescribiria
+# ese .pth rompiendo main y a los hermanos. Reinstalar cuesta 11 s: el trade no
+# esta ni cerca. dist/, .mypy_cache/, .ruff_cache/ y .pytest_cache/ son
+# artefactos que dependen de la rama; compartirlos cruza resultados. El cache
+# que SI se comparte ya lo hace uv por su cuenta, y vive fuera del repo.
