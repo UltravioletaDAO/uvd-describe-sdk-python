@@ -144,14 +144,22 @@ def test_no_existe_un_atajo_que_devuelva_solo_el_score() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_las_ocho_estan_y_son_ocho() -> None:
+def test_las_nueve_estan_y_son_nueve() -> None:
     """docs.describe.net: «The eight codes are the whole set, and it is frozen
     by a test — adding or renaming one is deliberately red.»
 
     Este es el espejo de aquel test, del lado del cliente. Si el servicio agrega
     una novena, esto se pone rojo y hay que venir a leer qué corte nombra.
+
+    ⚠️ CORRECCIÓN 2026-09-15: se puso rojo y se vino a leer, como estaba escrito.
+    Entra `facilitator-authored` (scope agente: lee `ratings[].author_class`) y
+    el test pasa a llamarse «las nueve». La fecha del espejo NO se mueve, porque
+    el servicio sirve DIEZ: `thin-chain` (desde 2026-09-05) queda afuera en los
+    dos gemelos hasta decidirlo juntos — reportado en
+    `docs/handoffs/2026-09-15-dn-sdk-caveats-py.md`. Una fecha nueva certificaría
+    un espejo completo que no lo es.
     """
-    assert len(KNOWN_CAVEAT_CODES) == 8
+    assert len(KNOWN_CAVEAT_CODES) == 9
     assert KNOWN_CAVEAT_CODES == {
         "no-score",
         "concentration-degraded",
@@ -161,6 +169,7 @@ def test_las_ocho_estan_y_son_ocho() -> None:
         "campaign-per-rater",
         "self-rated",
         "burn-address",
+        "facilitator-authored",
     }
     assert CAVEAT_CODES_MEASURED_AT == "2026-08-30"
 

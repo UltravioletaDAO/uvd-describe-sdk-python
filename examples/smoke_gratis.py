@@ -95,13 +95,23 @@ def main() -> int:
             print(f"                  policy={rep.policy_version} source={rep.source}")
             print(f"                  refreshed_at={rep.refreshed_at}")
             print(f"                  caveats={rep.caveat_codes}")
+            print(f"                  caveats_not_computed={rep.caveats_not_computed}")
+            # Desde 0.6.0 (describe.net 2026-09-14) la puerta gratis DECLARA lo
+            # que no calcula. `None` acá es una de dos cosas que el gate
+            # `require_full_caveats()` no distingue y un humano sí tiene que ver:
+            # la API dejó de declarar, o el SDK dejó de leerlo.
+            if rep.caveats_not_computed is None:
+                fallas.append(
+                    "wallet(): caveats_not_computed is None — the API stopped "
+                    "declaring it, or the SDK stopped reading it"
+                )
             # R2: el sello de composición tiene que venir SIEMPRE.
             for campo in ("policy_version", "source", "refreshed_at"):
                 if getattr(rep, campo) is None:
                     fallas.append(f"wallet(): missing {campo} — R2")
             # Campos que la API sirve y el SDK podría estar tirando.
             desconocidos = set(rep.raw) - {
-                "wallet", "chains", "caveats", "identity_count",
+                "wallet", "chains", "caveats", "caveats_not_computed", "identity_count",
                 "chains_with_identity", "chains_with_reputation", "total_reviews",
                 "distinct_raters", "global_score", "policy_version", "source",
                 "refreshed_at",

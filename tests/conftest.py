@@ -15,6 +15,7 @@ de referencia de Execution Market.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -262,6 +263,40 @@ BREAKDOWN: Dict[str, Any] = {
     "policy_version": "equal-weight-per-chain@2",
     "snapshot": None,
 }
+
+
+# ---------------------------------------------------------------------------
+# Capturas de api.describe.net — 2026-09-15, como ARCHIVO y no como literal
+# ---------------------------------------------------------------------------
+# Las de arriba se transcribieron a mano y se recortaron. Éstas se bajaron con
+# `curl -o` (rutas gratis, sin credenciales) a `tests/fixtures/` y se leen tal
+# cual llegaron: el campo nuevo es justo del tipo que un recorte a mano olvida, y
+# el test que lo cuida tiene que mirar lo que el servicio mandó.
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _captura(nombre: str) -> Dict[str, Any]:
+    with open(FIXTURES / nombre, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+#: `GET /wallets/0x715dc035…4e6d/chains` → 200, 1.760 bytes, 2026-09-15T04:01:35Z,
+#: `/health.build_sha` a29d5ef. Es la wallet del curl de verificación del handoff
+#: de describe-net `2026-09-14-dn-reputacion-chicas.md`. Declara SIETE codes no
+#: calculados y no dispara ningún caveat: el silencio que el campo desmiente.
+WALLET_CHAINS_VIVA = _captura("wallet_chains_0x715dc035_2026-09-15.json")
+
+#: `GET /wallets/0x…beef/chains` → 200, 990 bytes, 2026-09-15T04:01:36Z. Una
+#: wallet que el índice NO conoce — y declara los mismos siete.
+WALLET_DESCONOCIDA_VIVA = _captura("wallet_chains_0xbeef_2026-09-15.json")
+
+#: `components.schemas` de `GET /openapi.json` con `WalletChains` y `Rating`
+#: copiados enteros; la hora y la versión de la captura van en `_captured`,
+#: dentro del mismo archivo.
+OPENAPI_ESQUEMAS: Dict[str, Any] = _captura(
+    "openapi_2026-09-15_WalletChains_Rating.json"
+)["components"]["schemas"]
 
 
 # ---------------------------------------------------------------------------

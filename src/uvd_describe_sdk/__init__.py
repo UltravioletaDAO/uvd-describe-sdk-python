@@ -28,8 +28,13 @@ THE THREE THINGS TO KNOW BEFORE USING IT
    throw the context away. (`models.py` §R2)
 
 3. **You branch on `caveats[].code`, never on `caveats[].text`.** The text may be
-   rewritten without notice; the code never changes. All eight are exported in
+   rewritten without notice; the code never changes. All nine are exported in
    `CaveatCode` so you do not type them. (`caveats.py` §R3)
+
+   And a gate that needs the evidence-quality cuts calls
+   `require_full_caveats(rep)`: the free door DECLARES what it did not compute
+   (`rep.caveats_not_computed`), and `None` there — an API that declared nothing —
+   is not `[]`. (`caveats.py` §require_full_caveats)
 
 ════════════════════════════════════════════════════════════════════════════
 WHAT THIS SDK DOES NOT DO
@@ -60,9 +65,15 @@ from .badge import badge_img_tag, badge_url
 from .caveats import (
     CAVEAT_CODES_MEASURED_AT,
     FREE_GATE_CAVEAT_CODES,
+    KNOWN_AUTHOR_CLASSES,
     KNOWN_CAVEAT_CODES,
+    AuthorClass,
     CaveatCode,
+    CaveatsNotComputedError,
+    KnownAuthorClass,
     is_known,
+    is_known_author_class,
+    require_full_caveats,
 )
 from .client import (
     DEFAULT_BASE_URL,
@@ -153,6 +164,16 @@ __all__ = [
     "FREE_GATE_CAVEAT_CODES",
     "CAVEAT_CODES_MEASURED_AT",
     "is_known",
+    # What the free door declares it did not compute, and the gate that reads it
+    # (2026-09-15). The error is NOT under "errors (R4)" on purpose: it is not a
+    # `DescribeError` — see its docstring.
+    "require_full_caveats",
+    "CaveatsNotComputedError",
+    # `ratings[].author_class` — same open-set contract as the caveat codes
+    "AuthorClass",
+    "KnownAuthorClass",
+    "KNOWN_AUTHOR_CLASSES",
+    "is_known_author_class",
     # errors (R4)
     "DescribeError",
     "DescribeTimeout",
