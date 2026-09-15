@@ -56,7 +56,7 @@ it went red naming it, and it was removed.
 
 ### 3. Branch on `caveats[].code`, never on `caveats[].text`
 
-The service's schema declares it: *"Codes are permanent; text is not."* All eight
+The service's schema declares it: *"Codes are permanent; text is not."* All nine
 are exported so you do not type them:
 
 ```python
@@ -68,8 +68,52 @@ if CaveatCode.BURN_ADDRESS in rep.caveat_codes:
 
 `Caveat.code` is a `str`, **not an `Enum`**. A closed enum would mean a new code
 from the service breaks or disappears — and discarding a caveat is discarding the
-warning. `is_known(code)` says whether it is one of the eight known ones; an
+warning. `is_known(code)` says whether it is one of the nine known ones; an
 unknown one still arrives whole and has to be shown.
+
+#### A gate on the free door: `require_full_caveats()`
+
+An empty `caveats` on `wallet()` was never a clean bill: the free door only
+evaluates the cuts computable from public data. Since describe.net 2026-09-14 each
+free answer **declares** which codes it left out, and the SDK types it:
+
+```python
+from uvd_describe_sdk import CaveatsNotComputedError, require_full_caveats
+
+rep = describe.wallet(address)
+if rep is None:
+    ...                              # no answer at all (R5): decide that first
+try:
+    require_full_caveats(rep)        # passes only if the answer declared []
+except CaveatsNotComputedError as exc:
+    exc.not_computed   # ['campaign-per-rater', …] → unverified, not passed
+                       # None → the answer declared NOTHING
+```
+
+| `rep.caveats_not_computed` | means | `require_full_caveats(rep)` |
+|---|---|---|
+| `['few-raters', …]` | declared: these cuts were not evaluated | raises, `not_computed` = the list |
+| `[]` | declared: nothing was left out | returns `rep`, the same object |
+| `None` | **not declared**: an API older than 2026-09-14, a `fallback_reader` result, or an unreadable value | raises, `not_computed is None` |
+
+🔴 **`None` is not `[]`, and the gate refuses it**: an answer that said nothing
+about what it skipped is the old silent-green gate, not a pass. Measured
+2026-09-15, the live free door declares seven codes for every wallet — so today
+this raises on every `wallet()`, and the route that evaluates those cuts is
+`wallet_breakdown()`. `CaveatsNotComputedError` is **not** a `DescribeError`, on
+purpose: an `except DescribeError` written to tolerate outages must not swallow a
+gate refusal.
+
+#### Who signed a rating: `Rating.author_class`
+
+Each row of `agent()` carries `author_class`: `AuthorClass.FACILITATOR_AUTHORED`
+(`client` is the relayer that wrote the rating, **not** the rater — and every such
+row shares that one `client`) or `AuthorClass.RATER_AUTHORED` (not a relayer the
+index knows; it does not prove who signed). It is a `str`, not a closed type: a
+newer class arrives whole and `is_known_author_class()` answers `False` for it.
+`None` means the row carries no class — never read it as `rater-authored`. The
+agent-scope caveat `CaveatCode.FACILITATOR_AUTHORED` is the advisory half of the
+same fact.
 
 ---
 

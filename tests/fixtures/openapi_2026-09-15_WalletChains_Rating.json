@@ -1,0 +1,366 @@
+{
+  "_captured": "GET https://api.describe.net/openapi.json at 2026-09-15T04:03:30Z (no credentials), info.version 2.0.0; components.schemas.WalletChains and components.schemas.Rating copied whole, untouched",
+  "components": {
+    "schemas": {
+      "WalletChains": {
+        "properties": {
+          "wallet": {
+            "type": "string",
+            "title": "Wallet",
+            "description": "The wallet asked about, normalised. EVM addresses come back lowercased; Solana keeps its base58 case."
+          },
+          "chains": {
+            "items": {
+              "$ref": "#/components/schemas/WalletChain"
+            },
+            "type": "array",
+            "title": "Chains",
+            "description": "One row per chain where this wallet exists, whether or not it has reputation there. An empty list means «not registered anywhere we index» — which is an answer, not an error."
+          },
+          "caveats": {
+            "items": {
+              "$ref": "#/components/schemas/Caveat"
+            },
+            "type": "array",
+            "title": "Caveats",
+            "description": "SUBSET of the caveats: only those computable from public data without touching the grain (today: `burn-address`, for well-known burn addresses -- nobody controls them, nobody can answer for their reputation -- and, since 2026-09-05, `thin-chain`: a chain with fewer than `reading_policy.min_raters` distinct raters on a multi-chain wallet, computable because every row here carries `distinct_raters` and `weight`). The rest of the evidence-quality set (concentration, single rater, campaign...) travels ONLY in the paid decomposition `GET /reputation/wallet/{wallet}`. An empty list here means 'no public-data caveat', NOT 'no caveats at all'."
+          },
+          "caveats_not_computed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Caveats Not Computed",
+            "description": "The caveat `code`s that the paid decomposition `GET /reputation/wallet/{wallet}` evaluates and THIS free answer did not — sorted, and derived from the same module that serves `caveats`. Names only, never their outcome: whether any of them fires for this wallet is exactly what stays paid. A quality gate built on this route must treat every code listed here as unverified, not as passed."
+          },
+          "identity_count": {
+            "type": "integer",
+            "title": "Identity Count",
+            "description": "Total ERC-8004 identities this wallet owns across every chain we read."
+          },
+          "chains_with_identity": {
+            "type": "integer",
+            "title": "Chains With Identity",
+            "description": "On how many chains it holds at least one identity."
+          },
+          "chains_with_reputation": {
+            "type": "integer",
+            "title": "Chains With Reputation",
+            "description": "On how many of those it actually has ratings. The gap against `chains_with_identity` is registered-but-unrated, which is a different fact from unregistered."
+          },
+          "total_reviews": {
+            "type": "integer",
+            "title": "Total Reviews",
+            "description": "Ratings across every chain. Volume, not agreement."
+          },
+          "distinct_raters": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distinct Raters",
+            "description": "Distinct raters across the WHOLE wallet, deduplicated between chains. **Do not sum `chains[].distinct_raters`** — the same rater can rate on several chains and the sum double-counts them (measured: a wallet whose per-chain counts add to 10 has 9 real raters). `null` means the wallet is not in the ranking, which is not the same as zero raters."
+          },
+          "global_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Score"
+          },
+          "policy_version": {
+            "type": "string",
+            "title": "Policy Version"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "refreshed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refreshed At"
+          },
+          "freshness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Freshness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "wallet",
+          "chains",
+          "caveats",
+          "caveats_not_computed",
+          "identity_count",
+          "chains_with_identity",
+          "chains_with_reputation",
+          "total_reviews",
+          "global_score",
+          "policy_version",
+          "source",
+          "refreshed_at"
+        ],
+        "title": "WalletChains",
+        "description": "El mapa gratis de una wallet: identidades y reputación por cadena.\n\nEl `example` del esquema es la respuesta REAL del dominio para la wallet\ndel ejemplo de la ruta, leída el 2026-08-21 — su `refreshed_at` la fecha\nsolo. La respuesta viva es la de la propia ruta, que es gratis.",
+        "examples": [
+          {
+            "caveats": [],
+            "chains": [
+              {
+                "agent_count": 3,
+                "agent_ids": [
+                  "2284",
+                  "2290",
+                  "29368"
+                ],
+                "distinct_raters": 467,
+                "final_score": 98.270763,
+                "network": "base",
+                "total_reviews": 642
+              }
+            ],
+            "chains_with_identity": 1,
+            "chains_with_reputation": 1,
+            "global_score": 98.270763,
+            "identity_count": 3,
+            "policy_version": "credibility-weight-per-chain@1",
+            "refreshed_at": "2026-08-21T04:00:28Z",
+            "source": "chain_rankings_mv",
+            "total_reviews": 642,
+            "wallet": "0x715dc035ffb97dd7bb4095c6670138ba05bb4e6d"
+          }
+        ]
+      },
+      "Rating": {
+        "properties": {
+          "client": {
+            "type": "string",
+            "title": "Client",
+            "description": "Who wrote this rating: the rater's address. This is the field the whole product is about — a score without its raters is a rumor."
+          },
+          "author_class": {
+            "type": "string",
+            "enum": [
+              "facilitator-authored",
+              "rater-authored"
+            ],
+            "title": "Author Class",
+            "description": "Who signed this row, as a class. `facilitator-authored`: `client` is a known relayer (today the x402 facilitator's EVM wallet) that wrote the rating on behalf of the real rater, so `client` is NOT the counterparty — every such row shares one `client`, and any per-rater count merges them into one. `rater-authored`: `client` is not a relayer this index knows about; it does not prove who signed. Per rating only: no score or aggregate is computed by author class."
+          },
+          "feedback_index": {
+            "type": "integer",
+            "title": "Feedback Index",
+            "description": "The rater's own counter for this subject, part of the natural key `(network, agent_id, client, feedback_index)`. It is what makes re-indexing idempotent."
+          },
+          "value": {
+            "type": "integer",
+            "title": "Value",
+            "description": "The raw on-chain integer, untouched. Read it together with `value_decimals`; use `normalized_value` for anything comparable."
+          },
+          "value_decimals": {
+            "type": "integer",
+            "title": "Value Decimals",
+            "description": "Decimal places the emitter declared for `value`."
+          },
+          "normalized_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized Value",
+            "description": "`value` brought to the 0-100 domain — the only figure comparable across emitters. Null when the row is out of domain, which is also why it was excluded from the score."
+          },
+          "tag1": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag1",
+            "description": "The rater's first tag: the AREA being judged (`trust`, `liveness`, `contractRisk`, `activity`, …) and, when the emitter declares it, the direction prefix. This is what `facets` are keyed by. Free vocabulary — the index carries hundreds of distinct values, so read it, never split it on `:` and hope."
+          },
+          "tag2": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag2",
+            "description": "The rater's second tag, if any."
+          },
+          "is_revoked": {
+            "type": "boolean",
+            "title": "Is Revoked",
+            "description": "The rater took this rating back. Excluded from every score, returned anyway — with `revoked_tx` — because a revocation nobody can audit is not a revocation."
+          },
+          "is_self": {
+            "type": "boolean",
+            "title": "Is Self",
+            "description": "The rater IS the rated agent's current owner. Attribution, not eligibility: it travels on every row — revoked and out-of-domain included — so the breakdown says where each point came from without the caller recomputing the comparison. Self-ratings are out of every score and summarised in `self_rated`."
+          },
+          "tx_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tx Hash",
+            "description": "The transaction that wrote this rating — go verify it in an explorer, which is the point. **Null until the log scan reaches this entry**, not null forever."
+          },
+          "block_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Number",
+            "description": "Block the rating landed in. Null until the log scan dates it."
+          },
+          "log_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Index",
+            "description": "Position within the block. Null until the log scan dates it."
+          },
+          "feedback_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback Uri",
+            "description": "The `feedbackURI` the standard carries — where the rater published the rating. The three `issuer*` fields below are read from it."
+          },
+          "issuer_host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issuer Host",
+            "description": "Host of `feedback_uri`, lowercased and without `www.` — where this rating was published. Null when the rating carries no http(s) URI. Present for ~82% of the index."
+          },
+          "issuer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issuer",
+            "description": "Canonical name of the issuing product when the host is a known Ultravioleta DAO service (e.g. `execution-market`), else null. Null does NOT mean unknown issuer — read `issuer_host` for that."
+          },
+          "issuer_org": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issuer Org",
+            "description": "`uvd` when this rating was written by an Ultravioleta DAO product, else null. One stable label, independent of how many products there are or what each is called."
+          },
+          "feedback_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback Hash",
+            "description": "Content hash the rater committed to, when it declared one."
+          },
+          "revoked_tx": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked Tx",
+            "description": "The transaction that killed this rating. Without it a revocation is unauditable — which is why it travels instead of the row simply disappearing."
+          }
+        },
+        "type": "object",
+        "required": [
+          "client",
+          "author_class",
+          "feedback_index",
+          "value",
+          "value_decimals",
+          "normalized_value",
+          "tag1",
+          "tag2",
+          "is_revoked",
+          "is_self",
+          "tx_hash",
+          "block_number",
+          "log_index",
+          "feedback_uri",
+          "feedback_hash",
+          "revoked_tx"
+        ],
+        "title": "Rating",
+        "description": "One individual rating, exactly as it was written on chain.\n\nThis is the grain of the whole index — every score in this API is an\naggregate over rows of this shape, and the paid agent route returns them\none by one, revoked ones included, each with the transaction that proves\nit. A revocation nobody can audit is not a revocation."
+      }
+    }
+  }
+}

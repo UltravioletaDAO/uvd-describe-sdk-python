@@ -228,6 +228,11 @@ class WalletReputation:
     ⚠️ `caveats` here is a **SUBSET** of the metered route's — today only
     `burn-address`. An empty list at this door **does not promise** that the
     metered breakdown is clean (`caveats.FREE_GATE_CAVEAT_CODES`).
+
+    Since 2026-09-14 the door SAYS which cuts it left out, per response:
+    `caveats_not_computed`. It is the machine-readable half of the warning above,
+    and `caveats.require_full_caveats()` is the gate that reads it. 🔴 Its `None`
+    is not its `[]` — see the field.
     """
 
     wallet: str
@@ -246,6 +251,19 @@ class WalletReputation:
     #: now".
     refreshed_at: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
+    #: The caveat codes THIS free answer declares it did NOT evaluate (served
+    #: since 2026-09-14; the metered breakdown evaluates them). Three states, and
+    #: the type keeps them apart — R1 one level down:
+    #:
+    #:   `[...]` → declared: these cuts are UNVERIFIED for this wallet, not passed.
+    #:   `[]`    → declared: nothing was left out.
+    #:   `None`  → NOT declared: an API older than 2026-09-14, a `fallback_reader`
+    #:             result, or a value that could not be read whole. Never `[]`.
+    #:
+    #: Last in the class, after `raw`, on purpose: a field inserted in the middle
+    #: would shift the positional arguments of every `WalletReputation(...)` a
+    #: consumer's `fallback_reader` already builds.
+    caveats_not_computed: Optional[List[str]] = None
 
     @property
     def has_identity(self) -> bool:
@@ -342,6 +360,31 @@ class WalletReputation:
         return max(c.distinct_raters for c in self.chains)
 
 
+def _parse_not_computed(value: Any) -> Optional[List[str]]:
+    """`caveats_not_computed` → a list of codes, or `None` when nothing was declared.
+
+    🔴 **A declaration that cannot be read WHOLE is not a declaration**, so every
+    shape that is not a list of non-empty strings comes back `None` — never a
+    filtered list. The asymmetry with `parse_caveats`, which drops a malformed
+    entry and keeps the rest, is deliberate: there a dropped entry loses one
+    warning; here a dropped entry can turn `[null]` into `[]`, and `[]` is the one
+    value that makes `require_full_caveats()` PASS. Failing closed means reading
+    garbage as "undeclared", which the gate refuses.
+
+    It does not raise either: the field is advisory about a read that otherwise
+    arrived fine, and on this free route an exception would become the fail-open's
+    `None` — losing the whole reputation over its footnote.
+    """
+    if not isinstance(value, list):
+        return None
+    codes: List[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            return None
+        codes.append(item)
+    return codes
+
+
 def parse_wallet_reputation(payload: Any) -> WalletReputation:
     body = _require(payload, "wallet", "GET /wallets/{wallet}/chains")
     # 🔴 Wrong-parser guard, mirrored from the TypeScript twin (spirit measured
@@ -385,6 +428,7 @@ def parse_wallet_reputation(payload: Any) -> WalletReputation:
             source=body.get("source"),
             refreshed_at=body.get("refreshed_at"),
             raw=dict(body),
+            caveats_not_computed=_parse_not_computed(body.get("caveats_not_computed")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise DescribeUnparseable(
@@ -638,6 +682,11 @@ class Rating:
     shaped like an on-chain identifier is left `None` and its name enters
     `malformed_hashes`. Absent and malformed are NOT the same thing — see
     `_hash_field` and `hashes.py`.
+
+    `author_class` (served since 2026-09-14) says whether `client` is the rater or
+    a relayer that wrote on its behalf. Branch on it with `caveats.AuthorClass`
+    before reading `client` as "who rated" — a facilitator-authored row's `client`
+    is the facilitator, for every such row.
     """
 
     client: str
@@ -667,6 +716,18 @@ class Rating:
     #: Empty in the normal case. 🔴 Branch on this, not on `tx_hash is None`.
     malformed_hashes: Tuple[str, ...] = ()
     raw: Dict[str, Any] = field(default_factory=dict)
+    #: Who SIGNED this row, as a class: `facilitator-authored` or `rater-authored`
+    #: (`caveats.AuthorClass`). Typed `str` and not the closed `KnownAuthorClass`:
+    #: a class newer than this SDK arrives WHOLE — `is_known_author_class()` tells
+    #: it apart — instead of breaking the read or vanishing.
+    #:
+    #: 🔴 `None` is "the answer carried no class" (served before 2026-09-14), and
+    #: it is NOT `rater-authored`: defaulting to it would certify as the rater's
+    #: own signature a row nobody classified.
+    #:
+    #: Last in the class, after `raw`, for the same positional-compatibility
+    #: reason as `WalletReputation.caveats_not_computed`.
+    author_class: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -975,7 +1036,21 @@ def _parse_rating(row: Dict[str, Any]) -> Rating:
         revoked_tx=_hash_field(row, "revoked_tx", malos),
         malformed_hashes=tuple(malos),
         raw=dict(row),
+        author_class=_author_class(row.get("author_class")),
     )
+
+
+def _author_class(value: Any) -> Optional[str]:
+    """`ratings[].author_class`: kept WHOLE when it is text, `None` otherwise.
+
+    No allowlist here, on purpose: a class this SDK does not know is still the
+    service's statement about who signed, and dropping it would publish "no
+    class" where the index said something. Only a non-string or an empty string
+    is `None` — there is nothing to keep.
+    """
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def parse_agent_reputation(

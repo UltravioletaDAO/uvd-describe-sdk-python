@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 229 pasan, 16,9 s, SIN RED (re-medido 2026-08-31 tras la rama `pending` del camino post-pago; eran 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 312 pasan, 15,4 s, SIN RED (re-medido 2026-09-15, py3.12, tras el guard de lista de `require_full_caveats()`; eran 306 ese día tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -114,6 +114,38 @@ Lo que hay que saber antes de tocarlo (el porqué completo, en `errors.py`):
 5. ⚠️ **La premisa del aporte era falsa acá y se dejó escrita**: llegó como «ya
    tienen `transient` y `serviceFault`». `grep -rEni "transient|servicefault"
    src/` = **0**. El hueco se reportó, no se rellenó.
+
+### `caveats_not_computed` y `require_full_caveats()` — la undécima superficie, y TAMPOCO es una regla
+
+`caveats.py` + `models.py`. Fila upstream-first `describe-net/docs/BACKLOG.md:19`,
+2026-09-15: el servicio sirve desde el 2026-09-14 la lista de codes que la puerta
+gratis NO evaluó, y `author_class` en cada `Rating`; este SDK los tipa ANTES de
+que EM, KK, mesh y karma-hello los adopten. Agrega campos y un gate, no toca
+ninguna de las ocho. **R5 intacta** (el gate lo llama el consumidor, no el
+cliente).
+
+Lo que hay que saber antes de tocarlo (el porqué completo, en `caveats.py`):
+
+1. 🔴 **`None` no es `[]`, y el gate levanta con los dos que no son `[]`.**
+   `None` = la respuesta no declaró (API anterior al 2026-09-14, `fallback_reader`
+   o un valor ilegible). Dejarlo pasar es la fila del 2026-08-31
+   (`BACKLOG.md:221`) de vuelta: el gate que pasa en verde sin saber qué no se
+   calculó. Mutaciones O y P.
+2. **Una declaración ilegible es `None`, nunca una lista filtrada**: `[null]`
+   filtrado da `[]`, y `[]` es el único valor que hace PASAR al gate. Es la
+   asimetría a propósito con `parse_caveats`. Mutación T.
+3. 🔴 **`CaveatsNotComputedError` NO es un `DescribeError`.** El `except
+   DescribeError` que un consumidor escribió para tolerar caídas lo volvería
+   «describe no contestó», y un gate tolerante deja pasar. Mutación Q.
+4. **`author_class` es `str`, no el `Literal`**: una clase nueva llega entera
+   (mutación S), y la ausencia es `None`, **nunca `rater-authored`** (mutación
+   R). Los dos campos nuevos van ÚLTIMOS en su dataclass, después de `raw`, para
+   no correr ningún argumento posicional.
+5. ⚠️ **Son NUEVE codes acá y el servicio sirve DIEZ.** `thin-chain` (desde
+   2026-09-05) falta en los dos gemelos. No se agregó de un solo lado para no
+   romper la paridad: queda como seguimiento de los dos SDK (anotado en
+   `CHANGELOG.md`, 0.6.0), y por eso `CAVEAT_CODES_MEASURED_AT` sigue en
+   `2026-08-30`.
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
@@ -237,6 +269,15 @@ docstrings:
 | **L.** sacarle a `PartnerRejectedError` su `recovery` (hereda la de `PaymentRequiredError`) | **6 rojos**, con el mensaje que nombra el bug: «hereda la de PaymentRequiredError» — publicaría «configurá `payer=`» ante un riel roto |
 | **M.** `exc.status_code == 404` → `== 4040` en el guard que saca al 404 antes del respaldo (`client.py:687`) | **2 rojos**: `test_un_404_NO_dispara_el_respaldo` y —el que prueba que no es redundante— `test_r4_sin_datos_no_es_error.py::test_404_no_lanza_ni_con_fail_open_apagado`. El 404 se cae a la vez del respaldo y de R4 |
 | **N.** sacar `replace(respaldo, source="fallback")` (`client.py:719`), o sea devolver el respaldo sin marcar | **1 rojo**: `test_el_respaldo_se_marca_y_no_se_hace_pasar_por_el_indice` |
+| **O.** 🔴 colapsar el `None` en `[]` al parsear (`body.get("caveats_not_computed") or []`) — 2026-09-15 | **6 rojos**: los 3 de `test_una_API_que_no_declara_da_None_y_NUNCA_lista_vacia` y los 3 de `test_el_gate_NO_pasa_con_una_API_que_no_declaro`. Los tests de la captura viva quedaron VERDES, porque la viva siempre trae la lista |
+| **P.** que `require_full_caveats()` deje pasar el `None` | **5 rojos**: los 3 del gate con API vieja, el de la declaración ilegible y `test_un_respaldo_no_declara_y_el_gate_no_lo_deja_pasar` |
+| **Q.** que `CaveatsNotComputedError` herede de `DescribeError` | **4 rojos**: `test_el_error_NO_es_un_DescribeError_y_el_fail_open_del_consumidor_no_lo_traga`, y 3 de `test_recovery.py`, que la recorre SOLA como subclase nueva (anclajes, filtración, constante) |
+| **R.** `author_class` ausente o basura → `"rater-authored"` | **5 rojos**: `test_una_fila_sin_la_clase_es_None_y_NO_rater_authored` + los 4 de basura |
+| **S.** `author_class` con set cerrado (lo desconocido se descarta) | **1 rojo**: `test_una_clase_desconocida_llega_entera_y_no_tumba_la_lectura` |
+| **T.** filtrar las entradas ilegibles de `caveats_not_computed` en vez de dar `None` | **5 rojos**: 4 de `test_una_declaracion_ilegible_es_None_y_no_una_lista_filtrada` + `test_el_gate_con_una_declaracion_ilegible_no_pasa`. Las 3 formas que no son lista quedaron verdes: la mutación sólo toca el loop |
+| **U.** sacar el guard `isinstance(result, WalletReputation)` del gate | **3 rojos**: los 3 de `test_el_gate_solo_acepta_un_WalletReputation` (salía `AttributeError`, no el `TypeError` que nombra el error) |
+| **V.** sacar `FACILITATOR_AUTHORED` de `KNOWN_CAVEAT_CODES` | **2 rojos**: `test_las_nueve_estan_y_son_nueve` y `test_el_code_facilitator_authored_es_conocido_y_no_es_de_la_puerta_gratis` |
+| **W.** 🔴 sacar el guard `isinstance(declared, list)` del gate (queda sólo `if not declared`) — 2026-09-15 | **6 rojos**: los 6 de `test_el_gate_deja_pasar_la_lista_vacia_y_NINGUN_otro_vacio` (`()`, `""`, `0`, `False`, `{}`, `set()` → `DID NOT RAISE`), y el resto de la suite VERDE: el parser nunca arma esas formas, así que sólo un `WalletReputation` construido a mano muestra el bug |
 
 **M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
 KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un
@@ -247,6 +288,14 @@ guard del 404 es uno solo y que el respaldo se colgó del lado correcto.
 **N** fija *qué devuelve*: sin la marca, un consumidor no puede distinguir el
 índice de su plan B y terminaría publicando como canónico un número que
 describe.net no firmó — la misma enfermedad que R1 persigue con `None` vs `0`.
+
+**O y P son el par que sostiene el `None` de `caveats_not_computed`**, uno por
+capa: O en el parser (el `None` no llega al gate), P en el gate (llega y se
+deja pasar). Las dos dejan verdes a TODOS los tests de la captura viva, y ése es
+el aprendizaje: la captura viva nunca muestra una API vieja, así que un test que
+sólo mire lo que hoy manda el servicio no puede ver este bug. **R y S son el par
+por borde de `author_class`**, igual que A y B: R se pone rojo si la ausencia se
+lee como una clase, S si el set se cierra.
 
 **A y B son el par que sostiene la R5 corregida**, uno por borde: A se pone rojo
 si alguien mete las pagas adentro, B si alguien saca a las gratis. **D y E son el
