@@ -25,7 +25,10 @@ construction shifts.
   **`CaveatsNotComputedError`** — the gate the 2026-08-31 position assigned to the
   SDK (`describe-net/docs/BACKLOG.md:221`). Returns `rep` only when the answer
   declared `[]`; raises with `not_computed` = the codes, or `not_computed = None`
-  when nothing was declared. A non-`WalletReputation` is a `TypeError`. The error
+  when nothing was declared. Only the empty `list` passes, not any falsy value: a
+  hand-built `WalletReputation` whose declaration is not a list (`()`, `""`, `0`,
+  `False`, `{}`, `set()`) raises with `not_computed = None`, as in the TypeScript
+  SDK. A non-`WalletReputation` is a `TypeError`. The error
   is deliberately **not** a `DescribeError`, so an outage-tolerant
   `except DescribeError` cannot turn a refusal into a pass.
 - **`Rating.author_class: Optional[str]`** — `facilitator-authored` or

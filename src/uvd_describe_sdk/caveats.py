@@ -284,8 +284,9 @@ class CaveatsNotComputedError(Exception):
 
         a list → the answer DECLARED these codes as not evaluated. Unverified,
                  not passed.
-        None   → the answer declared NOTHING (an API older than 2026-09-14, or a
-                 `fallback_reader` result). Not `[]`.
+        None   → the answer declared NOTHING (an API older than 2026-09-14, a
+                 `fallback_reader` result, or a hand-built value that is not a
+                 list). Not `[]`.
 
     `recovery` follows `errors.py`: a class constant that interpolates nothing.
     """
@@ -326,11 +327,15 @@ def require_full_caveats(result: WalletReputation) -> WalletReputation:
             ...                            # no answer at all (R5): decide that first
         rep = require_full_caveats(rep)    # raises CaveatsNotComputedError
 
-    Three states, and only one passes:
+    Four shapes, and only one passes:
 
         caveats_not_computed == []        → returns `result`, the same object.
         caveats_not_computed == [codes]   → raises; `exc.not_computed` = the codes.
         caveats_not_computed is None      → raises; `exc.not_computed` is None.
+        anything that is not a `list`     → raises; `exc.not_computed` is None.
+
+    The empty LIST passes, not any falsy value: a hand-built `WalletReputation`
+    carrying `()`, `""`, `0`, `False`, `{}` or `set()` declared nothing.
 
     🔴 **On the live index this raises for every `wallet()` today** (measured
     2026-09-15: seven codes declared for a wallet with 648 reviews and the same
@@ -359,6 +364,18 @@ def require_full_caveats(result: WalletReputation) -> WalletReputation:
             "it left out (no `caveats_not_computed`): an API older than 2026-09-14 "
             "or a fallback answer. Undeclared is not `[]`, so this gate does not "
             "pass.",
+            wallet=result.wallet,
+            not_computed=None,
+        )
+    if not isinstance(declared, list):
+        # Only reachable with a hand-built WalletReputation: the parser reads a
+        # non-list as None. Without this guard `if not declared` below let `()`,
+        # `""`, `0`, `False`, `{}` and `set()` PASS (2026-09-15); the TypeScript
+        # twin refuses all six.
+        raise CaveatsNotComputedError(
+            f"the answer for {result.wallet} carries a `caveats_not_computed` that "
+            f"is not a list ({type(declared).__name__}): only a list declares "
+            "anything, and only the empty list passes this gate.",
             wallet=result.wallet,
             not_computed=None,
         )

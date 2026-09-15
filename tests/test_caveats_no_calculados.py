@@ -208,6 +208,25 @@ def test_el_gate_con_una_declaracion_ilegible_no_pasa() -> None:
     assert info.value.not_computed is None
 
 
+@pytest.mark.parametrize("valor", [(), "", 0, False, {}, set()], ids=repr)
+def test_el_gate_deja_pasar_la_lista_vacia_y_NINGUN_otro_vacio(valor: Any) -> None:
+    """🔴 Pasa `[]`, no «cualquier cosa falsa». El parser nunca arma estas formas
+    (lo que no es lista sale `None`), pero un `WalletReputation` construido a mano
+    —un `fallback_reader`, un consumidor que lo rearma— sí puede traerlas, y un
+    `if not declared` las dejaba pasar a las seis. El gemelo TypeScript las
+    rechaza todas: lo que no es una lista no declaró nada, así que `not_computed`
+    es `None`."""
+    rep = WalletReputation(
+        wallet=WALLET_CHAINS_VIVA["wallet"],
+        identity_count=1,
+        global_score=71.5,
+        caveats_not_computed=valor,
+    )
+    with pytest.raises(CaveatsNotComputedError) as info:
+        require_full_caveats(rep)
+    assert info.value.not_computed is None
+
+
 def test_un_respaldo_no_declara_y_el_gate_no_lo_deja_pasar() -> None:
     """El caso que el `None` cubre y ninguna API vieja: el índice se cae, el
     `fallback_reader` del consumidor contesta, y ese objeto no sabe qué calculó
