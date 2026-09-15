@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 312 pasan, 15,4 s, SIN RED (re-medido 2026-09-15, py3.12, tras el guard de lista de `require_full_caveats()`; eran 306 ese día tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 313 pasan, 14,9 s, SIN RED (re-medido 2026-09-15, py3.12, tras `thin-chain` en 0.6.1; eran 312 ese día tras el guard de lista de `require_full_caveats()`; eran 306 ese día tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -141,11 +141,14 @@ Lo que hay que saber antes de tocarlo (el porqué completo, en `caveats.py`):
    (mutación S), y la ausencia es `None`, **nunca `rater-authored`** (mutación
    R). Los dos campos nuevos van ÚLTIMOS en su dataclass, después de `raw`, para
    no correr ningún argumento posicional.
-5. ⚠️ **Son NUEVE codes acá y el servicio sirve DIEZ.** `thin-chain` (desde
+5. ~~⚠️ **Son NUEVE codes acá y el servicio sirve DIEZ.** `thin-chain` (desde
    2026-09-05) falta en los dos gemelos. No se agregó de un solo lado para no
    romper la paridad: queda como seguimiento de los dos SDK (anotado en
    `CHANGELOG.md`, 0.6.0), y por eso `CAVEAT_CODES_MEASURED_AT` sigue en
-   `2026-08-30`.
+   `2026-08-30`.~~ **RESUELTO el 2026-09-15 (0.6.1)**: `thin-chain` entró en los
+   dos gemelos a la vez, en `KNOWN_CAVEAT_CODES` y en `FREE_GATE_CAVEAT_CODES`
+   (`burn-address` + `thin-chain`). Son los DIEZ del servicio y
+   `CAVEAT_CODES_MEASURED_AT` pasó a `2026-09-15` (mutación X).
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
@@ -276,8 +279,9 @@ docstrings:
 | **S.** `author_class` con set cerrado (lo desconocido se descarta) | **1 rojo**: `test_una_clase_desconocida_llega_entera_y_no_tumba_la_lectura` |
 | **T.** filtrar las entradas ilegibles de `caveats_not_computed` en vez de dar `None` | **5 rojos**: 4 de `test_una_declaracion_ilegible_es_None_y_no_una_lista_filtrada` + `test_el_gate_con_una_declaracion_ilegible_no_pasa`. Las 3 formas que no son lista quedaron verdes: la mutación sólo toca el loop |
 | **U.** sacar el guard `isinstance(result, WalletReputation)` del gate | **3 rojos**: los 3 de `test_el_gate_solo_acepta_un_WalletReputation` (salía `AttributeError`, no el `TypeError` que nombra el error) |
-| **V.** sacar `FACILITATOR_AUTHORED` de `KNOWN_CAVEAT_CODES` | **2 rojos**: `test_las_nueve_estan_y_son_nueve` y `test_el_code_facilitator_authored_es_conocido_y_no_es_de_la_puerta_gratis` |
+| **V.** sacar `FACILITATOR_AUTHORED` de `KNOWN_CAVEAT_CODES` | **2 rojos**: `test_las_nueve_estan_y_son_nueve` (hoy `test_las_diez_estan_y_son_diez`) y `test_el_code_facilitator_authored_es_conocido_y_no_es_de_la_puerta_gratis` |
 | **W.** 🔴 sacar el guard `isinstance(declared, list)` del gate (queda sólo `if not declared`) — 2026-09-15 | **6 rojos**: los 6 de `test_el_gate_deja_pasar_la_lista_vacia_y_NINGUN_otro_vacio` (`()`, `""`, `0`, `False`, `{}`, `set()` → `DID NOT RAISE`), y el resto de la suite VERDE: el parser nunca arma esas formas, así que sólo un `WalletReputation` construido a mano muestra el bug |
+| **X.** sacar `THIN_CHAIN` de `FREE_GATE_CAVEAT_CODES` (queda sólo `burn-address`) — 2026-09-15 | **1 rojo**: `test_el_subset_de_la_puerta_gratis`, y el resto de la suite VERDE |
 
 **M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
 KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un

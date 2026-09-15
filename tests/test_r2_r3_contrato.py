@@ -144,22 +144,21 @@ def test_no_existe_un_atajo_que_devuelva_solo_el_score() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_las_nueve_estan_y_son_nueve() -> None:
+def test_las_diez_estan_y_son_diez() -> None:
     """docs.describe.net: «The eight codes are the whole set, and it is frozen
     by a test — adding or renaming one is deliberately red.»
 
     Este es el espejo de aquel test, del lado del cliente. Si el servicio agrega
-    una novena, esto se pone rojo y hay que venir a leer qué corte nombra.
+    una más, esto se pone rojo y hay que venir a leer qué corte nombra.
 
-    ⚠️ CORRECCIÓN 2026-09-15: se puso rojo y se vino a leer, como estaba escrito.
-    Entra `facilitator-authored` (scope agente: lee `ratings[].author_class`) y
-    el test pasa a llamarse «las nueve». La fecha del espejo NO se mueve, porque
-    el servicio sirve DIEZ: `thin-chain` (desde 2026-09-05) queda afuera en los
-    dos gemelos hasta decidirlo juntos — anotado como seguimiento en
-    `CHANGELOG.md` (0.6.0). Una fecha nueva certificaría un espejo completo que
-    no lo es.
+    ⚠️ CORRECCIÓN 2026-09-15: se puso rojo dos veces y se vino a leer, como
+    estaba escrito. Entraron `facilitator-authored` (0.6.0, scope agente) y
+    `thin-chain` (0.6.1, también en la puerta gratis). Son los DIEZ del set
+    literal del servicio (`describenet/caveats.py:177-192` en describe-net
+    `4fd11c0`), así que la fecha del espejo se mueve al día en que se leyó
+    entero.
     """
-    assert len(KNOWN_CAVEAT_CODES) == 9
+    assert len(KNOWN_CAVEAT_CODES) == 10
     assert KNOWN_CAVEAT_CODES == {
         "no-score",
         "concentration-degraded",
@@ -169,18 +168,30 @@ def test_las_nueve_estan_y_son_nueve() -> None:
         "campaign-per-rater",
         "self-rated",
         "burn-address",
+        "thin-chain",
         "facilitator-authored",
     }
-    assert CAVEAT_CODES_MEASURED_AT == "2026-08-30"
+    assert CAVEAT_CODES_MEASURED_AT == "2026-09-15"
+
+
+def test_el_code_thin_chain_es_conocido() -> None:
+    """El literal se copió de `describenet/caveats.py:187` (describe-net
+    `4fd11c0`); una constante con un typo daría `is_known` en `False`."""
+    assert CaveatCode.THIN_CHAIN == "thin-chain"
+    assert is_known("thin-chain") is True
+    assert is_known(CaveatCode.THIN_CHAIN) is True
 
 
 def test_el_subset_de_la_puerta_gratis() -> None:
-    """En `/wallets/{w}/chains` la lista es un SUBSET (hoy sólo `burn-address`).
+    """En `/wallets/{w}/chains` la lista es un SUBSET: `burn-address` y, desde
+    que el servicio lo sirve, `thin-chain` (`_publicos_evaluados`,
+    `describenet/caveats.py:521` en `4fd11c0`).
 
     Una lista vacía ahí **no promete** que la descomposición paga esté limpia, y
     publicarlo es lo que impide leer ese silencio como un veredicto.
     """
-    assert FREE_GATE_CAVEAT_CODES == {CaveatCode.BURN_ADDRESS}
+    assert FREE_GATE_CAVEAT_CODES == {"burn-address", "thin-chain"}
+    assert CaveatCode.THIN_CHAIN in FREE_GATE_CAVEAT_CODES
     assert FREE_GATE_CAVEAT_CODES < KNOWN_CAVEAT_CODES
 
 

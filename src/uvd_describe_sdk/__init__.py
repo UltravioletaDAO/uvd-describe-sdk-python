@@ -28,7 +28,7 @@ THE THREE THINGS TO KNOW BEFORE USING IT
    throw the context away. (`models.py` §R2)
 
 3. **You branch on `caveats[].code`, never on `caveats[].text`.** The text may be
-   rewritten without notice; the code never changes. All nine are exported in
+   rewritten without notice; the code never changes. All ten are exported in
    `CaveatCode` so you do not type them. (`caveats.py` §R3)
 
    And a gate that needs the evidence-quality cuts calls
