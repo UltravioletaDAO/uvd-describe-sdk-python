@@ -155,9 +155,9 @@ def test_las_nueve_estan_y_son_nueve() -> None:
     Entra `facilitator-authored` (scope agente: lee `ratings[].author_class`) y
     el test pasa a llamarse «las nueve». La fecha del espejo NO se mueve, porque
     el servicio sirve DIEZ: `thin-chain` (desde 2026-09-05) queda afuera en los
-    dos gemelos hasta decidirlo juntos — reportado en
-    `docs/handoffs/2026-09-15-dn-sdk-caveats-py.md`. Una fecha nueva certificaría
-    un espejo completo que no lo es.
+    dos gemelos hasta decidirlo juntos — anotado como seguimiento en
+    `CHANGELOG.md` (0.6.0). Una fecha nueva certificaría un espejo completo que
+    no lo es.
     """
     assert len(KNOWN_CAVEAT_CODES) == 9
     assert KNOWN_CAVEAT_CODES == {

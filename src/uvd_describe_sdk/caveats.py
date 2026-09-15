@@ -61,9 +61,9 @@ deliberate and whoever counts the service's set will find it:
   * `thin-chain` — served since 2026-09-05, on the FREE door too. 🔴 **NOT
     mirrored, and not by oversight.** The TypeScript twin is brought to the same
     set the same night with the same scope, and adding a code to ONE twin breaks
-    parity in a set both publish. It is reported in the handoff
-    (`docs/handoffs/2026-09-15-dn-sdk-caveats-py.md`) instead of patched in on one
-    side. Meanwhile `is_known("thin-chain")` answers `False` — the tolerant answer
+    parity in a set both publish. It stays a follow-up for both twins, to land
+    together (`CHANGELOG.md`, 0.6.0), instead of being patched in on one side.
+    Meanwhile `is_known("thin-chain")` answers `False` — the tolerant answer
     this module was built to give: the caveat still arrives whole and is shown.
 
 That is also why `CAVEAT_CODES_MEASURED_AT` did **not** move: a newer date would

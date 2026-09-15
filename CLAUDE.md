@@ -143,8 +143,9 @@ Lo que hay que saber antes de tocarlo (el porqué completo, en `caveats.py`):
    no correr ningún argumento posicional.
 5. ⚠️ **Son NUEVE codes acá y el servicio sirve DIEZ.** `thin-chain` (desde
    2026-09-05) falta en los dos gemelos. No se agregó de un solo lado para no
-   romper la paridad: está reportado en `docs/handoffs/2026-09-15-dn-sdk-caveats-py.md`,
-   y por eso `CAVEAT_CODES_MEASURED_AT` sigue en `2026-08-30`.
+   romper la paridad: queda como seguimiento de los dos SDK (anotado en
+   `CHANGELOG.md`, 0.6.0), y por eso `CAVEAT_CODES_MEASURED_AT` sigue en
+   `2026-08-30`.
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
@@ -293,9 +294,7 @@ deja pasar). Las dos dejan verdes a TODOS los tests de la captura viva, y ése e
 el aprendizaje: la captura viva nunca muestra una API vieja, así que un test que
 sólo mire lo que hoy manda el servicio no puede ver este bug. **R y S son el par
 por borde de `author_class`**, igual que A y B: R se pone rojo si la ausencia se
-lee como una clase, S si el set se cierra. El script de las ocho quedó en el
-scratchpad de la sesión (`mutar.py`): muta en sitio, corre la suite y restaura
-verificando el sha256 de cada archivo.
+lee como una clase, S si el set se cierra.
 
 **A y B son el par que sostiene la R5 corregida**, uno por borde: A se pone rojo
 si alguien mete las pagas adentro, B si alguien saca a las gratis. **D y E son el

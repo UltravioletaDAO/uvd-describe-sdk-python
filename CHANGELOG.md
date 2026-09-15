@@ -5,7 +5,7 @@ tag that does not match `src/uvd_describe_sdk/version.py`. Up to 0.5.0 each
 release is recorded in its commit message (`git log`, tags `v0.1.0`…`v0.5.0`);
 this file starts with 0.6.0, the first release that asked for one.
 
-## 0.6.0 — unreleased (tag pending, published by c0der after merge)
+## 0.6.0 — unreleased (tag `v0.6.0` pending)
 
 The upstream-first row `describe-net/docs/BACKLOG.md:19`: describe.net serves both
 fields in production since 2026-09-14 (PR #21, deployed `aa1bd75`). This version
@@ -41,6 +41,19 @@ construction shifts.
 
 - **`thin-chain`**, served by describe.net since 2026-09-05, is still missing from
   `KNOWN_CAVEAT_CODES` and `FREE_GATE_CAVEAT_CODES`. It was not in the scope of
-  this row and adding it to one twin only would break Python/TypeScript parity;
-  it is reported in `docs/handoffs/2026-09-15-dn-sdk-caveats-py.md`.
+  this row and adding it to one twin only would break Python/TypeScript parity,
+  so it is a follow-up for both SDKs, to land together.
   `CAVEAT_CODES_MEASURED_AT` stays `2026-08-30` for that reason.
+
+### Parity with the TypeScript SDK
+
+The same surface, each in its language's casing: `caveats_not_computed` /
+`caveatsNotComputed`, `Rating.author_class` / `authorClass`,
+`require_full_caveats()` / `requireFullCaveats()`, and `CaveatsNotComputedError`
+with `.wallet` and `.not_computed` / `.notComputed`. Both know the same nine caveat
+codes. Two edge differences are declared, and both fail closed:
+
+- An unreadable entry inside the served list (`[null]`): here the whole field is
+  `None`; TypeScript converts each entry with `String()`. The gate refuses in both.
+- The `recovery` text is not byte-identical: each names its own language's
+  spellings (`wallet_breakdown()`, `payer=` here; the HTTP route there).
