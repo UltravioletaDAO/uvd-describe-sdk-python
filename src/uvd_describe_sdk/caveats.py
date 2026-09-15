@@ -50,24 +50,16 @@ red"*. That is: the set lives on the service's side and there is a test over the
 that freezes it. Here it is mirrored, with its date, and `test_caveats.py` compares
 this mirror against the declared count so a half-done copy goes red.
 
-⚠️ CORRECTION 2026-09-15 — they are NINE here now, and the service serves TEN.
-Left next to the old paragraph instead of replacing it, because the difference is
-deliberate and whoever counts the service's set will find it:
+⚠️ CORRECTION 2026-09-15 — they are TEN now, the whole literal set the service
+serves (`describenet/caveats.py:177-192` at describe-net `4fd11c0`). Left next to
+the old paragraph instead of replacing it:
 
-  * `facilitator-authored` — served since 2026-09-14
-    (`describenet/caveats.py:177-192` at describe-net `01f6c4a`). **Mirrored**,
-    together with `ratings[].author_class`: it is exactly what the upstream-first
-    row asks this SDK for (`describe-net/docs/BACKLOG.md:19`).
-  * `thin-chain` — served since 2026-09-05, on the FREE door too. 🔴 **NOT
-    mirrored, and not by oversight.** The TypeScript twin is brought to the same
-    set the same night with the same scope, and adding a code to ONE twin breaks
-    parity in a set both publish. It stays a follow-up for both twins, to land
-    together (`CHANGELOG.md`, 0.6.0), instead of being patched in on one side.
-    Meanwhile `is_known("thin-chain")` answers `False` — the tolerant answer
-    this module was built to give: the caveat still arrives whole and is shown.
+  * `facilitator-authored` — served since 2026-09-14, mirrored in 0.6.0 together
+    with `ratings[].author_class` (`describe-net/docs/BACKLOG.md:19`).
+  * `thin-chain` — served since 2026-09-05, on the FREE door too; mirrored in
+    0.6.1, in both twins at once so the set both publish stays the same.
 
-That is also why `CAVEAT_CODES_MEASURED_AT` did **not** move: a newer date would
-certify a complete mirror, and this one is knowingly one code short.
+With the mirror whole again, `CAVEAT_CODES_MEASURED_AT` moves to 2026-09-15.
 """
 
 from __future__ import annotations
@@ -77,13 +69,13 @@ from typing import FrozenSet, List, Literal, Optional
 from .models import WalletReputation
 
 #: The date this mirror was read WHOLE from the source. Every figure is either read
-#: live or carries a date (house rule) — and a set of codes is a figure. Not moved
-#: on 2026-09-15 when `facilitator-authored` was added: see the module's correction.
-CAVEAT_CODES_MEASURED_AT = "2026-08-30"
+#: live or carries a date (house rule) — and a set of codes is a figure. Was
+#: `2026-08-30` until the ten were read whole on 2026-09-15.
+CAVEAT_CODES_MEASURED_AT = "2026-09-15"
 
 
 class CaveatCode:
-    """The nine constants. A string container, **not** an Enum (see the module).
+    """The ten constants. A string container, **not** an Enum (see the module).
 
     It is not instantiated: it is a namespace so the import is explicit and
     autocompletion offers them.
@@ -114,9 +106,16 @@ class CaveatCode:
     SELF_RATED = "self-rated"
 
     #: The subject is a known burn address: real on-chain ratings about something
-    #: nobody controls. It is the ONLY one that fires today at the free door
-    #: `GET /wallets/{w}/chains`.
+    #: nobody controls. One of the two that fire at the free door
+    #: `GET /wallets/{w}/chains` (the other is `THIN_CHAIN`).
     BURN_ADDRESS = "burn-address"
+
+    #: A chain with fewer than `reading_policy.min_raters` distinct raters on a
+    #: multi-chain wallet: the `chains[]` row whose score is thinnest. Served since
+    #: 2026-09-05 and evaluated at the free door too, because every row there
+    #: carries `distinct_raters` and `weight` (`describenet/caveats.py:316` and
+    #: `:521` at describe-net `4fd11c0`).
+    THIN_CHAIN = "thin-chain"
 
     #: Some rows of `ratings[]` carry `author_class: facilitator-authored`: their
     #: `client` is the relayer that wrote them, NOT the counterparty that rated —
@@ -147,6 +146,7 @@ KNOWN_CAVEAT_CODES: FrozenSet[str] = frozenset(
         CaveatCode.CAMPAIGN_PER_RATER,
         CaveatCode.SELF_RATED,
         CaveatCode.BURN_ADDRESS,
+        CaveatCode.THIN_CHAIN,
         CaveatCode.FACILITATOR_AUTHORED,
     }
 )
@@ -158,11 +158,14 @@ KNOWN_CAVEAT_CODES: FrozenSet[str] = frozenset(
 #:
 #: ⚠️ CORRECTION 2026-09-15: "today only `burn-address`" stopped being true on
 #: 2026-09-05 — the live schema (`/openapi.json`, `WalletChains.caveats`, read
-#: 2026-09-15) names `thin-chain` too. Not changed here, for the parity reason in
-#: the module's correction. And since 2026-09-14 the free door no longer relies on
-#: this constant to warn: each response DECLARES what it did not compute —
+#: 2026-09-15) names `thin-chain` too, and so does the service's own set
+#: (`_publicos_evaluados`, `describenet/caveats.py:521` at `4fd11c0`). Both are
+#: here since 0.6.1. And since 2026-09-14 the free door no longer relies on this
+#: constant to warn: each response DECLARES what it did not compute —
 #: `WalletReputation.caveats_not_computed`, read by `require_full_caveats()` below.
-FREE_GATE_CAVEAT_CODES: FrozenSet[str] = frozenset({CaveatCode.BURN_ADDRESS})
+FREE_GATE_CAVEAT_CODES: FrozenSet[str] = frozenset(
+    {CaveatCode.BURN_ADDRESS, CaveatCode.THIN_CHAIN}
+)
 
 
 def is_known(code: str) -> bool:

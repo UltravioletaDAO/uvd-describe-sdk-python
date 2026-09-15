@@ -5,6 +5,26 @@ tag that does not match `src/uvd_describe_sdk/version.py`. Up to 0.5.0 each
 release is recorded in its commit message (`git log`, tags `v0.1.0`…`v0.5.0`);
 this file starts with 0.6.0, the first release that asked for one.
 
+## 0.6.1 — unreleased
+
+### Added
+
+- **`CaveatCode.THIN_CHAIN`** (`"thin-chain"`) — `KNOWN_CAVEAT_CODES` goes from 9
+  to 10, the whole set describe.net serves (`describenet/caveats.py:177-192`).
+  `thin-chain` is served since 2026-09-05: a chain with fewer than
+  `reading_policy.min_raters` distinct raters on a multi-chain wallet.
+- `FREE_GATE_CAVEAT_CODES` is now `{"burn-address", "thin-chain"}`: the free
+  `GET /wallets/{wallet}/chains` door evaluates both.
+
+### Changed
+
+- `CAVEAT_CODES_MEASURED_AT` moves from `2026-08-30` to `2026-09-15`, the date the
+  ten codes were read from the service.
+
+### Parity with the TypeScript SDK
+
+Both SDKs add `thin-chain` in the same release and know the same ten caveat codes.
+
 ## 0.6.0 — unreleased (tag `v0.6.0` pending)
 
 The upstream-first row `describe-net/docs/BACKLOG.md:19`: describe.net serves both
@@ -46,7 +66,7 @@ construction shifts.
   `KNOWN_CAVEAT_CODES` and `FREE_GATE_CAVEAT_CODES`. It was not in the scope of
   this row and adding it to one twin only would break Python/TypeScript parity,
   so it is a follow-up for both SDKs, to land together.
-  `CAVEAT_CODES_MEASURED_AT` stays `2026-08-30` for that reason.
+  `CAVEAT_CODES_MEASURED_AT` stays `2026-08-30` for that reason. Added in 0.6.1.
 
 ### Parity with the TypeScript SDK
 

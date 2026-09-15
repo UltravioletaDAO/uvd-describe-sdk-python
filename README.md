@@ -56,7 +56,7 @@ it went red naming it, and it was removed.
 
 ### 3. Branch on `caveats[].code`, never on `caveats[].text`
 
-The service's schema declares it: *"Codes are permanent; text is not."* All nine
+The service's schema declares it: *"Codes are permanent; text is not."* All ten
 are exported so you do not type them:
 
 ```python
@@ -68,7 +68,7 @@ if CaveatCode.BURN_ADDRESS in rep.caveat_codes:
 
 `Caveat.code` is a `str`, **not an `Enum`**. A closed enum would mean a new code
 from the service breaks or disappears — and discarding a caveat is discarding the
-warning. `is_known(code)` says whether it is one of the nine known ones; an
+warning. `is_known(code)` says whether it is one of the ten known ones; an
 unknown one still arrives whole and has to be shown.
 
 #### A gate on the free door: `require_full_caveats()`
