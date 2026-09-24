@@ -1,0 +1,44 @@
+{
+ "scenario": "resolve_0xultravioletadao_eth_no_existe",
+ "recorded_at": "2026-09-24T20:12:52Z",
+ "op": "resolve",
+ "args": [
+  "0xultravioletadao.eth"
+ ],
+ "options": {},
+ "chains": [
+  "eip155:1",
+  "eip155:137",
+  "eip155:43114",
+  "eip155:8453"
+ ],
+ "now": 1790280772.884965,
+ "result": {
+  "input": "0xultravioletadao.eth",
+  "normalized": "0xultravioletadao.eth",
+  "address": null,
+  "family": "evm",
+  "system": "ens",
+  "verified_onchain": true,
+  "cached": false,
+  "error": "not_found",
+  "tried": [
+   "ens"
+  ],
+  "detail": "0xultravioletadao.eth is not registered"
+ },
+ "exchanges": [
+  {
+   "kind": "rpc",
+   "chain": "eip155:1",
+   "to": "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85",
+   "data": "0xd6e4fa86373b55807a40c0ac17c17012ad5b34214e2f7644658fed18a99bb75fba2ddabd",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x0000000000000000000000000000000000000000000000000000000000000000"
+   }
+  }
+ ]
+}

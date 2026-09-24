@@ -81,6 +81,7 @@ from .client import (
     DEFAULT_PAY_NETWORK,
     DEFAULT_TIMEOUT_S,
     DescribeClient,
+    DescribeNames,
     ErrorObserver,
     FallbackReader,
 )
@@ -125,6 +126,18 @@ from .models import (
     WalletHistory,
     WalletReputation,
     malformed_hash_report,
+)
+from .name_models import (
+    KNOWN_NAME_SYSTEMS,
+    NAME_ERROR_CODES,
+    NameErrorCode,
+    NameFamily,
+    NameNotVerifiedError,
+    NameRecord,
+    NameResolution,
+    NameSystem,
+    parse_name_resolution,
+    require_onchain_address,
 )
 from .partner import (
     PARTNER_AUTHORITY,
@@ -231,6 +244,20 @@ __all__ = [
     "PARTNER_CHAIN_ID",
     "PARTNER_AUTHORITY",
     "sign_partner_headers",
+    # names — the result contract, light (no extra needed). The on-chain
+    # resolver is `uvd_describe_sdk.names.NameResolver`, behind the `names`
+    # extra; `DescribeClient.names` returns these same types over the HTTP API.
+    "DescribeNames",
+    "NameResolution",
+    "NameRecord",
+    "NameErrorCode",
+    "NameSystem",
+    "NameFamily",
+    "NAME_ERROR_CODES",
+    "KNOWN_NAME_SYSTEMS",
+    "parse_name_resolution",
+    "require_onchain_address",
+    "NameNotVerifiedError",
     # version / attribution
     "__version__",
     "USER_AGENT_NAME",

@@ -55,6 +55,14 @@ x402 = ["uvd-x402-sdk>=0.70.0", "eth-account>=0.11.0"]
 # `uvd-x402-sdk[signer]`. Declararlo asi deja que un partner con HSM instale lo
 # minimo en vez de arrastrar una libreria de claves que no va a usar.
 partner = ["uvd-x402-sdk>=0.70.0"]
+# El resolver de nombres (`uvd_describe_sdk.names`). Extra y no base: quien sólo
+# lee reputación no arrastra la normalización ENSIP-15 ni keccak. Se eligió esto
+# y no `web3>=7,<8` MIDIENDO (2026-09-24, ruedas Linux x86_64, py3.12, sobre el
+# `requirements-lambda.txt` de describe-net): este extra suma 2 paquetes y
+# +5,7 MiB descomprimido / +1,9 MiB zip; web3 sumaba 14 paquetes y +17,6 / +4,7.
+# `pycryptodome` ya viaja en esa Lambda por `eth-account`. Los números completos
+# están en el docstring de `names/__init__.py`.
+names = ["ens-normalize>=3.0.7,<4", "pycryptodome>=3.19,<4"]
 dev = [
     "pytest>=7.0.0",
     "mypy>=1.0.0",
@@ -65,6 +73,10 @@ dev = [
     # nada — se saltea, y un mapeo roto pasa en verde. Es el mismo criterio que
     # el `ci.yml` del molde deja escrito para `dx402`/`escrow`.
     "uvd-x402-sdk>=0.70.0",
+    # Igual que el SDK de pagos: sin el extra `names` instalado, los tests del
+    # resolver no pueden correr y un resolver roto pasaría en verde.
+    "ens-normalize>=3.0.7,<4",
+    "pycryptodome>=3.19,<4",
 ]
 
 [project.urls]
@@ -142,4 +154,10 @@ disallow_untyped_defs = true
 # de sembrar `# type: ignore` sueltos, que envejecen peor.
 [[tool.mypy.overrides]]
 module = ["uvd_x402_sdk.*"]
+ignore_missing_imports = true
+
+# `ens-normalize` 3.0.10 tampoco publica `py.typed` (medido 2026-09-24: el paquete
+# trae `normalization.py`, `spec.pickle` y `__init__.py`, nada más). Mismo trato.
+[[tool.mypy.overrides]]
+module = ["ens_normalize", "ens_normalize.*"]
 ignore_missing_imports = true
