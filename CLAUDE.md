@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 313 pasan, 14,9 s, SIN RED (re-medido 2026-09-15, py3.12, tras `thin-chain` en 0.6.1; eran 312 ese día tras el guard de lista de `require_full_caveats()`; eran 306 ese día tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 448 pasan, 16-17 s, SIN RED (re-medido 2026-09-24 en py3.13 y py3.9 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras el módulo `names`; eran 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -149,6 +149,68 @@ Lo que hay que saber antes de tocarlo (el porqué completo, en `caveats.py`):
    dos gemelos a la vez, en `KNOWN_CAVEAT_CODES` y en `FREE_GATE_CAVEAT_CODES`
    (`burn-address` + `thin-chain`). Son los DIEZ del servicio y
    `CAVEAT_CODES_MEASURED_AT` pasó a `2026-09-15` (mutación X).
+
+### `names` — el resolver de nombres del stack, la duodécima superficie, y TAMPOCO es una regla
+
+`names/` (paquete, detrás del extra `[names]`) + `name_models.py` (liviano, en la
+base) + `DescribeClient.names`. Encargo de c0der del 2026-09-24 (DUP-01 del
+barrido de duplicación): la capacidad vivía partida y rota en tres repos
+(Execution Market `mcp_server/integrations/ens/client.py`, karma-hello
+`infrastructure/domain_resolver.py`, uvdweb `WalletConnect.js`). No toca ninguna
+de las ocho reglas: el resolver on-chain no habla con describe, y la capa HTTP
+(`DescribeClient.names`) es una ruta gratis con R5 como `wallet()`.
+
+Lo que hay que saber antes de tocarlo (el porqué completo, en el docstring de
+cada módulo de `names/`):
+
+1. 🔴 **La dirección cero nunca sale como dirección.** Un resolver que contesta
+   `0x000…0` dice «no está puesto», y un pago ahí se quema: es `not_found`. La
+   fixture es REAL (`default.reverse`, el DefaultReverseResolver de ENSIP-19
+   devuelve `address(0)`). Mutación Y.
+2. 🔴 **El reverse se confirma forward SIEMPRE**, y un reverse que no se
+   confirma (o que no está en forma normal ENSIP-15) es `reverse_mismatch` **sin
+   devolver el nombre reclamado**. Mutaciones Z y AD. Fixture real:
+   `0xd02a…a513` reclama `0x5e405F9e…hooks.cow.eth` con mayúsculas.
+3. 🔴 **`verified_onchain` es `False` para todo lo que llega por HTTP**
+   (`parse_name_resolution` lo fuerza, aunque el servidor diga `true`), y
+   `require_onchain_address()` lo exige para pagar. Mutación AA.
+4. **`rpc_unavailable` nunca se cachea**; los negativos viven menos que los
+   positivos (60 s contra 300 s) y la caché tiene tope. Mutación AB.
+5. **El vencimiento se lee ANTES de resolver**: los registros de un `.eth`
+   vencido siguen on-chain y resuelven a la dirección vieja. Mutación AC.
+6. **ENSIP-15, no `lower()`** — el bug de Execution Market. Mutación AE. Y
+   medido con `ens-normalize` 3.0.10: las LETRAS de ancho completo se pliegan,
+   los PUNTOS de ancho completo (U+FF0E, U+3002) son `DISALLOWED`.
+7. **Nada de URLs de RPC en el SDK ni en sus salidas.** Las pasa el consumidor
+   por constructor (claves CAIP-2), el `detail` nombra la cadena y nunca el
+   endpoint, y las fixtures guardan el id CAIP-2. Los gateways CCIP y la metadata
+   de NFT pasan por `check_url` (https, sin credenciales, sin IPs no globales).
+   Mutación AG.
+8. **Orden estricto en el reverse**: si un sistema de arriba no se pudo
+   preguntar, no se contesta con uno de abajo. Mutación AH.
+9. **Sync y async sobre los MISMOS pasos** (`names/_proto.py`, generadores
+   sans-IO). Es la salida que la pregunta abierta 3 (abajo) pedía para
+   `DescribeClient`, aplicada primero acá. `test_names_hechos_medidos.py` corre
+   cada grabación por las dos variantes.
+10. ⚠️ **SNS (`.sol`) es `unsupported_system` a propósito**: el `sns-sdk`
+    oficial (`536f0cb`, leído el 2026-09-24) apaga la resolución legacy de `.sol`
+    en el slot finalizado 452.825.395 (≈ 2026-10-15) y el camino nuevo (SRS) sigue
+    deshabilitado upstream. Media implementación que deja de andar en tres
+    semanas sería peor que un «todavía no» claro. Queda como seguimiento.
+11. ⚠️ **El avatar NFT no tiene grabación real**: `ipfs.io` y `dweb.link`
+    contestaron 429 al grabar `matoken.eth` y la grabación se detuvo (regla).
+    La regla de propiedad se prueba con un doble SINTÉTICO rotulado como tal
+    (`test_names_avatar_nft_sintetico.py`). Mutación AF.
+
+**Las fixtures de `tests/fixtures/names/` son grabaciones** de
+`scripts/grabar_fixtures_names.py` contra RPC públicos sin llave (secuencial,
+pausa ≥ 1,1 s, se detiene al primer 429). `tests/names_replay.py` las reproduce
+en orden y exige consumirlas todas. **No se editan a mano**: se regraban.
+
+**Paridad**: el gemelo TypeScript todavía NO tiene `names`. Es una superficie
+nueva, no un cambio del contrato núcleo — igual que el riel de partner — pero el
+gemelo tiene que traer la misma forma de resultado (`NameResolution.to_dict()`
+es el contrato de `/v1/names`). Seguimiento de los dos SDK.
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
@@ -282,6 +344,16 @@ docstrings:
 | **V.** sacar `FACILITATOR_AUTHORED` de `KNOWN_CAVEAT_CODES` | **2 rojos**: `test_las_nueve_estan_y_son_nueve` (hoy `test_las_diez_estan_y_son_diez`) y `test_el_code_facilitator_authored_es_conocido_y_no_es_de_la_puerta_gratis` |
 | **W.** 🔴 sacar el guard `isinstance(declared, list)` del gate (queda sólo `if not declared`) — 2026-09-15 | **6 rojos**: los 6 de `test_el_gate_deja_pasar_la_lista_vacia_y_NINGUN_otro_vacio` (`()`, `""`, `0`, `False`, `{}`, `set()` → `DID NOT RAISE`), y el resto de la suite VERDE: el parser nunca arma esas formas, así que sólo un `WalletReputation` construido a mano muestra el bug |
 | **X.** sacar `THIN_CHAIN` de `FREE_GATE_CAVEAT_CODES` (queda sólo `burn-address`) — 2026-09-15 | **1 rojo**: `test_el_subset_de_la_puerta_gratis`, y el resto de la suite VERDE |
+| **Y.** 🔴 sacar el guard de la dirección cero en `names/_ens.py::forward` — 2026-09-24 | **3 rojos**: la grabación de `default.reverse` en sync y en async, y `test_un_resolver_real_que_contesta_la_direccion_cero_da_not_found` |
+| **Z.** 🔴 sacar la comparación `pointed != address` de `_ens.confirm` | **1 rojo**: `test_un_nombre_que_apunta_a_OTRA_direccion_es_reverse_mismatch` — con el forward GRABADO de `0xultravioleta.eth` confrontado con la dirección de Jesse |
+| **AA.** 🔴 que `parse_name_resolution` herede `verified_onchain` del cuerpo | **2 rojos**: `test_la_api_http_devuelve_verified_onchain_False_aunque_el_servidor_diga_True` y `test_un_destino_de_pago_exige_verified_onchain` |
+| **AB.** cachear los errores que no son respuesta de la cadena (`rpc_unavailable`…) | **4 rojos**: los 3 del parametrizado de `NameCache` y `test_un_fallo_de_transporte_no_se_cachea_y_la_siguiente_pregunta_de_nuevo` |
+| **AC.** saltear `check_expiry` antes de resolver | **24 rojos**: toda grabación ENS/Basenames deja de coincidir con lo que se pidió en vivo — el vencimiento es la primera lectura |
+| **AD.** saltear el chequeo ENSIP-15 del nombre reclamado en `confirm` | **3 rojos**: la grabación del hook de CoW en sync y async, y `test_un_reverse_no_normalizado_es_reverse_mismatch` |
+| **AE.** normalizar con `typed.lower()` en vez de ENSIP-15 (el bug de EM) | **6 rojos**: 5 nombres inválidos que pasaban y `test_la_normalizacion_es_ENSIP15_y_no_lower` |
+| **AF.** sacar el chequeo `ownerOf == dueño` del avatar NFT | **1 rojo**: `test_erc721_que_el_nombre_NO_posee_no_da_url` (doble SINTÉTICO: no hubo grabación, ver arriba) |
+| **AG.** que `check_url` deje pasar IPs no globales | **5 rojos**: 4 del guard (`127.0.0.1`, `10.0.0.8`, `169.254.169.254`, `[::1]`) y la metadata en IP privada |
+| **AH.** en el reverse, que un sistema caído no corte (`except Unavailable` → otra excepción) | **1 rojo**: `test_reverse_con_un_sistema_de_arriba_caido_no_contesta_con_uno_de_abajo`. ⚠️ Antes de ese test la mutación daba **0 rojos**: la regla no estaba atada, y se ató el mismo día |
 
 **M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
 KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un
@@ -339,11 +411,16 @@ publicada mienta.
 
 ## Lo que este SDK NO hace, y no es un olvido
 
-- **No cachea.** El TTL correcto depende de para qué se lee (mesh usa 12 min
-  para un canal; un perfil quiere el valor caliente). Un caché adentro del SDK
-  con un default equivocado es peor que ninguno. `refreshed_at` viaja para que
-  quien llama decida.
-- **No tiene API async.** Ver riesgos abajo — es la deuda más concreta.
+- **No cachea reputación.** El TTL correcto depende de para qué se lee (mesh usa
+  12 min para un canal; un perfil quiere el valor caliente). Un caché adentro del
+  SDK con un default equivocado es peor que ninguno. `refreshed_at` viaja para que
+  quien llama decida. ⚠️ Acotado el 2026-09-24: el resolver de NOMBRES sí cachea
+  (`NameCache`), porque las dos copias que reemplaza ya cacheaban y el default
+  está medido (los 300 s de EM); tiene tope, TTL negativo más corto y
+  `cache=False` lo apaga.
+- **`DescribeClient` no tiene API async.** Ver riesgos abajo — es la deuda más
+  concreta. ⚠️ El resolver de nombres sí la tiene, sobre los mismos pasos que la
+  sync (`names/_proto.py`).
 - **No reintenta un pago.** El nonce se consume en el settlement: reenviar la
   misma credencial no vuelve a pagar. Un `retries=` quemaría credenciales.
 - **No lee env vars.** Todo entra por constructor. Es lo que lo hace testeable
@@ -398,7 +475,9 @@ publicada mienta.
 3. **Sync vs async.** El cliente de Execution Market es `async` y este SDK es
    sync: para adoptarlo tendría que envolverlo en un thread. La salida sería un
    `aio.py` de transporte fino reusando estos parsers, **sin duplicar una línea
-   de política**. No está escrito.
+   de política**. No está escrito. ⚠️ 2026-09-24: el patrón ya existe en el repo
+   — `names/_proto.py` (pasos como generadores sans-IO, `run_sync` y
+   `run_async`) — y es el molde si algún día se hace para `DescribeClient`.
 
 ---
 

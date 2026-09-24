@@ -5,6 +5,57 @@ tag that does not match `src/uvd_describe_sdk/version.py`. Up to 0.5.0 each
 release is recorded in its commit message (`git log`, tags `v0.1.0`…`v0.5.0`);
 this file starts with 0.6.0, the first release that asked for one.
 
+## [Unreleased]
+
+Changes merged since the last release accumulate here, each with its label
+(`[security]`, `[money]`, `[feature]`, `[internal]`), and ship together.
+
+### [feature] `uvd_describe_sdk.names` — the one name resolver of the stack
+
+Name → address and address → name, read on-chain, behind a new extra:
+`pip install "uvd-describe-sdk[names]"` (`ens-normalize`, `pycryptodome`). The base
+install still depends on `httpx` only.
+
+- **`NameResolver(rpc=..., systems=..., cache=..., timeout=...)`** with `resolve`,
+  `reverse`, `text`, `avatar` (async) and their `*_sync` variants, built on one set
+  of resolution steps; `normalize` and `detect` need no network. `rpc` is keyed by
+  CAIP-2 chain id and the SDK ships no RPC URL.
+- **Systems**: ENS (`.eth`, subnames, ENSIP-10 wildcards, EIP-3668 CCIP-Read,
+  expiry), Basenames (`*.base.eth` through L1 + CCIP; expiry and the ENSIP-19
+  primary name on Base), DNS names imported into ENS (DNSSEC / offchain resolver),
+  Unstoppable Domains (UD's ProxyReader on Polygon or Base, then L1; TLD table dated
+  `UNS_TLDS_MEASURED_AT = "2026-09-24"`) and Avvy (`.avax`, on-chain — no HTTP
+  API). `.sol` is detected and answered `unsupported_system`: SNS is migrating
+  `.sol` to a new registry (legacy resolution stops at finalized slot 452,825,395,
+  about 2026-10-15, and the new path is still disabled upstream).
+- **Normalization**: ENSIP-15 for the ENS family (`invalid_name` on error); each
+  other system's own rule.
+- **Reverse is always confirmed forward**; a failed confirmation (or a claimed name
+  that is not in ENSIP-15 normal form) is `reverse_mismatch`, and the claimed name is
+  not returned.
+- **Records**: ENSIP-5 text records (the consumer passes its own keys) and the
+  ENSIP-12 avatar resolved to a final URL, NFT ownership checked.
+- **`NameResolution` / `NameRecord`** (exported by the base package, no extra
+  needed): `input`, `normalized`, `address` (never the zero address), `family`,
+  `system`, `verified_onchain`, `cached`, `error` (`not_found` | `invalid_name` |
+  `reverse_mismatch` | `expired` | `unsupported_system` | `rpc_unavailable` — a
+  missing name is an answer, never an exception), `tried`, `detail`.
+- **`require_onchain_address(result)`** returns the address only when it was read
+  on-chain; otherwise `NameNotVerifiedError` (deliberately not a `DescribeError`).
+- **`NameCache`**: LRU with `max_entries` (1024), a positive TTL (300 s), a
+  negative TTL (60 s), and `rpc_unavailable` is never cached. A hard `timeout`
+  (10 s) covers the whole call.
+- **`DescribeClient.names.resolve()` / `.reverse()`** against
+  `api.describe.net/v1/names/resolve?name=` and `/v1/names/reverse?address=`: the
+  contract the service is to serve (`NameResolution.to_dict()`, 200 for every
+  resolver outcome). Free routes with R5 semantics; the result always carries
+  `verified_onchain=False`.
+- CCIP gateway and NFT metadata URLs go through a guard: `https://` only, no
+  credentials, no `localhost`, no IP literal outside the global address space.
+- `scripts/grabar_fixtures_names.py` records the fixtures in
+  `tests/fixtures/names/` from public RPCs (sequential, ≥ 1.1 s apart, stops at the
+  first HTTP 429). No RPC URL is written to a fixture.
+
 ## 0.6.1 — unreleased
 
 ### Added
