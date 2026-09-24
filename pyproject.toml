@@ -62,7 +62,11 @@ partner = ["uvd-x402-sdk>=0.70.0"]
 # +5,7 MiB descomprimido / +1,9 MiB zip; web3 sumaba 14 paquetes y +17,6 / +4,7.
 # `pycryptodome` ya viaja en esa Lambda por `eth-account`. Los números completos
 # están en el docstring de `names/__init__.py`.
-names = ["ens-normalize>=3.0.7,<4", "pycryptodome>=3.19,<4"]
+#
+# `httpcore` se declara aunque ya lo trae httpx (peso cero): `names/_deadline.py`
+# lo importa DIRECTO, para acotar el timeout sync en el socket (ronda 3 del PR #6),
+# y una dependencia que se importa se declara.
+names = ["ens-normalize>=3.0.7,<4", "pycryptodome>=3.19,<4", "httpcore>=1.0,<2"]
 dev = [
     "pytest>=7.0.0",
     "mypy>=1.0.0",

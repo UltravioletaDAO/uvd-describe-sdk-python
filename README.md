@@ -615,9 +615,11 @@ that came over HTTP — a payment destination demands `True`
 CAIP-2 chain id; the SDK ships none (a public default is a shared rate limit nobody
 chose, a keyed one a leaked key) and never prints one. Each resolver checks each
 RPC's `eth_chainId` once against its key: a Sepolia URL under `eip155:1` is
-`rpc_unavailable`, not a mainnet answer. `timeout` (default 10 s) is a hard budget
-for the WHOLE call, in `_sync` too (bodies are read in chunks against the
-deadline). The cache is an LRU with a positive TTL (300 s) and a shorter negative
+`rpc_unavailable`, not a mainnet answer. `timeout` (default 10 s) is a budget for
+the WHOLE call: async cuts with `asyncio.wait_for`; sync caps every socket
+operation of the default transport to what is left (dripping headers included).
+Not bounded in sync: DNS resolution, and a `transport=` you pass yourself. The
+names clients read nothing from the environment — no proxies either. The cache is an LRU with a positive TTL (300 s) and a shorter negative
 TTL (60 s), never stores `rpc_unavailable`, and its key is the question, not the
 resolver's configuration — share one only between resolvers configured alike.
 
@@ -770,7 +772,7 @@ INC-2026-08-26).
 
 ```bash
 python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
-.venv/Scripts/python -m pytest        # 476 tests, ~18 s, NO NETWORK (2026-09-24)
+.venv/Scripts/python -m pytest        # 487 tests, ~20 s, NO NETWORK (2026-09-24)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python examples/smoke_gratis.py   # this one DOES hit the live API

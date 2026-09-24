@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 476 pasan, 17-18 s, SIN RED (re-medido 2026-09-24 en py3.13 y py3.9 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR #6 de `names`; eran 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 487 pasan, 19-22 s, SIN RED (re-medido 2026-09-24 en py3.13 y py3.9 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 3 del PR #6 de `names` — los de `test_names_ronda3.py` usan un servidor local en 127.0.0.1; eran 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -205,25 +205,40 @@ cada módulo de `names/`):
 **Ronda 2 del PR #6** (refutación sobre `c9d67c6`: 0 P0, 2 P1, 5 P2; cada
 hallazgo se verificó contra el código antes de tocarlo):
 
-12. 🔴 **El timeout es duro también en sync.** El motor sync lee TODO cuerpo
-    —las respuestas JSON-RPC incluidas— por chunks y mira el plazo después de
-    cada chunk y antes de cada redirect. Antes el docstring decía «un servidor que
-    gotea puede estirar una lectura» y el refutador lo midió: presupuesto 1,0 s,
-    6,36 s. Nombrar un límite no es acotarlo. Lo que queda sin acotar, escrito:
-    una lectura de socket ya bloqueada (su propio timeout es lo que quedaba del
-    presupuesto al empezar esa request). Mutación AM.
+12. 🔴 **El timeout sync se acota en el SOCKET** (`names/_deadline.py`): el
+    transporte por defecto del resolver (httpcore con un backend propio, API
+    pública) le da a cada connect, lectura, escritura y handshake TLS
+    `min(su timeout, lo que queda)`. Encima, cada cuerpo se lee por chunks contra
+    el reloj, no se sigue un redirect pasado el plazo, y a los gateways se les pide
+    `Accept-Encoding: identity` (un gzip se rechaza; el tope cuenta bytes del
+    cable). Medido con un servidor local, presupuesto 1,0 s: headers goteando,
+    11,43 s → 1,00 s. **Sin acotar, escrito**: el DNS (`getaddrinfo` no tiene
+    timeout) y un `transport=` del consumidor (sólo le aplican los chequeos de
+    chunk y redirect). Los clientes de `names` usan `trust_env=False`: no leen
+    proxies del entorno (la regla de este SDK). Mutaciones AM (chunk), AV
+    (socket), AW (identity) y AY (redirect).
+    ⚠️ **Corregido dos veces, las dos escritas**: la ronda 2 dijo «el motor sync
+    lee por chunks… el peor exceso es UNA lectura», y la ronda 3 midió que era
+    falso — httpx espera los headers completos antes de que exista un chunk, y
+    httpcore fija el read timeout una vez por request: headers goteando 15,2 s y
+    un header gzip (FCOMMENT) goteando 10,15 s. Dos veces un texto afirmó una
+    cota que el código no tenía.
 13. 🔴 **El RPC se verifica contra su cadena**: un `eth_chainId` por cadena y por
     resolver antes del primer `eth_call`; si no coincide con la clave CAIP-2 es
     `rpc_unavailable`, nombrando la cadena servida y nunca la URL. Medido por el
     refutador: el RPC de Sepolia bajo `eip155:1` resolvía con
     `verified_onchain=True`. Las fixtures NO lo graban: `names_replay.py` lo
-    contesta desde la clave (sintético, rotulado). Mutación AO.
+    contesta desde la clave (sintético, rotulado). Mutaciones AO (sync) y AX
+    (async; no tenía test hasta la ronda 3).
 14. **Un `Reverted` en el reverse es `rpc_unavailable`** (el registro de ENS no
     revierte en `resolver()`: es un RPC que revierte todo), con el orden estricto
     del punto 8. Antes escapaba como excepción privada. Mutación AN.
 15. **Cinco TLD son a la vez de UNS y de ICANN** (`UNS_ICANN_COLLISIONS`:
     graphics, gripe, guide, shiksha, travel; IANA versión 2026092400). No se elige
     en silencio: `unsupported_system` con la colisión en `detail`. Mutación AP.
+    Y la FORMA se valida antes (regla UNS o ENSIP-15): `a b.travel` y `x..travel`
+    son `invalid_name`, y un nombre en ancho completo sale en su forma normal,
+    nunca crudo (ronda 3). Mutación AZ.
 16. **`namehash` y `labelhash` públicos NORMALIZAN** (ENSIP-15) antes de
     hashear; los internos de `_hash.py` no, porque sólo ven nombres ya
     normalizados. Para que EM borre su copia (DUP-04). Mutación AQ.
@@ -379,7 +394,7 @@ docstrings:
 | **Y.** 🔴 sacar el guard de la dirección cero en `names/_ens.py::forward` — 2026-09-24 | **3 rojos**: la grabación de `default.reverse` en sync y en async, y `test_un_resolver_real_que_contesta_la_direccion_cero_da_not_found` |
 | **Z.** 🔴 sacar la comparación `pointed != address` de `_ens.confirm` | **1 rojo**: `test_un_nombre_que_apunta_a_OTRA_direccion_es_reverse_mismatch` — con el forward GRABADO de `0xultravioleta.eth` confrontado con la dirección de Jesse |
 | **AA.** 🔴 que `parse_name_resolution` herede `verified_onchain` del cuerpo | **2 rojos**: `test_la_api_http_devuelve_verified_onchain_False_aunque_el_servidor_diga_True` y `test_un_destino_de_pago_exige_verified_onchain` |
-| **AB.** cachear los errores que no son respuesta de la cadena (`rpc_unavailable`…) | **4 rojos**: los 3 del parametrizado de `NameCache` y `test_un_fallo_de_transporte_no_se_cachea_y_la_siguiente_pregunta_de_nuevo`. Re-medido en la ronda 2: **9 rojos** (se suman los que miran la caché vacía tras un `rpc_unavailable`) |
+| **AB.** cachear los errores que no son respuesta de la cadena (`rpc_unavailable`…) | **4 rojos**: los 3 del parametrizado de `NameCache` y `test_un_fallo_de_transporte_no_se_cachea_y_la_siguiente_pregunta_de_nuevo`. Re-medido en la ronda 2: **9 rojos** (se suman los que miran la caché vacía tras un `rpc_unavailable`); en la ronda 3: **10** |
 | **AC.** saltear `check_expiry` antes de resolver | **24 rojos**: toda grabación ENS/Basenames deja de coincidir con lo que se pidió en vivo — el vencimiento es la primera lectura. Re-medido en la ronda 2: **25** |
 | **AD.** saltear el chequeo ENSIP-15 del nombre reclamado en `confirm` | **3 rojos**: la grabación del hook de CoW en sync y async, y `test_un_reverse_no_normalizado_es_reverse_mismatch` |
 | **AE.** normalizar con `typed.lower()` en vez de ENSIP-15 (el bug de EM) | **6 rojos**: 5 nombres inválidos que pasaban y `test_la_normalizacion_es_ENSIP15_y_no_lower` |
@@ -392,13 +407,18 @@ docstrings:
 | **AL.** sacar el chequeo de forma normal del reverse de UNS/Avvy | **1 rojo**: `Evil.crypto`, que apunta de vuelta a la dirección y aun así no se muestra. Antes: 448 verdes |
 | **AM.** 🔴 no mirar el plazo entre chunks (`_proto._read_capped`) | **2 rojos**: el gateway CCIP que gotea (grabación real de `jesse.base.eth` con el goteo sintético) y el RPC que gotea |
 | **AN.** que el reverse no atrape `Reverted` | **2 rojos**: el RPC que revierte todo, sync y async (levantaba una excepción privada) |
-| **AO.** 🔴 no verificar `eth_chainId` contra la clave CAIP-2 | **1 rojo**: `test_un_RPC_de_otra_cadena_bajo_la_clave_de_mainnet_es_rpc_unavailable` |
-| **AP.** mandar las cinco colisiones ICANN/UNS a UNS | **5 rojos**: una por TLD |
+| **AO.** 🔴 no verificar `eth_chainId` contra la clave CAIP-2 | **1 rojo**: `test_un_RPC_de_otra_cadena_bajo_la_clave_de_mainnet_es_rpc_unavailable`. En la ronda 3 (el test pasó a sync + async): **2** |
+| **AP.** mandar las cinco colisiones ICANN/UNS a UNS | **5 rojos**: una por TLD. En la ronda 3: **6** (se suma el de ancho completo) |
 | **AQ.** `namehash` público sin normalizar | **1 rojo**: `test_namehash_publico_normaliza_antes_de_hashear` |
 | **AR.** convertir un error JSON-RPC (`-32005 limit exceeded`) en `Reverted` | **1 rojo**: pasaba a `not_found` y se cacheaba. Antes: 448 verdes |
 | **AS.** seguir un `OffchainLookup` cuyo sender no es el resolver | **1 rojo**: el doble del gateway registra que SÍ se le pidió |
 | **AT.** que un 4xx del gateway pase a la URL siguiente | **2 rojos**: 404 y 403 |
 | **AU.** que `require_onchain_address` acepte la dirección cero | **1 rojo**: un `NameResolution` armado a mano con `0x000…0` |
+| **AV.** 🔴 que el backend de `_deadline.py` no acote el socket al plazo — ronda 3 | **4 rojos**: el RPC local que gotea headers y el que gotea un gzip (FCOMMENT), el gateway local que gotea headers, y el tope del backend. Servidor REAL en 127.0.0.1: sin la cota, headers goteando = 11,43 s |
+| **AW.** leer el cuerpo gzip de un gateway (sacar `_refuse_encoded`) | **1 rojo**: `test_un_gateway_pide_identity_y_un_cuerpo_gzip_no_se_lee` |
+| **AX.** 🔴 sacar el `eth_chainId` del motor ASYNC | **1 rojo**: el caso `[async]` del test de Sepolia. Antes de la ronda 3: 476 verdes |
+| **AY.** seguir un redirect pasado el plazo | **1 rojo**: `test_un_redirect_no_se_sigue_pasado_el_presupuesto`. Antes: 476 verdes |
+| **AZ.** decidir la colisión antes que la forma | **4 rojos**: `a b.travel`, `x..travel`, `a_b.guide` y el de ancho completo, que salía crudo de `normalize()` |
 
 **M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
 KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un

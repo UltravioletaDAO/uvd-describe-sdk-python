@@ -35,6 +35,7 @@ from ..version import default_user_agent
 from . import _avvy, _ens, _uns
 from ._avatar import NoAvatar, nft_image, nft_reference, plain_url
 from ._cache import NameCache
+from ._deadline import DeadlineTransport
 from ._hash import ZERO_ADDRESS, is_hex_address, to_checksum_address
 from ._normalize import ENS_FAMILY, FAMILY_OF, Classified, InvalidNameError, classify
 from ._proto import (
@@ -186,10 +187,15 @@ class NameResolver:
     def _sync_client(self) -> httpx.Client:
         with self._lock:
             if self._client is None:
+                # Default transport: every socket operation capped to the call's
+                # deadline (`_deadline.py`). `trust_env=False` on both clients:
+                # nothing is read from the environment — not even proxies, which
+                # would otherwise mount httpx's own transport over this one.
                 self._client = httpx.Client(
                     headers={"User-Agent": self._user_agent},
-                    transport=self._transport,
+                    transport=self._transport or DeadlineTransport(),
                     follow_redirects=False,
+                    trust_env=False,
                 )
             return self._client
 
@@ -200,6 +206,7 @@ class NameResolver:
                     headers={"User-Agent": self._user_agent},
                     transport=self._async_transport,
                     follow_redirects=False,
+                    trust_env=False,
                 )
             return self._aclient
 

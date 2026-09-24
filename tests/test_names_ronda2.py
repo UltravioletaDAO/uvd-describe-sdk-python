@@ -265,9 +265,14 @@ def test_reverse_con_un_RPC_que_revierte_todo_es_rpc_unavailable(asincrono: bool
 # ---------------------------------------------------------------------------
 
 
-def test_un_RPC_de_otra_cadena_bajo_la_clave_de_mainnet_es_rpc_unavailable() -> None:
+@pytest.mark.parametrize("asincrono", [False, True], ids=["sync", "async"])
+def test_un_RPC_de_otra_cadena_bajo_la_clave_de_mainnet_es_rpc_unavailable(
+    asincrono: bool,
+) -> None:
     """Medido por el refutador: el RPC público de Sepolia bajo `eip155:1`
-    resolvía `vitalik.eth` con `verified_onchain=True`."""
+    resolvía `vitalik.eth` con `verified_onchain=True`. Parametrizado en la
+    ronda 3: el chequeo del motor ASYNC no tenía test (borrarlo dejaba 476
+    verdes)."""
     eth_calls: List[str] = []
 
     def sepolia(request: httpx.Request) -> httpx.Response:
@@ -277,8 +282,18 @@ def test_un_RPC_de_otra_cadena_bajo_la_clave_de_mainnet_es_rpc_unavailable() -> 
         eth_calls.append(cuerpo["method"])
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x"})
 
-    with NameResolver(rpc=FAKE_RPC, transport=httpx.MockTransport(sepolia)) as resolver:
-        result = resolver.resolve_sync("ultravioletadao.eth")
+    transporte = httpx.MockTransport(sepolia)
+    resolver = NameResolver(rpc=FAKE_RPC, transport=transporte, async_transport=transporte)
+    if asincrono:
+
+        async def correr() -> NameResolution:
+            async with resolver as r:
+                return await r.resolve("ultravioletadao.eth")
+
+        result = asyncio.run(correr())
+    else:
+        with resolver:
+            result = resolver.resolve_sync("ultravioletadao.eth")
     assert result.error == "rpc_unavailable"
     assert result.verified_onchain is False
     assert "eip155:1" in (result.detail or "") and "eip155:11155111" in (result.detail or "")

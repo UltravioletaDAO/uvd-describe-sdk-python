@@ -96,6 +96,14 @@ def _ensip15(name: str) -> str:
     return normalized
 
 
+def _ensip15_quiet(name: str) -> Optional[str]:
+    """The ENSIP-15 form, or `None` if ENSIP-15 refuses it."""
+    try:
+        return _ensip15(name)
+    except InvalidNameError:
+        return None
+
+
 def namehash(name: str) -> bytes:
     """EIP-137 namehash of `name`, NORMALIZED with ENSIP-15 first.
 
@@ -357,14 +365,24 @@ def _classify_other(system: str, low: str) -> Classified:
     if system == NameSystem.SNS:
         return Classified(system, low)
     if system == NameSystem.UNSTOPPABLE:
+        uns_form = bool(_UNS_NAME.fullmatch(low)) and "" not in low.split(".")
         tld = low.rsplit(".", 1)[-1]
         if tld in UNS_ICANN_COLLISIONS:
-            # Two namespaces claim it: no system, and no silent choice.
-            # The name itself is well formed, so `normalized` is kept.
+            # Two namespaces claim it: no system, and no silent choice. But the
+            # FORM is checked first (round 3 of PR #6): `a b.travel` and
+            # `x..travel` used to come back from `normalize()` as normalized.
+            # The form is valid if either namespace would accept it — UNS's rule
+            # or ENSIP-15 (the DNS side is read through ENS) — and the name kept
+            # is that normal form, never the raw input.
+            form = low if uns_form else _ensip15_quiet(low)
+            if form is None:
+                return Classified(
+                    None, None, NameErrorCode.INVALID_NAME, "not a valid name in either namespace"
+                )
             return Classified(
-                None, low, NameErrorCode.UNSUPPORTED_SYSTEM, _COLLISION_DETAIL.format(tld=tld)
+                None, form, NameErrorCode.UNSUPPORTED_SYSTEM, _COLLISION_DETAIL.format(tld=tld)
             )
-        if not _UNS_NAME.fullmatch(low) or "" in low.split("."):
+        if not uns_form:
             return Classified(
                 system, None, NameErrorCode.INVALID_NAME, "Unstoppable names are [a-z0-9-] labels"
             )

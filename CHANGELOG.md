@@ -13,7 +13,9 @@ Changes merged since the last release accumulate here, each with its label
 ### [feature] `uvd_describe_sdk.names` — the one name resolver of the stack
 
 Name → address and address → name, read on-chain, behind a new extra:
-`pip install "uvd-describe-sdk[names]"` (`ens-normalize`, `pycryptodome`). The base
+`pip install "uvd-describe-sdk[names]"` (`ens-normalize`, `pycryptodome`, and
+`httpcore>=1.0,<2`, which httpx already installs and the sync deadline imports
+directly). The base
 install still depends on `httpx` only.
 
 - **`NameResolver(rpc=..., systems=..., cache=..., timeout=...)`** with `resolve`,
@@ -52,9 +54,16 @@ install still depends on `httpx` only.
   `verified_onchain=False`.
 - CCIP gateway and NFT metadata URLs go through a guard: `https://` only, no
   credentials, no `localhost`, no IP literal outside the global address space.
-- The `timeout` is hard in the `_sync` variants too: every body (JSON-RPC answers
-  included) is read in chunks and cut at the deadline, and no redirect is followed
-  past it. The async variants cut with `asyncio.wait_for`.
+- The `timeout` bounds the whole call. Async: `asyncio.wait_for`. Sync: the
+  resolver's default transport caps every connect, read, write and TLS handshake
+  to what is left of the budget (a server dripping its headers is cut), bodies are
+  read in chunks against the clock, and no redirect is followed past it. Not
+  bounded in sync: DNS resolution, and a `transport=` the consumer passes (only
+  the chunk and redirect checks apply to it). The names clients read nothing from
+  the environment, proxies included.
+- Gateway and NFT metadata requests send `Accept-Encoding: identity`; a body in
+  any other encoding is refused (`rpc_unavailable`), and the size cap counts wire
+  bytes.
 - Each resolver checks every RPC's `eth_chainId` once against its CAIP-2 key: an
   RPC that serves another chain is `rpc_unavailable`, naming the chain it serves.
 - `reverse()` answers `rpc_unavailable` (never raises) when a contract that does

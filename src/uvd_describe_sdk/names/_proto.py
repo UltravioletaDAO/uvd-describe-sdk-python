@@ -19,20 +19,32 @@ that walks four systems and two CCIP hops gets one deadline. Before each request
 the engine computes what is left and gives the request exactly that; past the
 deadline the next request fails at once. karma-hello measured why this matters
 (`domain_resolver.py:225-232`): web3's ENS call blocks without an upper bound.
-The async engine enforces it with `asyncio.wait_for`, which is truly hard. The
-sync engine reads every body — JSON-RPC answers included — in chunks and checks
-the deadline after each chunk and before each redirect, so a server that drips
-one byte at a time is cut as soon as the budget is spent. What the sync engine
-cannot do without threads is interrupt a socket read already blocked: the worst
-overshoot is ONE read, and that read's own timeout is the budget that was left
-when its request started.
+The async engine enforces it with `asyncio.wait_for`, which is truly hard.
 
-⚠️ Corrected 2026-09-24 (round 2 of PR #6), left written: this paragraph used to
-say the sync engine only passed the remainder as httpx's timeout and that "a
-server that drips one byte at a time could stretch a single read". The refuter
-measured what that meant: a 1.0 s budget stretched to 6.36 s against a real
-httpx transport, bounded only by the 2 MB body cap. Naming a limit is not the
-same as bounding it; now it is bounded.
+The sync engine enforces it at the SOCKET, through the transport the resolver
+uses by default (`_deadline.py`): every connect, read, write and TLS handshake
+gets `min(its timeout, what is left)` and fails once nothing is left — the status
+line, the headers and a compressed body included. On top of that it reads every
+body in chunks, checks the clock after each chunk and before each redirect, and
+asks gateways for `Accept-Encoding: identity` (a gzip body is refused, and the
+size cap counts wire bytes). Measured on a local server with a 1.0 s budget:
+headers dripping 1 byte every 0.3 s, 11.43 s before → 1.00 s after.
+
+What is NOT bounded in sync, stated: DNS resolution (`getaddrinfo` takes no
+timeout), and a `transport=` passed by the consumer — its sockets are its own,
+and only the chunk and redirect checks apply to it.
+
+⚠️ Corrected twice on 2026-09-24, both left written. Round 2 of PR #6: this
+paragraph said the sync engine only passed the remainder as httpx's timeout and
+that "a server that drips one byte at a time could stretch a single read"
+(measured by the refuter: 1.0 s → 6.36 s). Round 2 then said the chunk checks
+made the sync timeout hard, "the worst overshoot is ONE read". Round 3 measured
+that this was still false: httpx waits for the complete headers before any
+chunk exists, and httpcore sets the read timeout once per request — headers
+dripping 1 byte every 0.5 s took 15.2 s, and a dripping gzip header (FCOMMENT)
+10.15 s, with no decoded byte ever reaching the clock check or the size cap.
+Twice a text claimed a bound the code did not have; the bound now lives in the
+socket, and the tests that pin it use a real local server.
 
 THE RPC IS CHECKED AGAINST ITS CHAIN
 ------------------------------------
@@ -61,6 +73,7 @@ import ipaddress
 import json
 import re
 import time
+import typing
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -80,6 +93,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from . import _abi
+from ._deadline import deadline_scope
 from ._hash import selector
 
 #: CAIP-2 ids of the chains the naming systems live on. Protocol facts of each
@@ -302,7 +316,37 @@ def check_url(url: str) -> None:
 #: storage proofs are kilobytes; this leaves two orders of magnitude of room.
 MAX_BODY_BYTES = 2_000_000
 MAX_REDIRECTS = 3
-_JSON = {"Content-Type": "application/json", "Accept": "application/json"}
+#: Headers of a gateway / metadata request. `Accept-Encoding: identity` because a
+#: compressed body is read in DECODED bytes: the round-3 verifier dripped a gzip
+#: header with FLG=FCOMMENT and zlib produced nothing — no size cap, no clock
+#: check, 10.15 s on a 1.0 s budget. Those bodies are JSON of a few KB.
+_FETCH = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Accept-Encoding": "identity",
+}
+
+
+def _raw_chunks(response: httpx.Response) -> Iterable[bytes]:
+    """The body as it came off the wire. A body an in-memory transport handed over
+    whole (`is_stream_consumed`) is used as is: with identity enforced, raw and
+    decoded are the same bytes."""
+    return [response.content] if response.is_stream_consumed else response.iter_raw()
+
+
+async def _araw_chunks(response: httpx.Response) -> typing.AsyncIterator[bytes]:
+    if response.is_stream_consumed:
+        yield response.content
+        return
+    async for chunk in response.aiter_raw():
+        yield chunk
+
+
+def _refuse_encoded(response: httpx.Response, host: Optional[str]) -> None:
+    """A gateway that ignores `Accept-Encoding: identity` is not read at all."""
+    encoding = response.headers.get("content-encoding", "identity").strip().lower()
+    if encoding not in ("", "identity"):
+        raise Unavailable(f"{host} sent a {encoding}-encoded body; only identity is read")
 
 
 def _redirect_target(response: httpx.Response, url: str) -> Optional[str]:
@@ -371,20 +415,24 @@ def run_sync(
     verified = verified_chains if verified_chains is not None else set()
     value: Any = None
     exc: Optional[BaseException] = None
-    while True:
-        try:
-            request = gen.throw(exc) if exc is not None else gen.send(value)
-        except StopIteration as stop:
-            result: T = stop.value
-            return result
-        value, exc = None, None
-        if time.monotonic() >= deadline:
-            exc = Unavailable(f"the {timeout:g}s budget of this call ran out")
-            continue
-        try:
-            value = _do_sync(request, rpc, client, deadline, verified)
-        except (Unavailable, Reverted) as failure:
-            exc = failure
+    # Every socket operation of the default transport is capped to `deadline`
+    # (`_deadline.py`). The checks below stay: they are what a consumer's own
+    # `transport=` gets.
+    with deadline_scope(deadline):
+        while True:
+            try:
+                request = gen.throw(exc) if exc is not None else gen.send(value)
+            except StopIteration as stop:
+                result: T = stop.value
+                return result
+            value, exc = None, None
+            if time.monotonic() >= deadline:
+                exc = Unavailable(f"the {timeout:g}s budget of this call ran out")
+                continue
+            try:
+                value = _do_sync(request, rpc, client, deadline, verified)
+            except (Unavailable, Reverted) as failure:
+                exc = failure
 
 
 def _post_rpc_sync(
@@ -430,13 +478,14 @@ def _do_sync(
         host = urlsplit(url).hostname
         try:
             with client.stream(
-                method, url, content=request.body, headers=_JSON, timeout=_left(deadline)
+                method, url, content=request.body, headers=_FETCH, timeout=_left(deadline)
             ) as response:
                 target = _redirect_target(response, url)
                 if target is not None:
                     url = target
                     continue
-                body = _read_capped(response.iter_bytes(), deadline, str(host))
+                _refuse_encoded(response, host)
+                body = _read_capped(_raw_chunks(response), deadline, str(host))
                 return FetchResponse(response.status_code, body)
         except httpx.TimeoutException:
             raise Unavailable(f"{host} timed out") from None
@@ -525,15 +574,16 @@ async def _do_async(
         method = "GET" if request.body is None else "POST"
         try:
             async with client.stream(
-                method, url, content=request.body, headers=_JSON, timeout=limit
+                method, url, content=request.body, headers=_FETCH, timeout=limit
             ) as response:
                 target = _redirect_target(response, url)
                 if target is not None:
                     url = target
                     continue
+                _refuse_encoded(response, urlsplit(url).hostname)
                 chunks = []
                 total = 0
-                async for chunk in response.aiter_bytes():
+                async for chunk in _araw_chunks(response):
                     total += len(chunk)
                     if total > MAX_BODY_BYTES:
                         raise Unavailable(
