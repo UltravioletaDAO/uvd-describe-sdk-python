@@ -35,6 +35,25 @@ FAKE_RPC: Dict[str, str] = {
 _CHAIN_OF = {url: chain for chain, url in FAKE_RPC.items()}
 
 
+def answer_chain_id(request: httpx.Request) -> Optional[httpx.Response]:
+    """🔴 SINTÉTICO: el `eth_chainId` que el motor pide antes del primer
+    `eth_call` de cada cadena (ronda 2 del PR #6).
+
+    Las fixtures se grabaron antes de ese chequeo y el script de grabación no lo
+    graba: se contesta desde la clave CAIP-2 de la URL de mentira, que es
+    exactamente lo que un RPC honesto de esa cadena diría. `None` si la request
+    no es un `eth_chainId` a una URL de `FAKE_RPC`.
+    """
+    chain = _CHAIN_OF.get(str(request.url))
+    if chain is None or not request.content:
+        return None
+    if json.loads(request.content).get("method") != "eth_chainId":
+        return None
+    return httpx.Response(
+        200, json={"jsonrpc": "2.0", "id": 1, "result": hex(int(chain.split(":")[1]))}
+    )
+
+
 def load(name: str) -> Dict[str, Any]:
     data: Dict[str, Any] = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
     return data
@@ -50,8 +69,14 @@ class Replay:
     def __init__(self, exchanges: List[Dict[str, Any]]) -> None:
         self.exchanges = exchanges
         self.used = 0
+        #: Cuántos `eth_chainId` contestó (sintéticos: ver `answer_chain_id`).
+        self.chain_ids = 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
+        chain_id = answer_chain_id(request)
+        if chain_id is not None:
+            self.chain_ids += 1
+            return chain_id
         position = self.used + 1
         assert self.used < len(self.exchanges), (
             f"la request #{position} no está en la grabación: {request.method} {request.url}"

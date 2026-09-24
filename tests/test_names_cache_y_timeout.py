@@ -18,7 +18,7 @@ import pytest
 
 from uvd_describe_sdk.names import NameCache, NameResolution, NameResolver
 
-from .names_replay import FAKE_RPC, Replay, load, resolver_for
+from .names_replay import FAKE_RPC, Replay, answer_chain_id, load, resolver_for
 
 
 def _resultado(error: object = None) -> NameResolution:
@@ -137,6 +137,11 @@ def test_sync_pasado_el_presupuesto_no_sale_otra_request() -> None:
     salidas: List[str] = []
 
     def lento(request: httpx.Request) -> httpx.Response:
+        # El `eth_chainId` del motor se contesta en el acto: el test mide el
+        # presupuesto sobre los `eth_call`, no sobre el chequeo de cadena.
+        chain_id = answer_chain_id(request)
+        if chain_id is not None:
+            return chain_id
         salidas.append(str(request.url))
         time.sleep(0.3)
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x" + "7f" * 32})

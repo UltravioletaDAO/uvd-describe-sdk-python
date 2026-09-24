@@ -38,6 +38,8 @@ from typing import Dict, FrozenSet, Optional
 from ens_normalize import DisallowedSequence, ens_normalize
 
 from ..name_models import NameErrorCode, NameFamily, NameSystem
+from ._hash import labelhash as _raw_labelhash
+from ._hash import namehash as _raw_namehash
 from ._proto import BASE, POLYGON
 
 #: When the UNS table below was read, whole, from
@@ -45,6 +47,74 @@ from ._proto import BASE, POLYGON
 #: resolution library downloads at runtime). A figure is read live or carries a
 #: date; a TLD that UD adds later resolves as `ens-dns` until this is refreshed.
 UNS_TLDS_MEASURED_AT = "2026-09-24"
+
+#: When the ICANN list below was read: IANA's `tlds-alpha-by-domain.txt`,
+#: "Version 2026092400", 1438 TLDs.
+ICANN_TLDS_MEASURED_AT = "2026-09-24"
+
+#: 🔴 UNS top-level domains that are ALSO ICANN top-level domains (the
+#: intersection of the UNS table and IANA's list on the dates above). A name
+#: under them is two different names in two namespaces: the DNS one (importable
+#: into ENS through DNSSEC) and the UNS one, with different owners. This SDK does
+#: not pick one in silence — they answer `unsupported_system` with the collision
+#: in `detail`. Found by the refuter of PR #6, round 2; re-measured before
+#: writing it here.
+UNS_ICANN_COLLISIONS: FrozenSet[str] = frozenset(
+    {"graphics", "gripe", "guide", "shiksha", "travel"}
+)
+
+_COLLISION_DETAIL = (
+    "namespace collision: .{tld} is both an ICANN top-level domain (DNS, importable "
+    "into ENS) and an Unstoppable Domains TLD, with different owners; this SDK does "
+    "not pick one in silence"
+)
+
+
+class InvalidNameError(ValueError):
+    """`normalize()`, `namehash()` or `labelhash()` refused the input.
+
+    `code` is always `invalid_name`.
+    """
+
+    #: A class constant that interpolates nothing (same guard as `errors.py`).
+    recovery = (
+        "Show the user the name is not valid for its system (ENSIP-15 for "
+        "ENS, Basenames and DNS names). Do not retry with a variant: a name that "
+        "does not normalize is not the name the user owns."
+    )
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = NameErrorCode.INVALID_NAME
+
+
+def _ensip15(name: str) -> str:
+    try:
+        normalized: str = ens_normalize(name)
+    except DisallowedSequence as exc:
+        raise InvalidNameError(f"ENSIP-15: {exc.code}") from None
+    return normalized
+
+
+def namehash(name: str) -> bytes:
+    """EIP-137 namehash of `name`, NORMALIZED with ENSIP-15 first.
+
+    The public one normalizes; the internal `_hash.namehash` does not (it only
+    ever sees names this module already normalized). A consumer deleting its
+    own copy — Execution Market's lower-cased (`client.py:147-158`) — gets the
+    node ENS itself uses, and `InvalidNameError` for a name ENS refuses.
+    `namehash("")` is the root node, 32 zero bytes.
+    """
+    return _raw_namehash(_ensip15(name) if name else "")
+
+
+def labelhash(label: str) -> bytes:
+    """keccak-256 of ONE label, NORMALIZED with ENSIP-15 first."""
+    normalized = _ensip15(label)
+    if not normalized or "." in normalized:
+        raise InvalidNameError("a label is one non-empty segment, without dots")
+    return _raw_labelhash(normalized)
+
 
 #: UNS top-level domains whose records live on Polygon (and L1).
 _UNS_ON_POLYGON: FrozenSet[str] = frozenset(
@@ -287,6 +357,13 @@ def _classify_other(system: str, low: str) -> Classified:
     if system == NameSystem.SNS:
         return Classified(system, low)
     if system == NameSystem.UNSTOPPABLE:
+        tld = low.rsplit(".", 1)[-1]
+        if tld in UNS_ICANN_COLLISIONS:
+            # Two namespaces claim it: no system, and no silent choice.
+            # The name itself is well formed, so `normalized` is kept.
+            return Classified(
+                None, low, NameErrorCode.UNSUPPORTED_SYSTEM, _COLLISION_DETAIL.format(tld=tld)
+            )
         if not _UNS_NAME.fullmatch(low) or "" in low.split("."):
             return Classified(
                 system, None, NameErrorCode.INVALID_NAME, "Unstoppable names are [a-z0-9-] labels"

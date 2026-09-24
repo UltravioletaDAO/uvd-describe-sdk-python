@@ -2,7 +2,7 @@
 
     .venv/Scripts/python scripts/grabar_fixtures_names.py            # graba todo
     .venv/Scripts/python scripts/grabar_fixtures_names.py --probar resolve jesse.base.eth
-    .venv/Scripts/python scripts/grabar_fixtures_names.py --buscar-mismatch
+    .venv/Scripts/python scripts/grabar_fixtures_names.py --solo resolve_jesse_base_eth
 
 Por qué existe: una fixture escrita a mano testea contra la idea de quien la
 escribió; una grabada testea contra lo que la cadena contesta. Cada archivo de
@@ -138,7 +138,12 @@ class Grabadora(httpx.BaseTransport):
             raise Detenido(f"429 de {request.url.host}")
         url = str(request.url)
         chain = CADENA_DE_URL.get(url)
-        if chain is not None:
+        if chain is not None and json.loads(request.content).get("method") == "eth_chainId":
+            # El chequeo de cadena del motor (ronda 2 del PR #6) NO se graba: el
+            # reproductor lo contesta desde la clave CAIP-2 de la fixture. Así
+            # las fixtures siguen siendo sólo los `eth_call` del resolver.
+            pass
+        elif chain is not None:
             cuerpo = json.loads(request.content)
             llamada = cuerpo["params"][0]
             self.intercambios.append(

@@ -20,9 +20,27 @@ the engine computes what is left and gives the request exactly that; past the
 deadline the next request fails at once. karma-hello measured why this matters
 (`domain_resolver.py:225-232`): web3's ENS call blocks without an upper bound.
 The async engine enforces it with `asyncio.wait_for`, which is truly hard. The
-sync engine passes the remainder as httpx's timeout, which bounds connect and
-each read — a server that drips one byte at a time could stretch a single read;
-that limit is stated here instead of being papered over.
+sync engine reads every body — JSON-RPC answers included — in chunks and checks
+the deadline after each chunk and before each redirect, so a server that drips
+one byte at a time is cut as soon as the budget is spent. What the sync engine
+cannot do without threads is interrupt a socket read already blocked: the worst
+overshoot is ONE read, and that read's own timeout is the budget that was left
+when its request started.
+
+⚠️ Corrected 2026-09-24 (round 2 of PR #6), left written: this paragraph used to
+say the sync engine only passed the remainder as httpx's timeout and that "a
+server that drips one byte at a time could stretch a single read". The refuter
+measured what that meant: a 1.0 s budget stretched to 6.36 s against a real
+httpx transport, bounded only by the 2 MB body cap. Naming a limit is not the
+same as bounding it; now it is bounded.
+
+THE RPC IS CHECKED AGAINST ITS CHAIN
+------------------------------------
+`rpc={"eip155:1": url}` is a claim by the consumer. Before the first `eth_call`
+on a chain, each resolver asks that RPC `eth_chainId` once; if it serves another
+chain the answer is `rpc_unavailable`, naming the chain it serves (never the
+URL). Measured by the refuter: Sepolia's public RPC under the key `eip155:1`
+resolved `vitalik.eth` with `verified_onchain=True`.
 
 WHAT THE ENGINES REFUSE TO FETCH
 --------------------------------
@@ -44,7 +62,19 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List, Mapping, Optional, TypeVar, Union
+from typing import (
+    Any,
+    Dict,
+    Generator,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+    TypeVar,
+    Union,
+)
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -283,15 +313,62 @@ def _redirect_target(response: httpx.Response, url: str) -> Optional[str]:
     return None
 
 
+_CHAIN_ID_BODY: Dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}
+
+
+def chain_number(chain: str) -> Optional[int]:
+    """The EIP-155 chain id a CAIP-2 key promises, or `None` if it is not `eip155`."""
+    namespace, _, reference = chain.partition(":")
+    return int(reference) if namespace == "eip155" and reference.isdigit() else None
+
+
+def check_served_chain(chain: str, status: int, payload: Any) -> None:
+    """`Unavailable` unless the RPC's `eth_chainId` answer is the chain of its key."""
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if status != 200 or not isinstance(result, str):
+        raise Unavailable(f"the {chain} RPC did not answer eth_chainId")
+    try:
+        served = int(result, 16)
+    except ValueError:
+        raise Unavailable(f"the {chain} RPC answered an eth_chainId that is not hex") from None
+    if served != chain_number(chain):
+        # The chain it serves, never its URL: the URL may carry a key.
+        raise Unavailable(f"the RPC configured for {chain} serves eip155:{served}")
+
+
+def _read_capped(chunks: Iterable[bytes], deadline: float, what: str) -> bytes:
+    """A body, read chunk by chunk: capped in size and cut at the deadline."""
+    parts: List[bytes] = []
+    total = 0
+    for chunk in chunks:
+        total += len(chunk)
+        if total > MAX_BODY_BYTES:
+            raise Unavailable(f"{what} sent more than {MAX_BODY_BYTES} bytes")
+        parts.append(chunk)
+        if time.monotonic() > deadline:
+            raise Unavailable(f"{what} was still sending when the budget of this call ran out")
+    return b"".join(parts)
+
+
+def _left(deadline: float) -> httpx.Timeout:
+    return httpx.Timeout(max(deadline - time.monotonic(), 0.001))
+
+
 def run_sync(
     gen: Step[T],
     *,
     rpc: Mapping[str, str],
     client: httpx.Client,
     timeout: float,
+    verified_chains: Optional[Set[str]] = None,
 ) -> T:
-    """Drive a resolution generator to its end over a blocking client."""
+    """Drive a resolution generator to its end over a blocking client.
+
+    `verified_chains` is the set of chains whose RPC already answered the right
+    `eth_chainId`; a resolver passes its own so the check runs once per chain.
+    """
     deadline = time.monotonic() + timeout
+    verified = verified_chains if verified_chains is not None else set()
     value: Any = None
     exc: Optional[BaseException] = None
     while True:
@@ -301,66 +378,70 @@ def run_sync(
             result: T = stop.value
             return result
         value, exc = None, None
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if time.monotonic() >= deadline:
             exc = Unavailable(f"the {timeout:g}s budget of this call ran out")
             continue
         try:
-            value = _do_sync(request, rpc, client, remaining)
+            value = _do_sync(request, rpc, client, deadline, verified)
         except (Unavailable, Reverted) as failure:
             exc = failure
 
 
+def _post_rpc_sync(
+    client: httpx.Client, url: str, body: Dict[str, Any], chain: str, deadline: float
+) -> Tuple[int, Any]:
+    try:
+        with client.stream("POST", url, json=body, timeout=_left(deadline)) as response:
+            raw = _read_capped(response.iter_bytes(), deadline, f"the {chain} RPC")
+            status = response.status_code
+    except httpx.TimeoutException:
+        raise Unavailable(f"the {chain} RPC timed out") from None
+    except httpx.HTTPError as err:
+        raise Unavailable(f"the {chain} RPC is unreachable ({type(err).__name__})") from None
+    try:
+        return status, json.loads(raw)
+    except ValueError:
+        raise Unavailable(f"the {chain} RPC answered something that is not JSON") from None
+
+
 def _do_sync(
-    request: Request, rpc: Mapping[str, str], client: httpx.Client, remaining: float
+    request: Request,
+    rpc: Mapping[str, str],
+    client: httpx.Client,
+    deadline: float,
+    verified: Set[str],
 ) -> Any:
-    limit = httpx.Timeout(remaining)
     if isinstance(request, Call):
         url = rpc.get(request.chain)
         if not url:
             raise Unavailable(f"no RPC configured for {request.chain}")
-        try:
-            response = client.post(url, json=rpc_body(request), timeout=limit)
-            payload = response.json()
-        except httpx.TimeoutException:
-            raise Unavailable(f"the {request.chain} RPC timed out") from None
-        except httpx.HTTPError as err:
-            raise Unavailable(
-                f"the {request.chain} RPC is unreachable ({type(err).__name__})"
-            ) from None
-        except ValueError:
-            raise Unavailable(
-                f"the {request.chain} RPC answered something that is not JSON"
-            ) from None
-        return rpc_result(response.status_code, payload, request.chain)
+        if request.chain not in verified:
+            status, payload = _post_rpc_sync(client, url, _CHAIN_ID_BODY, request.chain, deadline)
+            check_served_chain(request.chain, status, payload)
+            verified.add(request.chain)
+        status, payload = _post_rpc_sync(client, url, rpc_body(request), request.chain, deadline)
+        return rpc_result(status, payload, request.chain)
     url = request.url
     for _ in range(MAX_REDIRECTS + 1):
+        if time.monotonic() >= deadline:
+            raise Unavailable("the budget of this call ran out before a redirect")
         check_url(url)
         method = "GET" if request.body is None else "POST"
+        host = urlsplit(url).hostname
         try:
             with client.stream(
-                method, url, content=request.body, headers=_JSON, timeout=limit
+                method, url, content=request.body, headers=_JSON, timeout=_left(deadline)
             ) as response:
                 target = _redirect_target(response, url)
                 if target is not None:
                     url = target
                     continue
-                chunks = []
-                total = 0
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > MAX_BODY_BYTES:
-                        raise Unavailable(
-                            f"{urlsplit(url).hostname} sent more than {MAX_BODY_BYTES} bytes"
-                        )
-                    chunks.append(chunk)
-                return FetchResponse(response.status_code, b"".join(chunks))
+                body = _read_capped(response.iter_bytes(), deadline, str(host))
+                return FetchResponse(response.status_code, body)
         except httpx.TimeoutException:
-            raise Unavailable(f"{urlsplit(url).hostname} timed out") from None
+            raise Unavailable(f"{host} timed out") from None
         except httpx.HTTPError as err:
-            raise Unavailable(
-                f"{urlsplit(url).hostname} is unreachable ({type(err).__name__})"
-            ) from None
+            raise Unavailable(f"{host} is unreachable ({type(err).__name__})") from None
     raise Unavailable(f"more than {MAX_REDIRECTS} redirects")
 
 
@@ -370,13 +451,15 @@ async def run_async(
     rpc: Mapping[str, str],
     client: httpx.AsyncClient,
     timeout: float,
+    verified_chains: Optional[Set[str]] = None,
 ) -> T:
     """Drive a resolution generator to its end over an async client.
 
     Each request runs under `asyncio.wait_for(…, remaining)`: the deadline is
-    hard here, drips included.
+    hard here, drips included. `verified_chains` as in `run_sync`.
     """
     deadline = time.monotonic() + timeout
+    verified = verified_chains if verified_chains is not None else set()
     value: Any = None
     exc: Optional[BaseException] = None
     while True:
@@ -391,35 +474,51 @@ async def run_async(
             exc = Unavailable(f"the {timeout:g}s budget of this call ran out")
             continue
         try:
-            value = await asyncio.wait_for(_do_async(request, rpc, client, remaining), remaining)
+            value = await asyncio.wait_for(
+                _do_async(request, rpc, client, remaining, verified), remaining
+            )
         except asyncio.TimeoutError:
             exc = Unavailable(f"the {timeout:g}s budget of this call ran out")
         except (Unavailable, Reverted) as failure:
             exc = failure
 
 
+async def _post_rpc_async(
+    client: httpx.AsyncClient, url: str, body: Dict[str, Any], chain: str, limit: httpx.Timeout
+) -> Tuple[int, Any]:
+    try:
+        response = await client.post(url, json=body, timeout=limit)
+        return response.status_code, response.json()
+    except httpx.TimeoutException:
+        raise Unavailable(f"the {chain} RPC timed out") from None
+    except httpx.HTTPError as err:
+        raise Unavailable(f"the {chain} RPC is unreachable ({type(err).__name__})") from None
+    except ValueError:
+        raise Unavailable(f"the {chain} RPC answered something that is not JSON") from None
+
+
 async def _do_async(
-    request: Request, rpc: Mapping[str, str], client: httpx.AsyncClient, remaining: float
+    request: Request,
+    rpc: Mapping[str, str],
+    client: httpx.AsyncClient,
+    remaining: float,
+    verified: Set[str],
 ) -> Any:
     limit = httpx.Timeout(remaining)
     if isinstance(request, Call):
         url = rpc.get(request.chain)
         if not url:
             raise Unavailable(f"no RPC configured for {request.chain}")
-        try:
-            response = await client.post(url, json=rpc_body(request), timeout=limit)
-            payload = response.json()
-        except httpx.TimeoutException:
-            raise Unavailable(f"the {request.chain} RPC timed out") from None
-        except httpx.HTTPError as err:
-            raise Unavailable(
-                f"the {request.chain} RPC is unreachable ({type(err).__name__})"
-            ) from None
-        except ValueError:
-            raise Unavailable(
-                f"the {request.chain} RPC answered something that is not JSON"
-            ) from None
-        return rpc_result(response.status_code, payload, request.chain)
+        if request.chain not in verified:
+            status, payload = await _post_rpc_async(
+                client, url, _CHAIN_ID_BODY, request.chain, limit
+            )
+            check_served_chain(request.chain, status, payload)
+            verified.add(request.chain)
+        status, payload = await _post_rpc_async(
+            client, url, rpc_body(request), request.chain, limit
+        )
+        return rpc_result(status, payload, request.chain)
     url = request.url
     for _ in range(MAX_REDIRECTS + 1):
         check_url(url)

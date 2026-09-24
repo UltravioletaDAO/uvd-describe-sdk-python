@@ -70,6 +70,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
+_ZERO_ADDRESS = "0x" + "0" * 40
+
 
 class NameErrorCode:
     """The six `error` codes of a name result. Constants, not an `Enum`.
@@ -273,7 +275,7 @@ def parse_name_resolution(body: Any) -> NameResolution:
         tuple(t for t in tried_raw if isinstance(t, str)) if isinstance(tried_raw, list) else ()
     )
     address = _opt_str(body.get("address"))
-    if address is not None and address.lower() == "0x" + "0" * 40:
+    if address is not None and address.lower() == _ZERO_ADDRESS:
         # R1's cousin: a server that sends the zero address sends "not set".
         address = None
     given = body.get("input")
@@ -319,15 +321,22 @@ class NameNotVerifiedError(Exception):
 def require_onchain_address(result: NameResolution) -> str:
     """The address, only if it may receive a payment. Raises otherwise.
 
-    Three conditions, all required: no `error`, an `address`, and
-    `verified_onchain is True`. The last one is the point: an address this
-    process did not read from the chain is somebody else's claim.
+    Three conditions, all required: no `error`, an `address` that is not the
+    zero address, and `verified_onchain is True`. The last one is the point: an
+    address this process did not read from the chain is somebody else's claim.
+    The zero address is re-checked here although no resolver of this SDK returns
+    it: a `NameResolution` can be built by hand, and this is the last gate before
+    a payment (round 2 of PR #6).
     """
     if not isinstance(result, NameResolution):
         raise TypeError(
             f"require_onchain_address() takes a NameResolution, not {type(result).__name__}"
         )
-    if result.error is not None or result.address is None:
+    if (
+        result.error is not None
+        or result.address is None
+        or result.address.lower() == _ZERO_ADDRESS
+    ):
         raise NameNotVerifiedError(
             f"{result.input!r} has no payable address (error={result.error})",
             reason=result.error or NameErrorCode.NOT_FOUND,

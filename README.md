@@ -613,9 +613,21 @@ that came over HTTP — a payment destination demands `True`
 
 **Configuration, defined once:** the RPC URLs come in by constructor, keyed by
 CAIP-2 chain id; the SDK ships none (a public default is a shared rate limit nobody
-chose, a keyed one a leaked key) and never prints one. `timeout` (default 10 s) is a
-budget for the WHOLE call. The cache is an LRU with a positive TTL (300 s) and a
-shorter negative TTL (60 s), and never stores `rpc_unavailable`.
+chose, a keyed one a leaked key) and never prints one. Each resolver checks each
+RPC's `eth_chainId` once against its key: a Sepolia URL under `eip155:1` is
+`rpc_unavailable`, not a mainnet answer. `timeout` (default 10 s) is a hard budget
+for the WHOLE call, in `_sync` too (bodies are read in chunks against the
+deadline). The cache is an LRU with a positive TTL (300 s) and a shorter negative
+TTL (60 s), never stores `rpc_unavailable`, and its key is the question, not the
+resolver's configuration — share one only between resolvers configured alike.
+
+**Five TLDs are both ICANN and Unstoppable** (`UNS_ICANN_COLLISIONS`: graphics,
+gripe, guide, shiksha, travel — IANA list 2026092400): names under them answer
+`unsupported_system` instead of silently picking a namespace.
+
+`namehash(name)` and `labelhash(label)` are exported too, and they **normalize with
+ENSIP-15 first** (`InvalidNameError` otherwise): the node ENS uses, not a
+lower-cased guess.
 
 **For frontends**, `DescribeClient.names.resolve(name)` / `.reverse(address)` read
 the same result from `api.describe.net/v1/names` — free routes, R5 like `wallet()`,
@@ -758,7 +770,7 @@ INC-2026-08-26).
 
 ```bash
 python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
-.venv/Scripts/python -m pytest        # 448 tests, ~17 s, NO NETWORK (2026-09-24)
+.venv/Scripts/python -m pytest        # 476 tests, ~18 s, NO NETWORK (2026-09-24)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python examples/smoke_gratis.py   # this one DOES hit the live API

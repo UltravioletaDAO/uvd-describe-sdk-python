@@ -47,7 +47,15 @@ _NEGATIVE = frozenset(
 
 
 class NameCache:
-    """An LRU of name results with a positive and a negative lifetime."""
+    """An LRU of name results with a positive and a negative lifetime.
+
+    ⚠️ The key is the question (`("resolve", system, normalized name)`,
+    `("reverse", address)`…), NOT the configuration of the resolver that
+    answered it: `rpc`, `systems` and `ipfs_gateway` are not part of it. One
+    `NameCache` shared by two resolvers configured differently hands each the
+    other's answers. Share a cache only between resolvers configured alike (the
+    default, `cache=True`, gives every resolver its own).
+    """
 
     def __init__(
         self,

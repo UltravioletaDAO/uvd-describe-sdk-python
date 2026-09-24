@@ -96,14 +96,20 @@ from ..name_models import (
     require_onchain_address,
 )
 from ._cache import DEFAULT_MAX_ENTRIES, DEFAULT_NEGATIVE_TTL_S, DEFAULT_TTL_S, NameCache
-from ._normalize import UNS_TLDS_MEASURED_AT
+from ._normalize import (
+    ICANN_TLDS_MEASURED_AT,
+    UNS_ICANN_COLLISIONS,
+    UNS_TLDS_MEASURED_AT,
+    InvalidNameError,
+    labelhash,
+    namehash,
+)
 from ._proto import AVALANCHE, BASE, ETHEREUM, POLYGON
 from ._resolver import (
     DEFAULT_IPFS_GATEWAY,
     DEFAULT_SYSTEMS,
     DEFAULT_TIMEOUT_S,
     SNS_UNSUPPORTED_DETAIL,
-    InvalidNameError,
     NameResolver,
 )
 
@@ -117,6 +123,10 @@ __all__ = [
     "NameResolver",
     "NameCache",
     "InvalidNameError",
+    # EIP-137 hashes that NORMALIZE first (ENSIP-15) — for consumers deleting
+    # their own copy (Execution Market's `namehash` only lower-cased)
+    "namehash",
+    "labelhash",
     # the result contract (also exported by `uvd_describe_sdk` itself)
     "NameResolution",
     "NameRecord",
@@ -136,6 +146,8 @@ __all__ = [
     "DEFAULT_MAX_ENTRIES",
     "SNS_UNSUPPORTED_DETAIL",
     "UNS_TLDS_MEASURED_AT",
+    "UNS_ICANN_COLLISIONS",
+    "ICANN_TLDS_MEASURED_AT",
     "ETHEREUM_CHAIN",
     "BASE_CHAIN",
     "POLYGON_CHAIN",

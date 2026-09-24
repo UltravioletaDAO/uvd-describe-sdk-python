@@ -52,11 +52,29 @@ install still depends on `httpx` only.
   `verified_onchain=False`.
 - CCIP gateway and NFT metadata URLs go through a guard: `https://` only, no
   credentials, no `localhost`, no IP literal outside the global address space.
+- The `timeout` is hard in the `_sync` variants too: every body (JSON-RPC answers
+  included) is read in chunks and cut at the deadline, and no redirect is followed
+  past it. The async variants cut with `asyncio.wait_for`.
+- Each resolver checks every RPC's `eth_chainId` once against its CAIP-2 key: an
+  RPC that serves another chain is `rpc_unavailable`, naming the chain it serves.
+- `reverse()` answers `rpc_unavailable` (never raises) when a contract that does
+  not revert, reverts — an RPC that answers "execution reverted" to everything.
+- `UNS_ICANN_COLLISIONS` (graphics, gripe, guide, shiksha, travel; IANA list
+  version 2026092400): names under TLDs that are both ICANN and Unstoppable
+  answer `unsupported_system` instead of silently picking one namespace.
+- `namehash()` and `labelhash()` exported from `uvd_describe_sdk.names`; both
+  normalize with ENSIP-15 first and raise `InvalidNameError` otherwise.
+- `require_onchain_address()` also refuses the zero address.
 - `scripts/grabar_fixtures_names.py` records the fixtures in
   `tests/fixtures/names/` from public RPCs (sequential, ≥ 1.1 s apart, stops at the
   first HTTP 429). No RPC URL is written to a fixture.
 
-## 0.6.1 — unreleased
+## 0.6.1 — 2026-09-15
+
+⚠️ Corrected 2026-09-24, left written: this heading said "unreleased". The tag
+`v0.6.1` exists, its publish run succeeded on 2026-09-15 and PyPI lists 0.6.1
+uploaded that day. It shipped the 0.6.0 entry below as well: `v0.6.0` was never
+tagged nor uploaded.
 
 ### Added
 
@@ -76,7 +94,7 @@ install still depends on `httpx` only.
 
 Both SDKs add `thin-chain` in the same release and know the same ten caveat codes.
 
-## 0.6.0 — unreleased (tag `v0.6.0` pending)
+## 0.6.0 — never published (shipped inside 0.6.1)
 
 The upstream-first row `describe-net/docs/BACKLOG.md:19`: describe.net serves both
 fields in production since 2026-09-14 (PR #21, deployed `aa1bd75`). This version

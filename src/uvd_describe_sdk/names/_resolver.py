@@ -15,6 +15,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Set,
     Tuple,
     TypeVar,
     cast,
@@ -35,7 +36,7 @@ from . import _avvy, _ens, _uns
 from ._avatar import NoAvatar, nft_image, nft_reference, plain_url
 from ._cache import NameCache
 from ._hash import ZERO_ADDRESS, is_hex_address, to_checksum_address
-from ._normalize import ENS_FAMILY, FAMILY_OF, Classified, classify
+from ._normalize import ENS_FAMILY, FAMILY_OF, Classified, InvalidNameError, classify
 from ._proto import (
     AVALANCHE,
     BASE,
@@ -98,21 +99,6 @@ class _Plan(Generic[R]):
     early: Optional[R]
     key: Optional[Hashable] = None
     steps: Optional[Callable[[float], Step[R]]] = None
-
-
-class InvalidNameError(ValueError):
-    """`normalize()` refused the input. `code` is always `invalid_name`."""
-
-    #: A class constant that interpolates nothing (same guard as `errors.py`).
-    recovery = (
-        "Show the user the name is not valid for its system (ENSIP-15 for "
-        "ENS, Basenames and DNS names). Do not retry with a variant: a name that "
-        "does not normalize is not the name the user owns."
-    )
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.code = NameErrorCode.INVALID_NAME
 
 
 class NameResolver:
@@ -188,6 +174,10 @@ class NameResolver:
         self._lock = threading.Lock()
         self._client: Optional[httpx.Client] = None
         self._aclient: Optional[httpx.AsyncClient] = None
+        #: Chains whose RPC already answered the right `eth_chainId` (once per
+        #: chain and per resolver; see `_proto.py`). A mismatch is not stored:
+        #: a misconfigured key keeps failing, loudly.
+        self._verified_chains: Set[str] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -248,9 +238,14 @@ class NameResolver:
         return classify(name).system
 
     def normalize(self, name: str) -> str:
-        """The name as it is looked up. Raises `InvalidNameError`."""
+        """The name as it is looked up. Raises `InvalidNameError`.
+
+        A name under a colliding TLD (`UNS_ICANN_COLLISIONS`) is well formed and
+        is returned: it is its SYSTEM that is ambiguous, which `resolve()` answers
+        with `unsupported_system`.
+        """
         found = classify(name)
-        if found.error or found.normalized is None:
+        if found.error == NameErrorCode.INVALID_NAME or found.normalized is None:
             raise InvalidNameError(found.detail or "not a valid name")
         return found.normalized
 
@@ -305,6 +300,7 @@ class NameResolver:
             rpc=self._rpc,
             client=self._sync_client(),
             timeout=self._timeout,
+            verified_chains=self._verified_chains,
         )
         return self._store(plan, result)
 
@@ -319,6 +315,7 @@ class NameResolver:
             rpc=self._rpc,
             client=self._async_client(),
             timeout=self._timeout,
+            verified_chains=self._verified_chains,
         )
         return self._store(plan, result)
 
@@ -465,9 +462,13 @@ class NameResolver:
                 ):
                     refused = outcome
                 continue
-            except Unavailable as failure:
+            except (Unavailable, Reverted) as failure:
                 # Strict order: a system above that could not be asked might
                 # hold the primary name, so a lower one's answer is not given.
+                # `Reverted` belongs here too (round 2 of PR #6): the ENS
+                # registry does not revert on `resolver()`, so a revert there is
+                # an RPC that answers "execution reverted" to everything — it
+                # could not be asked. Before, it escaped as a private exception.
                 return replace(
                     template,
                     system=system,

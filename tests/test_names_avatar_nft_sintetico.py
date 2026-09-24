@@ -27,6 +27,8 @@ from uvd_describe_sdk.names._avatar import NoAvatar, nft_image
 from uvd_describe_sdk.names._hash import selector
 from uvd_describe_sdk.names._proto import run_sync
 
+from .names_replay import answer_chain_id
+
 DUENO = "0x" + "11" * 20
 OTRO = "0x" + "22" * 20
 CONTRATO = "0x" + "33" * 20
@@ -35,6 +37,9 @@ RPC = {"eip155:1": "https://rpc.test/eip155-1"}
 
 def _responde(tabla: Dict[bytes, bytes], http: Dict[str, Any]) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
+        chain_id = answer_chain_id(request)
+        if chain_id is not None:
+            return chain_id
         if str(request.url) in RPC.values():
             data = bytes.fromhex(json.loads(request.content)["params"][0]["data"][2:])
             salida = tabla[data[:4]]
