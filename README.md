@@ -616,10 +616,11 @@ CAIP-2 chain id; the SDK ships none (a public default is a shared rate limit nob
 chose, a keyed one a leaked key) and never prints one. Each resolver checks each
 RPC's `eth_chainId` once against its key: a Sepolia URL under `eip155:1` is
 `rpc_unavailable`, not a mainnet answer. `timeout` (default 10 s) is a budget for
-the WHOLE call: async cuts with `asyncio.wait_for`; sync caps every socket
-operation of the default transport to what is left (dripping headers included).
-Not bounded in sync: DNS resolution, and a `transport=` you pass yourself. The
-names clients read nothing from the environment — no proxies either. The cache is an LRU with a positive TTL (300 s) and a shorter negative
+the WHOLE call, counted from its start: there is ONE engine (async), and the
+`_sync` variants run it on a private event loop under the same `asyncio.wait_for`
+— dripping bodies or headers, a connect over many addresses, a slow DNS lookup
+are cut at the budget. Environment proxies are honoured as in `DescribeClient`.
+The cache is an LRU with a positive TTL (300 s) and a shorter negative
 TTL (60 s), never stores `rpc_unavailable`, and its key is the question, not the
 resolver's configuration — share one only between resolvers configured alike.
 
@@ -660,8 +661,9 @@ adds 2 packages and 5.7 MiB (web3 would add 14 and 17.6 MiB).
   copies it replaces already did and the defaults were measured (EM's 300 s); it
   is bounded, has a shorter negative TTL, and `cache=False` turns it off.
 - `DescribeClient` has no async API. See risks. ⚠️ The name resolver does
-  (`await resolve()` next to `resolve_sync()`), over one set of resolution steps —
-  the pattern the risk below asks for, applied to the new module first.
+  (`await resolve()` next to `resolve_sync()`), and it has ONE engine: the sync
+  flavour runs the async one under a hard deadline — the pattern the risk below
+  asks for, applied to the new module first.
 
 ---
 
@@ -772,7 +774,7 @@ INC-2026-08-26).
 
 ```bash
 python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
-.venv/Scripts/python -m pytest        # 487 tests, ~20 s, NO NETWORK (2026-09-24)
+.venv/Scripts/python -m pytest        # 495 tests, ~25 s, NO NETWORK — a guard fails the run otherwise (2026-09-24)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python examples/smoke_gratis.py   # this one DOES hit the live API

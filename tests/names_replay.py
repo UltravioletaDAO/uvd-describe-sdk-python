@@ -147,6 +147,33 @@ def call_op(resolver: NameResolver, op: str, args: List[str], *, asynchronous: b
     return asyncio.run(_run())
 
 
+def drive(
+    gen: Any,
+    transport: httpx.AsyncBaseTransport,
+    *,
+    timeout: float,
+    rpc: Optional[Dict[str, str]] = None,
+) -> Any:
+    """Corre unos pasos internos por EL motor (async, bajo el deadline), desde sync.
+
+    Es lo que hace `NameResolver._sync` sin el resolver alrededor: para los tests
+    que prueban una pieza interna (`_ens.confirm`, `nft_image`, un `Fetch`) con
+    los datos grabados. Desde la ronda 4 del PR #6 no hay motor sync propio.
+    """
+    from uvd_describe_sdk.names._proto import run_blocking, run_bounded
+
+    async def una_llamada() -> Any:
+        client = httpx.AsyncClient(transport=transport)
+        try:
+            return await run_bounded(
+                gen, rpc=FAKE_RPC if rpc is None else rpc, client=client, timeout=timeout
+            )
+        finally:
+            await client.aclose()
+
+    return run_blocking(una_llamada)
+
+
 def failing_transport(error: Optional[Exception] = None) -> httpx.MockTransport:
     """Un transporte que revienta si alguien lo usa: prueba que NO hubo red."""
 

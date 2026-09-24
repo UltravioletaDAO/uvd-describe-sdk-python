@@ -1,114 +1,45 @@
-"""Ronda 3 del PR #6: el timeout sync, duro también donde el cuerpo no llega.
+"""Rondas 3 y 4 del PR #6: el timeout sync, duro también donde el cuerpo no llega.
 
 El verificador de la ronda 2 midió, con un servidor LOCAL y el transporte httpx
 real (presupuesto 1,0 s): headers goteando de a 1 byte cada 0,5 s → 15,2 s; un
-gzip con FLG=FCOMMENT y el comentario goteando → 10,15 s. Re-medido acá antes
-de arreglarlo (`cbc93a0`): 11,43 s y 10,15 s — el segundo, encima, «sin error» y
-con el cuerpo vacío. Después del arreglo: 1,00 s y rechazo inmediato.
+gzip con FLG=FCOMMENT y el comentario goteando → 10,15 s. Re-medido antes de
+arreglarlo (`cbc93a0`): 11,43 s y 10,15 s — el segundo, encima, «sin error» y con
+el cuerpo vacío.
 
-Estos tests usan un servidor de verdad en 127.0.0.1 (no un `MockTransport`),
-porque lo que se prueba es el socket: un doble en memoria no tiene lecturas que
-bloquear. No salen a ninguna red: el servidor vive en este proceso, y los
-clientes de `names` no leen proxies del entorno.
+⚠️ Ronda 4: el arreglo de la ronda 3 (un backend de socket para el motor sync)
+se BORRÓ. El modo sync es ahora el motor async bajo un deadline duro (decisión de
+c0der), y estos mismos tests —los casos A, B, C y D del verificador— son los que
+lo prueban: ahora pasan por ese único motor. Se sacó el test del backend borrado;
+el resto conserva sus aserciones.
+
+Usan un servidor de verdad en 127.0.0.1 (`names_servidor.py`), porque lo que se
+prueba es el reloj contra un socket que tarda: un doble en memoria no tarda.
 """
 
 from __future__ import annotations
 
-import socket
-import threading
+import asyncio
 import time
-from typing import Callable, Iterator, List
+from typing import Any, Callable, List
 
 import httpx
 import pytest
 
 from uvd_describe_sdk.names import InvalidNameError, NameResolver, _proto
-from uvd_describe_sdk.names._deadline import DeadlineTransport, _cap, deadline_scope
-from uvd_describe_sdk.names._proto import Fetch, Unavailable, run_sync
+from uvd_describe_sdk.names._proto import Fetch, Unavailable, run_bounded
+
+from .names_replay import drive
+from .names_servidor import (
+    Responder,
+    ServidorLocal,
+    cronometrar,
+    cuerpo_goteando,
+    gzip_goteando,
+    headers_goteando,
+)
 
 PRESUPUESTO = 0.6
 MARGEN = 0.6
-GOTEO = 0.2
-
-#: gzip: ID1 ID2 CM=8 FLG=0x10 (FCOMMENT) MTIME(4) XFL OS — y después el
-#: comentario, que nunca termina. zlib no produce un solo byte decodificado.
-_GZIP_FCOMMENT = bytes([0x1F, 0x8B, 8, 0x10, 0, 0, 0, 0, 0, 255])
-
-
-class ServidorLocal:
-    """Un servidor HTTP/1.1 mínimo en 127.0.0.1 que gotea lo que se le pida."""
-
-    def __init__(self, responder: Callable[[socket.socket, bytes], None]) -> None:
-        self._responder = responder
-        self._sock = socket.socket()
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(8)
-        self.puerto = self._sock.getsockname()[1]
-        self.pedidos: List[bytes] = []
-        threading.Thread(target=self._aceptar, daemon=True).start()
-
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.puerto}/"
-
-    def _aceptar(self) -> None:
-        while True:
-            try:
-                conn, _ = self._sock.accept()
-            except OSError:
-                return
-            threading.Thread(target=self._uno, args=(conn,), daemon=True).start()
-
-    def _uno(self, conn: socket.socket) -> None:
-        try:
-            pedido = conn.recv(65536)
-            self.pedidos.append(pedido)
-            self._responder(conn, pedido)
-        except OSError:
-            pass
-        finally:
-            conn.close()
-
-    def cerrar(self) -> None:
-        self._sock.close()
-
-
-def _gotea(conn: socket.socket, datos: bytes) -> None:
-    for byte in datos:
-        conn.sendall(bytes([byte]))
-        time.sleep(GOTEO)
-
-
-def _headers_goteando(conn: socket.socket, _: bytes) -> None:
-    _gotea(
-        conn, b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
-    )
-
-
-def _gzip_goteando(conn: socket.socket, _: bytes) -> None:
-    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\n")
-    conn.sendall(_GZIP_FCOMMENT)
-    _gotea(conn, b"a" * 200)
-
-
-@pytest.fixture
-def servidor() -> Iterator[Callable[[Callable[[socket.socket, bytes], None]], ServidorLocal]]:
-    abiertos: List[ServidorLocal] = []
-
-    def crear(responder: Callable[[socket.socket, bytes], None]) -> ServidorLocal:
-        nuevo = ServidorLocal(responder)
-        abiertos.append(nuevo)
-        return nuevo
-
-    yield crear
-    for abierto in abiertos:
-        abierto.cerrar()
-
-
-def _cronometrar(correr: Callable[[], object]) -> float:
-    inicio = time.monotonic()
-    correr()
-    return time.monotonic() - inicio
 
 
 # ---------------------------------------------------------------------------
@@ -116,14 +47,19 @@ def _cronometrar(correr: Callable[[], object]) -> float:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("responder", [_headers_goteando, _gzip_goteando], ids=["headers", "gzip"])
-def test_sync_un_RPC_que_gotea_headers_o_un_gzip_se_corta_en_el_presupuesto(
-    servidor: Callable[..., ServidorLocal], responder: Callable[[socket.socket, bytes], None]
+@pytest.mark.parametrize(
+    "responder",
+    [cuerpo_goteando, headers_goteando, gzip_goteando],
+    ids=["A-cuerpo", "C-headers", "D-gzip"],
+)
+def test_sync_un_RPC_que_gotea_se_corta_en_el_presupuesto(
+    servidor: Callable[[Responder], ServidorLocal],
+    responder: Responder,
 ) -> None:
     rpc = servidor(responder)
-    resultado = []
+    resultado: List[Any] = []
     with NameResolver(rpc={"eip155:1": rpc.url}, cache=False, timeout=PRESUPUESTO) as resolver:
-        duro = _cronometrar(lambda: resultado.append(resolver.resolve_sync("ultravioletadao.eth")))
+        duro = cronometrar(lambda: resultado.append(resolver.resolve_sync("ultravioletadao.eth")))
     assert resultado[0].error == "rpc_unavailable"
     assert duro < PRESUPUESTO + MARGEN, f"presupuesto {PRESUPUESTO} s, tardó {duro:.2f} s"
     assert "127.0.0.1" not in repr(resultado[0]), "el detalle nombra la cadena, nunca la URL"
@@ -134,20 +70,30 @@ def test_sync_un_RPC_que_gotea_headers_o_un_gzip_se_corta_en_el_presupuesto(
 # ---------------------------------------------------------------------------
 
 
+def _pasos(url: str) -> _proto.Step[object]:
+    respuesta = yield Fetch(url)
+    return respuesta
+
+
 def _fetch(url: str, timeout: float) -> object:
-    def pasos() -> _proto.Step[object]:
-        respuesta = yield Fetch(url)
-        return respuesta
-
-    with httpx.Client(transport=DeadlineTransport(), trust_env=False) as client:
-        return run_sync(pasos(), rpc={}, client=client, timeout=timeout)
+    return drive(_pasos(url), httpx.AsyncHTTPTransport(), rpc={}, timeout=timeout)
 
 
-def test_sync_un_gateway_que_gotea_los_headers_se_corta_en_el_presupuesto(
-    servidor: Callable[..., ServidorLocal], monkeypatch: pytest.MonkeyPatch
+async def _fetch_async(url: str, timeout: float) -> object:
+    async with httpx.AsyncClient() as client:
+        return await run_bounded(_pasos(url), rpc={}, client=client, timeout=timeout)
+
+
+@pytest.mark.parametrize(
+    "responder", [cuerpo_goteando, headers_goteando], ids=["B-cuerpo", "C-headers"]
+)
+def test_sync_un_gateway_que_gotea_se_corta_en_el_presupuesto(
+    servidor: Callable[[Responder], ServidorLocal],
+    responder: Responder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_proto, "check_url", lambda url: None)
-    gateway = servidor(_headers_goteando)
+    gateway = servidor(responder)
     inicio = time.monotonic()
     with pytest.raises(Unavailable):
         _fetch(gateway.url, PRESUPUESTO)
@@ -155,14 +101,22 @@ def test_sync_un_gateway_que_gotea_los_headers_se_corta_en_el_presupuesto(
     assert duro < PRESUPUESTO + MARGEN, f"presupuesto {PRESUPUESTO} s, tardó {duro:.2f} s"
 
 
+@pytest.mark.parametrize("asincrono", [False, True], ids=["sync", "async"])
 def test_un_gateway_pide_identity_y_un_cuerpo_gzip_no_se_lee(
-    servidor: Callable[..., ServidorLocal], monkeypatch: pytest.MonkeyPatch
+    servidor: Callable[[Responder], ServidorLocal],
+    monkeypatch: pytest.MonkeyPatch,
+    asincrono: bool,
 ) -> None:
+    """Parametrizado en la ronda 4 (P3-b): el rechazo vive en el único motor, y
+    el verificador pidió verlo por las dos puertas."""
     monkeypatch.setattr(_proto, "check_url", lambda url: None)
-    gateway = servidor(_gzip_goteando)
+    gateway = servidor(gzip_goteando)
     inicio = time.monotonic()
     with pytest.raises(Unavailable, match="gzip-encoded"):
-        _fetch(gateway.url, 5.0)
+        if asincrono:
+            asyncio.run(_fetch_async(gateway.url, 5.0))
+        else:
+            _fetch(gateway.url, 5.0)
     assert time.monotonic() - inicio < 1.0, "se rechaza en los headers, sin esperar el cuerpo"
     assert b"accept-encoding: identity" in gateway.pedidos[0].lower()
 
@@ -173,8 +127,9 @@ def test_un_gateway_pide_identity_y_un_cuerpo_gzip_no_se_lee(
 
 
 def test_un_redirect_no_se_sigue_pasado_el_presupuesto() -> None:
-    """Con `MockTransport` el plazo del socket no aplica: lo que corta es el
-    chequeo del reloj antes de cada redirect. Sin él, el segundo host se pide."""
+    """El doble BLOQUEA el loop 0,3 s (un `time.sleep` en el handler), así que la
+    cancelación del `wait_for` no llega a tiempo: lo que corta es el chequeo del
+    reloj antes de cada redirect. Sin él, el segundo host se pide."""
     pedidas: List[str] = []
 
     def lento_y_redirige(request: httpx.Request) -> httpx.Response:
@@ -184,31 +139,14 @@ def test_un_redirect_no_se_sigue_pasado_el_presupuesto() -> None:
             return httpx.Response(302, headers={"location": "https://dos.example/x"})
         return httpx.Response(200, json={"data": "0x"})
 
-    def pasos() -> _proto.Step[object]:
-        respuesta = yield Fetch("https://uno.example/x")
-        return respuesta
-
-    with httpx.Client(transport=httpx.MockTransport(lento_y_redirige)) as client:
-        with pytest.raises(Unavailable, match="before a redirect"):
-            run_sync(pasos(), rpc={}, client=client, timeout=0.2)
+    with pytest.raises(Unavailable, match="before a redirect"):
+        drive(
+            _pasos("https://uno.example/x"),
+            httpx.MockTransport(lento_y_redirige),
+            rpc={},
+            timeout=0.2,
+        )
     assert pedidas == ["https://uno.example/x"]
-
-
-# ---------------------------------------------------------------------------
-# El backend: fuera de una llamada no toca nada; adentro, acota y corta
-# ---------------------------------------------------------------------------
-
-
-def test_el_tope_del_backend() -> None:
-    import httpcore
-
-    assert _cap(5.0, httpcore.ReadTimeout) == 5.0, "fuera de una llamada, el timeout es el suyo"
-    with deadline_scope(time.monotonic() + 0.5):
-        tope = _cap(5.0, httpcore.ReadTimeout)
-        assert tope is not None and tope <= 0.5
-    with deadline_scope(time.monotonic() - 1):
-        with pytest.raises(httpcore.ReadTimeout):
-            _cap(5.0, httpcore.ReadTimeout)
 
 
 # ---------------------------------------------------------------------------

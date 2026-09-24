@@ -27,9 +27,9 @@ from uvd_describe_sdk import (
     require_onchain_address,
 )
 from uvd_describe_sdk.names import InvalidNameError, NameResolver, _abi, _ens
-from uvd_describe_sdk.names._proto import Outcome, run_sync
+from uvd_describe_sdk.names._proto import Outcome
 
-from .names_replay import FAKE_RPC, Replay, failing_transport, load, resolver_for
+from .names_replay import FAKE_RPC, Replay, drive, failing_transport, load, resolver_for
 
 JESSE = "0x2211d1D0020DAEA8039E46Cf1367962070d77DA9"
 ULTRAVIOLETA = "0xe4dc963c56979E0260fc146b87eE24F18220e545"
@@ -98,12 +98,10 @@ def test_un_nombre_que_apunta_a_OTRA_direccion_es_reverse_mismatch() -> None:
     que el SDK la compare con la dirección que se le preguntó."""
     fixture = load("resolve_0xultravioleta_eth")
     replay = Replay(fixture["exchanges"])
-    client = httpx.Client(transport=httpx.MockTransport(replay))
     with pytest.raises(Outcome) as exc:
-        run_sync(
+        drive(
             _ens.confirm("0xultravioleta.eth", JESSE, float(fixture["now"]), _ens.COIN_TYPE_ETH),
-            rpc=FAKE_RPC,
-            client=client,
+            httpx.MockTransport(replay),
             timeout=10,
         )
     replay.assert_consumed()
@@ -116,11 +114,9 @@ def test_y_con_SU_direccion_la_misma_grabacion_confirma() -> None:
     pasaría el test de arriba en verde."""
     fixture = load("resolve_0xultravioleta_eth")
     replay = Replay(fixture["exchanges"])
-    client = httpx.Client(transport=httpx.MockTransport(replay))
-    name = run_sync(
+    name = drive(
         _ens.confirm("0xultravioleta.eth", ULTRAVIOLETA, float(fixture["now"]), _ens.COIN_TYPE_ETH),
-        rpc=FAKE_RPC,
-        client=client,
+        httpx.MockTransport(replay),
         timeout=10,
     )
     assert name == "0xultravioleta.eth"

@@ -1,8 +1,9 @@
-"""`NameResolver` — the public face: dispatch, cache, and the two engines."""
+"""`NameResolver` — the public face: dispatch, cache, and the ONE engine in two flavours."""
 
 from __future__ import annotations
 
 import re
+import ssl
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -35,7 +36,6 @@ from ..version import default_user_agent
 from . import _avvy, _ens, _uns
 from ._avatar import NoAvatar, nft_image, nft_reference, plain_url
 from ._cache import NameCache
-from ._deadline import DeadlineTransport
 from ._hash import ZERO_ADDRESS, is_hex_address, to_checksum_address
 from ._normalize import ENS_FAMILY, FAMILY_OF, Classified, InvalidNameError, classify
 from ._proto import (
@@ -46,8 +46,8 @@ from ._proto import (
     Reverted,
     Step,
     Unavailable,
-    run_async,
-    run_sync,
+    run_blocking,
+    run_bounded,
 )
 
 #: 10 s for the WHOLE call (a reverse may walk four systems and two CCIP hops).
@@ -100,6 +100,9 @@ class _Plan(Generic[R]):
     early: Optional[R]
     key: Optional[Hashable] = None
     steps: Optional[Callable[[float], Step[R]]] = None
+    #: The answer when the deadline cancels the steps: `rpc_unavailable`, with
+    #: whatever the steps had recorded (the systems a reverse already tried).
+    timed_out: Optional[Callable[[str], R]] = None
 
 
 class NameResolver:
@@ -118,11 +121,14 @@ class NameResolver:
         if r.error is None:
             pay_to = require_onchain_address(r)
 
-    Every lookup has an async form and a `_sync` form built on the same
-    resolution steps (see `_proto.py`). Nothing is read from the environment:
-    🔴 the SDK carries NO RPC URL — a public default would be a shared,
+    Every lookup has an async form and a `_sync` form, and they are ONE engine:
+    the `_sync` form runs the async one on a private event loop, under the same
+    hard deadline (`_proto.run_bounded` / `run_blocking`).
+    🔴 The SDK carries NO RPC URL — a public default would be a shared,
     rate-limited endpoint nobody chose, and a keyed one would be a leaked key.
-    A system whose chain is not in `rpc` answers `rpc_unavailable`.
+    A system whose chain is not in `rpc` answers `rpc_unavailable`. Proxies from
+    the environment (`HTTP(S)_PROXY`, `NO_PROXY`) ARE honoured, as `DescribeClient`
+    honours them — httpx's default; a `transport=` passed here replaces them.
     """
 
     def __init__(
@@ -147,10 +153,27 @@ class NameResolver:
                 system left out answers `unsupported_system`.
             cache: `True` (a fresh `NameCache()`), `False` (none), or a
                 `NameCache` to share or tune.
-            timeout: seconds for the WHOLE call, hard. See `_proto.py`.
+            timeout: seconds for the WHOLE call, hard, in both flavours. See
+                `_proto.py`.
             transport / async_transport: for the tests (`httpx.MockTransport`).
+                Both flavours run on the async engine, so the transport used is
+                `async_transport` or, failing that, `transport` — which must then
+                also be an `httpx.AsyncBaseTransport` (`MockTransport` is). A
+                sync-only transport (`httpx.HTTPTransport`) is refused here, not
+                at the first request. The `_sync` flavour runs each call on a
+                fresh event loop: a transport passed here must not keep pooled
+                connections from one call to the next (an in-memory one does not;
+                the default one is built per call).
             clock: wall clock (epoch seconds) for expiry checks, for the tests.
         """
+        engine_transport = async_transport if async_transport is not None else transport
+        if engine_transport is not None and not isinstance(
+            engine_transport, httpx.AsyncBaseTransport
+        ):
+            raise ValueError(
+                "transport= must also be an httpx.AsyncBaseTransport: the _sync "
+                "variants run on the async engine (pass async_transport=)"
+            )
         bad = [key for key in rpc if not isinstance(key, str) or not _CAIP2.fullmatch(key)]
         if bad:
             raise ValueError(
@@ -169,12 +192,11 @@ class NameResolver:
         self._timeout = timeout
         self._ipfs_gateway = ipfs_gateway
         self._user_agent = user_agent or default_user_agent("names")
-        self._transport = transport
-        self._async_transport = async_transport
+        self._transport: Optional[httpx.AsyncBaseTransport] = engine_transport
         self._clock = clock
         self._lock = threading.Lock()
-        self._client: Optional[httpx.Client] = None
         self._aclient: Optional[httpx.AsyncClient] = None
+        self._ssl: Optional[ssl.SSLContext] = None
         #: Chains whose RPC already answered the right `eth_chainId` (once per
         #: chain and per resolver; see `_proto.py`). A mismatch is not stored:
         #: a misconfigured key keeps failing, loudly.
@@ -184,36 +206,41 @@ class NameResolver:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _sync_client(self) -> httpx.Client:
+    def _new_client(self) -> httpx.AsyncClient:
+        # httpx's defaults otherwise: environment proxies are honoured, as in
+        # `DescribeClient`, unless a transport is passed (then httpx mounts none).
+        if self._transport is not None:
+            return httpx.AsyncClient(
+                headers={"User-Agent": self._user_agent},
+                transport=self._transport,
+                follow_redirects=False,
+            )
+        return httpx.AsyncClient(
+            headers={"User-Agent": self._user_agent},
+            follow_redirects=False,
+            verify=self._ssl_context(),
+        )
+
+    def _ssl_context(self) -> ssl.SSLContext:
+        """ONE TLS context per resolver. Measured 2026-09-24: `AsyncClient()`
+        builds one each time and that cost 0.34 s (loading the CA bundle); with
+        this one reused, 0.3 ms. The `_sync` flavour opens a client per call."""
         with self._lock:
-            if self._client is None:
-                # Default transport: every socket operation capped to the call's
-                # deadline (`_deadline.py`). `trust_env=False` on both clients:
-                # nothing is read from the environment — not even proxies, which
-                # would otherwise mount httpx's own transport over this one.
-                self._client = httpx.Client(
-                    headers={"User-Agent": self._user_agent},
-                    transport=self._transport or DeadlineTransport(),
-                    follow_redirects=False,
-                    trust_env=False,
-                )
-            return self._client
+            if self._ssl is None:
+                self._ssl = httpx.create_ssl_context()
+            return self._ssl
 
     def _async_client(self) -> httpx.AsyncClient:
+        """The client of the async flavour, kept for the caller's event loop."""
         with self._lock:
             if self._aclient is None:
-                self._aclient = httpx.AsyncClient(
-                    headers={"User-Agent": self._user_agent},
-                    transport=self._async_transport,
-                    follow_redirects=False,
-                    trust_env=False,
-                )
+                self._aclient = self._new_client()
             return self._aclient
 
     def close(self) -> None:
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        """Nothing to release for the `_sync` flavour: each call opens its own
+        client on its own loop and closes it before returning. Kept so `with
+        NameResolver(...)` keeps working; the async client is `aclose()`'s."""
 
     async def aclose(self) -> None:
         if self._aclient is not None:
@@ -297,19 +324,22 @@ class NameResolver:
     # ------------------------------------------------------------------
 
     def _sync(self, plan: _Plan[R]) -> R:
+        """The async engine, run from sync code: `_bounded` on a private loop."""
         if plan.early is not None or plan.steps is None:
             return cast(R, plan.early)
         hit = self._cached(plan)
         if hit is not None:
             return hit
-        result = run_sync(
-            plan.steps(self._clock()),
-            rpc=self._rpc,
-            client=self._sync_client(),
-            timeout=self._timeout,
-            verified_chains=self._verified_chains,
-        )
-        return self._store(plan, result)
+        started = time.monotonic()  # the budget counts from HERE, client included
+
+        async def one_call() -> R:
+            client = self._new_client()
+            try:
+                return await self._bounded(plan, client, started)
+            finally:
+                await client.aclose()
+
+        return self._store(plan, run_blocking(one_call))
 
     async def _async(self, plan: _Plan[R]) -> R:
         if plan.early is not None or plan.steps is None:
@@ -317,14 +347,26 @@ class NameResolver:
         hit = self._cached(plan)
         if hit is not None:
             return hit
-        result = await run_async(
-            plan.steps(self._clock()),
-            rpc=self._rpc,
-            client=self._async_client(),
-            timeout=self._timeout,
-            verified_chains=self._verified_chains,
-        )
-        return self._store(plan, result)
+        started = time.monotonic()
+        return self._store(plan, await self._bounded(plan, self._async_client(), started))
+
+    async def _bounded(self, plan: _Plan[R], client: httpx.AsyncClient, started: float) -> R:
+        """The steps under THE deadline; its expiry is `rpc_unavailable`."""
+        assert plan.steps is not None and plan.timed_out is not None
+        left = self._timeout - (time.monotonic() - started)
+        budget_gone = f"the {self._timeout:g}s budget of this call ran out"
+        if left <= 0:
+            return plan.timed_out(budget_gone)
+        try:
+            return await run_bounded(
+                plan.steps(self._clock()),
+                rpc=self._rpc,
+                client=client,
+                timeout=left,
+                verified_chains=self._verified_chains,
+            )
+        except Unavailable:
+            return plan.timed_out(budget_gone)
 
     def _cached(self, plan: _Plan[R]) -> Optional[R]:
         if self._cache is None or plan.key is None:
@@ -372,6 +414,7 @@ class NameResolver:
             None,
             ("resolve", found.system, found.normalized),
             lambda now: self._resolve_steps(template, now),
+            lambda detail: replace(template, error=NameErrorCode.RPC_UNAVAILABLE, detail=detail),
         )
 
     def _resolve_steps(self, template: NameResolution, now: float) -> Step[NameResolution]:
@@ -433,14 +476,33 @@ class NameResolver:
                     detail="the zero address has no name",
                 ),
             )
+        # Shared with the steps, so an expired deadline still says what was tried.
+        tried: List[str] = []
+
+        def timed_out(detail: str) -> NameResolution:
+            return NameResolution(
+                input=raw,
+                normalized=None,
+                address=address,
+                family=NameFamily.EVM,
+                system=tried[-1] if tried else None,
+                verified_onchain=False,
+                error=NameErrorCode.RPC_UNAVAILABLE,
+                tried=tuple(tried),
+                detail=detail,
+            )
+
         return _Plan(
             raw,
             None,
             ("reverse", address.lower()),
-            lambda now: self._reverse_steps(raw, address, now),
+            lambda now: self._reverse_steps(raw, address, now, tried),
+            timed_out,
         )
 
-    def _reverse_steps(self, raw: str, address: str, now: float) -> Step[NameResolution]:
+    def _reverse_steps(
+        self, raw: str, address: str, now: float, tried: List[str]
+    ) -> Step[NameResolution]:
         template = NameResolution(
             input=raw,
             normalized=None,
@@ -449,7 +511,6 @@ class NameResolver:
             system=None,
             verified_onchain=True,
         )
-        tried: List[str] = []
         skipped: List[str] = []
         refused: Optional[Outcome] = None
         for system in _REVERSE_ORDER:
@@ -580,6 +641,7 @@ class NameResolver:
             None,
             (op, found.system, found.normalized, key),
             lambda now: self._record_steps(template, now, avatar),
+            lambda detail: replace(template, error=NameErrorCode.RPC_UNAVAILABLE, detail=detail),
         )
 
     def _record_steps(self, template: NameRecord, now: float, avatar: bool) -> Step[NameRecord]:

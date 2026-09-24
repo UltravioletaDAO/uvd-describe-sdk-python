@@ -1,4 +1,4 @@
-"""The I/O seam: resolution logic as generators, and the two engines that run it.
+"""The I/O seam: resolution logic as generators, and the ONE engine that runs it.
 
 WHY GENERATORS (sans-IO)
 ------------------------
@@ -9,42 +9,42 @@ without — is the shortest path to two resolvers that disagree (this repo's own
 CLAUDE.md names the risk: "sin duplicar una línea de política"). So every
 resolution step is a generator that YIELDS what it needs (`Call`: an `eth_call`
 on a chain; `Fetch`: an HTTPS request to a CCIP gateway or NFT metadata) and
-receives the answer. The generator never touches the network. Two small engines
-—`run_sync` and `run_async`— perform the requests. One policy, two transports.
+receives the answer. The generator never touches the network; `run_async`
+performs the requests.
 
-THE HARD TIMEOUT
-----------------
+ONE ENGINE, ONE HARD DEADLINE — AND WHY THERE IS NO SYNC ENGINE ANY MORE
+------------------------------------------------------------------------
 `timeout` is a budget for the WHOLE public call, not per request: a reverse
-that walks four systems and two CCIP hops gets one deadline. Before each request
-the engine computes what is left and gives the request exactly that; past the
-deadline the next request fails at once. karma-hello measured why this matters
-(`domain_resolver.py:225-232`): web3's ENS call blocks without an upper bound.
-The async engine enforces it with `asyncio.wait_for`, which is truly hard.
+that walks four systems and two CCIP hops gets one deadline. karma-hello
+measured why this matters (`domain_resolver.py:225-232`): web3's ENS call
+blocks without an upper bound.
 
-The sync engine enforces it at the SOCKET, through the transport the resolver
-uses by default (`_deadline.py`): every connect, read, write and TLS handshake
-gets `min(its timeout, what is left)` and fails once nothing is left — the status
-line, the headers and a compressed body included. On top of that it reads every
-body in chunks, checks the clock after each chunk and before each redirect, and
-asks gateways for `Accept-Encoding: identity` (a gzip body is refused, and the
-size cap counts wire bytes). Measured on a local server with a 1.0 s budget:
-headers dripping 1 byte every 0.3 s, 11.43 s before → 1.00 s after.
+`run_bounded` runs the async engine under ONE `asyncio.wait_for(…, timeout)`,
+which cancels whatever is pending when the budget runs out — a dripping body,
+dripping headers, a gzip header that never ends, a connect trying N addresses,
+a DNS lookup. Both flavours use it: `resolve()` awaits it, and `resolve_sync()`
+runs it through `run_blocking` on a private event loop (in a thread of its own
+when the calling thread already runs a loop, since loops do not nest).
 
-What is NOT bounded in sync, stated: DNS resolution (`getaddrinfo` takes no
-timeout), and a `transport=` passed by the consumer — its sockets are its own,
-and only the chunk and redirect checks apply to it.
+`run_blocking` does not use `asyncio.run`, and that is measured, not taste:
+`asyncio.run` waits for the default executor on exit, and a DNS lookup runs
+there — with a 0.5 s budget and a 3 s `getaddrinfo`, `asyncio.run` returned at
+3.01 s (py3.13 and py3.9, 2026-09-24); closing a private loop without waiting
+returns at 0.5 s. The lookup finishes in its thread; the caller does not wait.
 
-⚠️ Corrected twice on 2026-09-24, both left written. Round 2 of PR #6: this
-paragraph said the sync engine only passed the remainder as httpx's timeout and
-that "a server that drips one byte at a time could stretch a single read"
-(measured by the refuter: 1.0 s → 6.36 s). Round 2 then said the chunk checks
-made the sync timeout hard, "the worst overshoot is ONE read". Round 3 measured
-that this was still false: httpx waits for the complete headers before any
-chunk exists, and httpcore sets the read timeout once per request — headers
-dripping 1 byte every 0.5 s took 15.2 s, and a dripping gzip header (FCOMMENT)
-10.15 s, with no decoded byte ever reaching the clock check or the size cap.
-Twice a text claimed a bound the code did not have; the bound now lives in the
-socket, and the tests that pin it use a real local server.
+Between requests the engine also checks the clock, and gives each request the
+remainder as httpx's timeout; those are what a test double that BLOCKS (instead
+of awaiting) runs into, since a blocked loop cannot deliver a cancellation.
+
+⚠️ History, left written — three rounds of PR #6 found the SAME class of hole
+in a separate sync engine, each after the previous fix was declared hard:
+round 2, a dripping body (1.0 s budget → 6.36 s); round 3, dripping headers and a
+dripping gzip header (15.2 s and 10.15 s, measured with a real local server);
+round 4, a connect over N addresses from DNS (5.00 s and 10.00 s for N=5 and
+N=10). The async engine cut all of them at 1.00 s. c0der's decision for round 4:
+stop patching the symptom and shrink what can be refuted — the sync flavour is
+now the async engine under the deadline, and `_deadline.py` (the socket-level
+cap written in round 3) was deleted.
 
 THE RPC IS CHECKED AGAINST ITS CHAIN
 ------------------------------------
@@ -72,14 +72,15 @@ import asyncio
 import ipaddress
 import json
 import re
+import threading
 import time
 import typing
 from dataclasses import dataclass
 from typing import (
     Any,
+    Callable,
     Dict,
     Generator,
-    Iterable,
     List,
     Mapping,
     Optional,
@@ -93,7 +94,6 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from . import _abi
-from ._deadline import deadline_scope
 from ._hash import selector
 
 #: CAIP-2 ids of the chains the naming systems live on. Protocol facts of each
@@ -327,14 +327,10 @@ _FETCH = {
 }
 
 
-def _raw_chunks(response: httpx.Response) -> Iterable[bytes]:
+async def _raw_chunks(response: httpx.Response) -> typing.AsyncIterator[bytes]:
     """The body as it came off the wire. A body an in-memory transport handed over
     whole (`is_stream_consumed`) is used as is: with identity enforced, raw and
     decoded are the same bytes."""
-    return [response.content] if response.is_stream_consumed else response.iter_raw()
-
-
-async def _araw_chunks(response: httpx.Response) -> typing.AsyncIterator[bytes]:
     if response.is_stream_consumed:
         yield response.content
         return
@@ -380,118 +376,29 @@ def check_served_chain(chain: str, status: int, payload: Any) -> None:
         raise Unavailable(f"the RPC configured for {chain} serves eip155:{served}")
 
 
-def _read_capped(chunks: Iterable[bytes], deadline: float, what: str) -> bytes:
-    """A body, read chunk by chunk: capped in size and cut at the deadline."""
-    parts: List[bytes] = []
-    total = 0
-    for chunk in chunks:
-        total += len(chunk)
-        if total > MAX_BODY_BYTES:
-            raise Unavailable(f"{what} sent more than {MAX_BODY_BYTES} bytes")
-        parts.append(chunk)
-        if time.monotonic() > deadline:
-            raise Unavailable(f"{what} was still sending when the budget of this call ran out")
-    return b"".join(parts)
-
-
-def _left(deadline: float) -> httpx.Timeout:
-    return httpx.Timeout(max(deadline - time.monotonic(), 0.001))
-
-
-def run_sync(
+async def run_bounded(
     gen: Step[T],
     *,
     rpc: Mapping[str, str],
-    client: httpx.Client,
+    client: httpx.AsyncClient,
     timeout: float,
     verified_chains: Optional[Set[str]] = None,
 ) -> T:
-    """Drive a resolution generator to its end over a blocking client.
+    """`run_async` under THE deadline of the call: one `asyncio.wait_for`.
 
-    `verified_chains` is the set of chains whose RPC already answered the right
-    `eth_chainId`; a resolver passes its own so the check runs once per chain.
+    Both `resolve()` and `resolve_sync()` go through here. When the budget runs
+    out whatever is pending is cancelled and `Unavailable` is raised; the
+    resolver turns it into `rpc_unavailable`.
     """
-    deadline = time.monotonic() + timeout
-    verified = verified_chains if verified_chains is not None else set()
-    value: Any = None
-    exc: Optional[BaseException] = None
-    # Every socket operation of the default transport is capped to `deadline`
-    # (`_deadline.py`). The checks below stay: they are what a consumer's own
-    # `transport=` gets.
-    with deadline_scope(deadline):
-        while True:
-            try:
-                request = gen.throw(exc) if exc is not None else gen.send(value)
-            except StopIteration as stop:
-                result: T = stop.value
-                return result
-            value, exc = None, None
-            if time.monotonic() >= deadline:
-                exc = Unavailable(f"the {timeout:g}s budget of this call ran out")
-                continue
-            try:
-                value = _do_sync(request, rpc, client, deadline, verified)
-            except (Unavailable, Reverted) as failure:
-                exc = failure
-
-
-def _post_rpc_sync(
-    client: httpx.Client, url: str, body: Dict[str, Any], chain: str, deadline: float
-) -> Tuple[int, Any]:
     try:
-        with client.stream("POST", url, json=body, timeout=_left(deadline)) as response:
-            raw = _read_capped(response.iter_bytes(), deadline, f"the {chain} RPC")
-            status = response.status_code
-    except httpx.TimeoutException:
-        raise Unavailable(f"the {chain} RPC timed out") from None
-    except httpx.HTTPError as err:
-        raise Unavailable(f"the {chain} RPC is unreachable ({type(err).__name__})") from None
-    try:
-        return status, json.loads(raw)
-    except ValueError:
-        raise Unavailable(f"the {chain} RPC answered something that is not JSON") from None
-
-
-def _do_sync(
-    request: Request,
-    rpc: Mapping[str, str],
-    client: httpx.Client,
-    deadline: float,
-    verified: Set[str],
-) -> Any:
-    if isinstance(request, Call):
-        url = rpc.get(request.chain)
-        if not url:
-            raise Unavailable(f"no RPC configured for {request.chain}")
-        if request.chain not in verified:
-            status, payload = _post_rpc_sync(client, url, _CHAIN_ID_BODY, request.chain, deadline)
-            check_served_chain(request.chain, status, payload)
-            verified.add(request.chain)
-        status, payload = _post_rpc_sync(client, url, rpc_body(request), request.chain, deadline)
-        return rpc_result(status, payload, request.chain)
-    url = request.url
-    for _ in range(MAX_REDIRECTS + 1):
-        if time.monotonic() >= deadline:
-            raise Unavailable("the budget of this call ran out before a redirect")
-        check_url(url)
-        method = "GET" if request.body is None else "POST"
-        host = urlsplit(url).hostname
-        try:
-            with client.stream(
-                method, url, content=request.body, headers=_FETCH, timeout=_left(deadline)
-            ) as response:
-                target = _redirect_target(response, url)
-                if target is not None:
-                    url = target
-                    continue
-                _refuse_encoded(response, host)
-                body = _read_capped(_raw_chunks(response), deadline, str(host))
-                return FetchResponse(response.status_code, body)
-        except httpx.TimeoutException:
-            raise Unavailable(f"{host} timed out") from None
-        except httpx.HTTPError as err:
-            raise Unavailable(f"{host} is unreachable ({type(err).__name__})") from None
-    raise Unavailable(f"more than {MAX_REDIRECTS} redirects")
+        return await asyncio.wait_for(
+            run_async(
+                gen, rpc=rpc, client=client, timeout=timeout, verified_chains=verified_chains
+            ),
+            timeout,
+        )
+    except asyncio.TimeoutError:
+        raise Unavailable(f"the {timeout:g}s budget of this call ran out") from None
 
 
 async def run_async(
@@ -504,8 +411,11 @@ async def run_async(
 ) -> T:
     """Drive a resolution generator to its end over an async client.
 
-    Each request runs under `asyncio.wait_for(…, remaining)`: the deadline is
-    hard here, drips included. `verified_chains` as in `run_sync`.
+    Not bounded by itself: `run_bounded` is. The clock is still checked between
+    requests and each request gets the remainder as httpx's timeout — that is
+    what stops a test double that BLOCKS the loop, which no cancellation reaches.
+    `verified_chains` is the set of chains whose RPC already answered the right
+    `eth_chainId`; a resolver passes its own so the check runs once per chain.
     """
     deadline = time.monotonic() + timeout
     verified = verified_chains if verified_chains is not None else set()
@@ -518,30 +428,39 @@ async def run_async(
             result: T = stop.value
             return result
         value, exc = None, None
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if time.monotonic() >= deadline:
             exc = Unavailable(f"the {timeout:g}s budget of this call ran out")
             continue
         try:
-            value = await asyncio.wait_for(
-                _do_async(request, rpc, client, remaining, verified), remaining
-            )
-        except asyncio.TimeoutError:
-            exc = Unavailable(f"the {timeout:g}s budget of this call ran out")
+            value = await _do_async(request, rpc, client, deadline, verified)
         except (Unavailable, Reverted) as failure:
             exc = failure
 
 
-async def _post_rpc_async(
-    client: httpx.AsyncClient, url: str, body: Dict[str, Any], chain: str, limit: httpx.Timeout
+def _left(deadline: float) -> httpx.Timeout:
+    return httpx.Timeout(max(deadline - time.monotonic(), 0.001))
+
+
+async def _post_rpc(
+    client: httpx.AsyncClient, url: str, body: Dict[str, Any], chain: str, deadline: float
 ) -> Tuple[int, Any]:
+    """One JSON-RPC exchange, its body capped (an RPC may gzip: decoded bytes)."""
     try:
-        response = await client.post(url, json=body, timeout=limit)
-        return response.status_code, response.json()
+        async with client.stream("POST", url, json=body, timeout=_left(deadline)) as response:
+            parts: List[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_BODY_BYTES:
+                    raise Unavailable(f"the {chain} RPC sent more than {MAX_BODY_BYTES} bytes")
+                parts.append(chunk)
+            status = response.status_code
     except httpx.TimeoutException:
         raise Unavailable(f"the {chain} RPC timed out") from None
     except httpx.HTTPError as err:
         raise Unavailable(f"the {chain} RPC is unreachable ({type(err).__name__})") from None
+    try:
+        return status, json.loads(b"".join(parts))
     except ValueError:
         raise Unavailable(f"the {chain} RPC answered something that is not JSON") from None
 
@@ -550,51 +469,98 @@ async def _do_async(
     request: Request,
     rpc: Mapping[str, str],
     client: httpx.AsyncClient,
-    remaining: float,
+    deadline: float,
     verified: Set[str],
 ) -> Any:
-    limit = httpx.Timeout(remaining)
     if isinstance(request, Call):
         url = rpc.get(request.chain)
         if not url:
             raise Unavailable(f"no RPC configured for {request.chain}")
         if request.chain not in verified:
-            status, payload = await _post_rpc_async(
-                client, url, _CHAIN_ID_BODY, request.chain, limit
-            )
+            status, payload = await _post_rpc(client, url, _CHAIN_ID_BODY, request.chain, deadline)
             check_served_chain(request.chain, status, payload)
             verified.add(request.chain)
-        status, payload = await _post_rpc_async(
-            client, url, rpc_body(request), request.chain, limit
-        )
+        status, payload = await _post_rpc(client, url, rpc_body(request), request.chain, deadline)
         return rpc_result(status, payload, request.chain)
     url = request.url
     for _ in range(MAX_REDIRECTS + 1):
+        if time.monotonic() >= deadline:
+            raise Unavailable("the budget of this call ran out before a redirect")
         check_url(url)
         method = "GET" if request.body is None else "POST"
+        host = urlsplit(url).hostname
         try:
             async with client.stream(
-                method, url, content=request.body, headers=_FETCH, timeout=limit
+                method, url, content=request.body, headers=_FETCH, timeout=_left(deadline)
             ) as response:
                 target = _redirect_target(response, url)
                 if target is not None:
                     url = target
                     continue
-                _refuse_encoded(response, urlsplit(url).hostname)
-                chunks = []
+                _refuse_encoded(response, host)
+                parts: List[bytes] = []
                 total = 0
-                async for chunk in _araw_chunks(response):
+                async for chunk in _raw_chunks(response):
                     total += len(chunk)
                     if total > MAX_BODY_BYTES:
-                        raise Unavailable(
-                            f"{urlsplit(url).hostname} sent more than {MAX_BODY_BYTES} bytes"
-                        )
-                    chunks.append(chunk)
-                return FetchResponse(response.status_code, b"".join(chunks))
+                        raise Unavailable(f"{host} sent more than {MAX_BODY_BYTES} bytes")
+                    parts.append(chunk)
+                return FetchResponse(response.status_code, b"".join(parts))
         except httpx.TimeoutException:
-            raise Unavailable(f"{urlsplit(url).hostname} timed out") from None
+            raise Unavailable(f"{host} timed out") from None
         except httpx.HTTPError as err:
-            raise Unavailable(
-                f"{urlsplit(url).hostname} is unreachable ({type(err).__name__})"
-            ) from None
+            raise Unavailable(f"{host} is unreachable ({type(err).__name__})") from None
     raise Unavailable(f"more than {MAX_REDIRECTS} redirects")
+
+
+# ---------------------------------------------------------------------------
+# The sync flavour: the async engine, on a private loop
+# ---------------------------------------------------------------------------
+
+
+def _run_on_private_loop(coro: typing.Coroutine[Any, Any, T]) -> T:
+    """`asyncio.run` minus the wait for the default executor (see the header)."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            # `close()` shuts the default executor down WITHOUT waiting: a DNS
+            # lookup still running there finishes on its own, off the caller's time.
+            loop.close()
+
+
+def run_blocking(make: Callable[[], typing.Coroutine[Any, Any, T]]) -> T:
+    """Run the coroutine `make()` returns, from sync code, and return its result.
+
+    With no loop running in this thread, on a private loop right here. With one
+    running (a `_sync` call from async code), on a private loop in a thread of
+    its own — loops do not nest — and this thread waits for it: calling a
+    blocking function from async code blocks it, as it would anyway.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _run_on_private_loop(make())
+    box: Dict[str, Any] = {}
+
+    def worker() -> None:
+        try:
+            box["result"] = _run_on_private_loop(make())
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=worker, name="uvd-names-sync", daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in box:
+        raise box["error"]
+    result: T = box["result"]
+    return result

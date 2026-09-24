@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, AsyncIterator, Dict, List, Tuple
 
 import httpx
 import pytest
@@ -91,9 +91,12 @@ class Cadena:
 # ---------------------------------------------------------------------------
 
 
-def _goteo(texto: str, pausa: float) -> Iterator[bytes]:
+async def _goteo(texto: str, pausa: float) -> AsyncIterator[bytes]:
+    # Async desde la ronda 4: el modo sync corre sobre el motor async, y un cliente
+    # async no puede leer un cuerpo que es un generador sync (httpx lo rechaza).
+    # El goteo es el mismo; lo que cambió es por dónde se lee.
     for byte in texto.encode():
-        time.sleep(pausa)
+        await asyncio.sleep(pausa)
         yield bytes([byte])
 
 

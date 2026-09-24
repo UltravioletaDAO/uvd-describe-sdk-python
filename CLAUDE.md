@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 487 pasan, 19-22 s, SIN RED (re-medido 2026-09-24 en py3.13 y py3.9 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 3 del PR #6 de `names` — los de `test_names_ronda3.py` usan un servidor local en 127.0.0.1; eran 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 495 pasan, 24-26 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-24 en py3.13 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 4 del PR #6 de `names` — los de `test_names_ronda3.py` y `test_names_ronda4.py` usan un servidor local en 127.0.0.1; eran 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -188,10 +188,11 @@ cada módulo de `names/`):
    Mutación AG.
 8. **Orden estricto en el reverse**: si un sistema de arriba no se pudo
    preguntar, no se contesta con uno de abajo. Mutación AH.
-9. **Sync y async sobre los MISMOS pasos** (`names/_proto.py`, generadores
-   sans-IO). Es la salida que la pregunta abierta 3 (abajo) pedía para
-   `DescribeClient`, aplicada primero acá. `test_names_hechos_medidos.py` corre
-   cada grabación por las dos variantes.
+9. **UN motor** (`names/_proto.py`, generadores sans-IO que corre
+   `run_async`): la variante `_sync` es ese mismo motor en un loop propio
+   (`run_blocking`), no un motor aparte — ver el punto 12. Es la salida que la
+   pregunta abierta 3 (abajo) pedía para `DescribeClient`, aplicada primero acá.
+   `test_names_hechos_medidos.py` corre cada grabación por las dos variantes.
 10. ⚠️ **SNS (`.sol`) es `unsupported_system` a propósito**: el `sns-sdk`
     oficial (`536f0cb`, leído el 2026-09-24) apaga la resolución legacy de `.sol`
     en el slot finalizado 452.825.395 (≈ 2026-10-15) y el camino nuevo (SRS) sigue
@@ -205,31 +206,41 @@ cada módulo de `names/`):
 **Ronda 2 del PR #6** (refutación sobre `c9d67c6`: 0 P0, 2 P1, 5 P2; cada
 hallazgo se verificó contra el código antes de tocarlo):
 
-12. 🔴 **El timeout sync se acota en el SOCKET** (`names/_deadline.py`): el
-    transporte por defecto del resolver (httpcore con un backend propio, API
-    pública) le da a cada connect, lectura, escritura y handshake TLS
-    `min(su timeout, lo que queda)`. Encima, cada cuerpo se lee por chunks contra
-    el reloj, no se sigue un redirect pasado el plazo, y a los gateways se les pide
-    `Accept-Encoding: identity` (un gzip se rechaza; el tope cuenta bytes del
-    cable). Medido con un servidor local, presupuesto 1,0 s: headers goteando,
-    11,43 s → 1,00 s. **Sin acotar, escrito**: el DNS (`getaddrinfo` no tiene
-    timeout) y un `transport=` del consumidor (sólo le aplican los chequeos de
-    chunk y redirect). Los clientes de `names` usan `trust_env=False`: no leen
-    proxies del entorno (la regla de este SDK). Mutaciones AM (chunk), AV
-    (socket), AW (identity) y AY (redirect).
-    ⚠️ **Corregido dos veces, las dos escritas**: la ronda 2 dijo «el motor sync
-    lee por chunks… el peor exceso es UNA lectura», y la ronda 3 midió que era
-    falso — httpx espera los headers completos antes de que exista un chunk, y
-    httpcore fija el read timeout una vez por request: headers goteando 15,2 s y
-    un header gzip (FCOMMENT) goteando 10,15 s. Dos veces un texto afirmó una
-    cota que el código no tenía.
+12. 🔴 **Sync = el motor async bajo UN deadline duro** (decisión de c0der,
+    ronda 4). `run_bounded` corre `run_async` bajo un solo `asyncio.wait_for`, el
+    presupuesto cuenta desde que entra la llamada pública, y `resolve_sync()` lo
+    corre con `run_blocking`: en un loop propio, o en un hilo propio con su loop
+    si el hilo que llama ya tiene uno corriendo (los loops no se anidan).
+    **No usa `asyncio.run`, y es medido**: `asyncio.run` espera al executor donde
+    corre `getaddrinfo` — 0,5 s de presupuesto → 3,01 s; con el loop propio
+    cerrado sin esperar, 0,5 s. Así el DNS, que en la ronda 3 quedó «sin acotar»,
+    ahora también se corta. Medido con un servidor local, presupuesto 1,0 s: un
+    connect sobre N=3 y N=5 direcciones que no contestan el SYN → 1,00 s (con el
+    motor sync propio de la ronda 3, N=5 → 5,00 s y N=10 → 10,00 s). Casos A/B/C/D
+    del verificador (cuerpo, headers, gzip) también por el motor único. Un solo
+    contexto TLS por resolver (`AsyncClient()` arma uno cada vez: 0,34 s; reusado,
+    0,3 ms). `transport=` tiene que servirle a un cliente async (`MockTransport`
+    sí); uno sólo-sync se rechaza al construir. Los proxies del entorno SÍ se leen,
+    como en `DescribeClient` (default de httpx). Mutaciones BA (el `wait_for`),
+    BB (el hilo), BC (`asyncio.run`), BD (transporte sólo-sync), BE (el contexto
+    TLS), AW (identity) y AY (redirect). `names/_deadline.py` se borró.
+    ⚠️ **Tres correcciones, las tres escritas**: la ronda 2 dijo que leer por
+    chunks hacía duro el timeout sync; la ronda 3 midió que no (headers goteando
+    15,2 s, un header gzip goteando 10,15 s) y lo acotó en el socket; la ronda 4
+    midió que tampoco (el connect sobre N direcciones: 5,00 s y 10,00 s). A la
+    tercera ronda sin converger se dejó de parchar el síntoma y se achicó lo
+    refutable: ya no hay motor sync. Y un aviso que salió de esta misma ronda: el
+    primer doble de DNS del test comparaba el host con un `str`, anyio lo pasa en
+    BYTES, y la consulta se fue al DNS real en verde — por eso el guard de red de
+    `tests/conftest.py` es obligatorio (mutación BF).
 13. 🔴 **El RPC se verifica contra su cadena**: un `eth_chainId` por cadena y por
     resolver antes del primer `eth_call`; si no coincide con la clave CAIP-2 es
     `rpc_unavailable`, nombrando la cadena servida y nunca la URL. Medido por el
     refutador: el RPC de Sepolia bajo `eip155:1` resolvía con
     `verified_onchain=True`. Las fixtures NO lo graban: `names_replay.py` lo
-    contesta desde la clave (sintético, rotulado). Mutaciones AO (sync) y AX
-    (async; no tenía test hasta la ronda 3).
+    contesta desde la clave (sintético, rotulado). Mutaciones AO y AX (esta no
+    tenía test en el motor async hasta la ronda 3; desde la ronda 4 hay un solo
+    motor y la verifican las dos variantes).
 14. **Un `Reverted` en el reverse es `rpc_unavailable`** (el registro de ENS no
     revierte en `resolver()`: es un RPC que revierte todo), con el orden estricto
     del punto 8. Antes escapaba como excepción privada. Mutación AN.
@@ -395,17 +406,17 @@ docstrings:
 | **Z.** 🔴 sacar la comparación `pointed != address` de `_ens.confirm` | **1 rojo**: `test_un_nombre_que_apunta_a_OTRA_direccion_es_reverse_mismatch` — con el forward GRABADO de `0xultravioleta.eth` confrontado con la dirección de Jesse |
 | **AA.** 🔴 que `parse_name_resolution` herede `verified_onchain` del cuerpo | **2 rojos**: `test_la_api_http_devuelve_verified_onchain_False_aunque_el_servidor_diga_True` y `test_un_destino_de_pago_exige_verified_onchain` |
 | **AB.** cachear los errores que no son respuesta de la cadena (`rpc_unavailable`…) | **4 rojos**: los 3 del parametrizado de `NameCache` y `test_un_fallo_de_transporte_no_se_cachea_y_la_siguiente_pregunta_de_nuevo`. Re-medido en la ronda 2: **9 rojos** (se suman los que miran la caché vacía tras un `rpc_unavailable`); en la ronda 3: **10** |
-| **AC.** saltear `check_expiry` antes de resolver | **24 rojos**: toda grabación ENS/Basenames deja de coincidir con lo que se pidió en vivo — el vencimiento es la primera lectura. Re-medido en la ronda 2: **25** |
+| **AC.** saltear `check_expiry` antes de resolver | **24 rojos**: toda grabación ENS/Basenames deja de coincidir con lo que se pidió en vivo — el vencimiento es la primera lectura. Re-medido en la ronda 2: **25**; en la ronda 4: **27** |
 | **AD.** saltear el chequeo ENSIP-15 del nombre reclamado en `confirm` | **3 rojos**: la grabación del hook de CoW en sync y async, y `test_un_reverse_no_normalizado_es_reverse_mismatch` |
 | **AE.** normalizar con `typed.lower()` en vez de ENSIP-15 (el bug de EM) | **6 rojos**: 5 nombres inválidos que pasaban y `test_la_normalizacion_es_ENSIP15_y_no_lower` |
 | **AF.** sacar el chequeo `ownerOf == dueño` del avatar NFT | **1 rojo**: `test_erc721_que_el_nombre_NO_posee_no_da_url` (doble SINTÉTICO: no hubo grabación, ver arriba) |
 | **AG.** que `check_url` deje pasar IPs no globales | **5 rojos**: 4 del guard (`127.0.0.1`, `10.0.0.8`, `169.254.169.254`, `[::1]`) y la metadata en IP privada |
-| **AH.** en el reverse, que un sistema caído no corte (`except Unavailable` → otra excepción) | **1 rojo**: `test_reverse_con_un_sistema_de_arriba_caido_no_contesta_con_uno_de_abajo`. ⚠️ Antes de ese test la mutación daba **0 rojos**: la regla no estaba atada, y se ató el mismo día. Re-medido en la ronda 2 (ahora el `except` es `(Unavailable, Reverted)`): **3 rojos** |
+| **AH.** en el reverse, que un sistema caído no corte (`except Unavailable` → otra excepción) | **1 rojo**: `test_reverse_con_un_sistema_de_arriba_caido_no_contesta_con_uno_de_abajo`. ⚠️ Antes de ese test la mutación daba **0 rojos**: la regla no estaba atada, y se ató el mismo día. Re-medido en la ronda 2 (ahora el `except` es `(Unavailable, Reverted)`): **3 rojos**; en la ronda 4: **2** |
 | **AI.** 🔴 sacar `pointed != address` del reverse de UNS/Avvy (`_resolver.py::_reverse_one`) — ronda 2 | **2 rojos**: el reverse UNS y el de Avvy cuyo nombre apunta a otra dirección (dobles SINTÉTICOS). Antes: 448 verdes |
 | **AJ.** 🔴 aceptar la dirección cero en `_uns.forward` | **2 rojos**: `0x000…0` y `0X000…0`. Antes: 448 verdes |
 | **AK.** 🔴 aceptar la dirección cero en `_avvy.forward` | **2 rojos**: `0x000…0` y `0X000…0`. Antes: 448 verdes |
 | **AL.** sacar el chequeo de forma normal del reverse de UNS/Avvy | **1 rojo**: `Evil.crypto`, que apunta de vuelta a la dirección y aun así no se muestra. Antes: 448 verdes |
-| **AM.** 🔴 no mirar el plazo entre chunks (`_proto._read_capped`) | **2 rojos**: el gateway CCIP que gotea (grabación real de `jesse.base.eth` con el goteo sintético) y el RPC que gotea |
+| **AM.** 🔴 no mirar el plazo entre chunks (`_proto._read_capped`) | **2 rojos**: el gateway CCIP que gotea (grabación real de `jesse.base.eth` con el goteo sintético) y el RPC que gotea. **Retirada en la ronda 4**: `_read_capped` era del motor sync, que se borró; esos dos tests los cuida ahora BA |
 | **AN.** que el reverse no atrape `Reverted` | **2 rojos**: el RPC que revierte todo, sync y async (levantaba una excepción privada) |
 | **AO.** 🔴 no verificar `eth_chainId` contra la clave CAIP-2 | **1 rojo**: `test_un_RPC_de_otra_cadena_bajo_la_clave_de_mainnet_es_rpc_unavailable`. En la ronda 3 (el test pasó a sync + async): **2** |
 | **AP.** mandar las cinco colisiones ICANN/UNS a UNS | **5 rojos**: una por TLD. En la ronda 3: **6** (se suma el de ancho completo) |
@@ -414,11 +425,17 @@ docstrings:
 | **AS.** seguir un `OffchainLookup` cuyo sender no es el resolver | **1 rojo**: el doble del gateway registra que SÍ se le pidió |
 | **AT.** que un 4xx del gateway pase a la URL siguiente | **2 rojos**: 404 y 403 |
 | **AU.** que `require_onchain_address` acepte la dirección cero | **1 rojo**: un `NameResolution` armado a mano con `0x000…0` |
-| **AV.** 🔴 que el backend de `_deadline.py` no acote el socket al plazo — ronda 3 | **4 rojos**: el RPC local que gotea headers y el que gotea un gzip (FCOMMENT), el gateway local que gotea headers, y el tope del backend. Servidor REAL en 127.0.0.1: sin la cota, headers goteando = 11,43 s |
-| **AW.** leer el cuerpo gzip de un gateway (sacar `_refuse_encoded`) | **1 rojo**: `test_un_gateway_pide_identity_y_un_cuerpo_gzip_no_se_lee` |
-| **AX.** 🔴 sacar el `eth_chainId` del motor ASYNC | **1 rojo**: el caso `[async]` del test de Sepolia. Antes de la ronda 3: 476 verdes |
+| **AV.** 🔴 que el backend de `_deadline.py` no acote el socket al plazo — ronda 3 | **4 rojos**: el RPC local que gotea headers y el que gotea un gzip (FCOMMENT), el gateway local que gotea headers, y el tope del backend. Servidor REAL en 127.0.0.1: sin la cota, headers goteando = 11,43 s. **Retirada en la ronda 4**: `_deadline.py` se borró (sync = el motor async); esos casos los cuida ahora BA |
+| **AW.** leer el cuerpo gzip de un gateway (sacar `_refuse_encoded`) | **1 rojo**: `test_un_gateway_pide_identity_y_un_cuerpo_gzip_no_se_lee`. En la ronda 4 (el test corre sync y async, P3-b): **2** |
+| **AX.** 🔴 sacar el `eth_chainId` del motor ASYNC | **1 rojo**: el caso `[async]` del test de Sepolia. Antes de la ronda 3: 476 verdes. En la ronda 4 (un solo motor): **2**, sync y async |
 | **AY.** seguir un redirect pasado el plazo | **1 rojo**: `test_un_redirect_no_se_sigue_pasado_el_presupuesto`. Antes: 476 verdes |
 | **AZ.** decidir la colisión antes que la forma | **4 rojos**: `a b.travel`, `x..travel`, `a_b.guide` y el de ancho completo, que salía crudo de `normalize()` |
+| **BA.** 🔴 quitar EL `asyncio.wait_for` de `run_bounded` — ronda 4, la que pidió la decisión | **8 rojos**: los casos A/B/C/D contra el servidor local (RPC con cuerpo, headers y gzip goteando; gateway con cuerpo y headers goteando), los dos goteos de la ronda 2 y `test_async_el_timeout_es_duro_aunque_el_servidor_no_conteste` |
+| **BB.** que `run_blocking` no use un hilo propio cuando el hilo que llama ya corre un loop | **1 rojo**: `test_un_sync_llamado_desde_codigo_async_da_lo_mismo` (los loops no se anidan) |
+| **BC.** usar `asyncio.run` en vez del loop propio | **1 rojo**: `test_sync_un_DNS_lento_no_retiene_la_llamada` — `asyncio.run` espera al `getaddrinfo` del executor |
+| **BD.** aceptar un transporte sólo-sync | **1 rojo**: `test_un_transporte_solo_sync_se_rechaza_al_construir` |
+| **BE.** un contexto TLS por llamada | **1 rojo**: `test_un_solo_contexto_TLS_por_resolver` (0,34 s cada uno, medido) |
+| **BF.** 🔴 el guard de red: el doble de DNS de la ronda 4 vuelve a comparar bytes con `str` (el bug que tuvo) | **1 ERROR de sesión**: el test pasa en VERDE —la consulta se va al DNS real y falla rápido— y el guard de `tests/conftest.py` hace fallar la sesión con el intento anotado (el único rojo de la corrida es ese error de teardown) |
 
 **M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
 KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un
@@ -491,7 +508,11 @@ publicada mienta.
 - **No lee env vars.** Todo entra por constructor. Es lo que lo hace testeable
   sin entorno y embebible en cualquier proceso. **El riel de partner no es una
   excepción**: recibe un objeto que firma, no una clave ni el nombre de la
-  variable donde vive.
+  variable donde vive. ⚠️ Precisión del 2026-09-24 (ronda 4 del PR #6): el código
+  del SDK no lee env vars, pero **httpx sí lee los proxies del entorno**
+  (`HTTP(S)_PROXY`, `NO_PROXY`) por default, en `DescribeClient` y en `names` por
+  igual. En la ronda 3 `names` los apagó llamándolo «regla del SDK», y no lo era:
+  se volvió al default, igual que `DescribeClient`.
 - **No custodia ninguna clave.** ⚠️ Corregido el 2026-08-30 y se deja escrito:
   hasta hoy esto se decía como «no firma», y con el riel de partner eso ya no es
   exacto — el SDK **sí produce una firma ERC-8128**. Lo que la frase quería
@@ -541,8 +562,10 @@ publicada mienta.
    sync: para adoptarlo tendría que envolverlo en un thread. La salida sería un
    `aio.py` de transporte fino reusando estos parsers, **sin duplicar una línea
    de política**. No está escrito. ⚠️ 2026-09-24: el patrón ya existe en el repo
-   — `names/_proto.py` (pasos como generadores sans-IO, `run_sync` y
-   `run_async`) — y es el molde si algún día se hace para `DescribeClient`.
+   — `names/_proto.py` (pasos como generadores sans-IO, UN motor `run_async`
+   bajo `run_bounded`, y `run_blocking` para la variante sync) — y es el molde si
+   algún día se hace para `DescribeClient`. Ojo con lo que costó llegar ahí: tres
+   rondas del PR #6 encontraron agujeros en un motor sync aparte.
 
 ---
 

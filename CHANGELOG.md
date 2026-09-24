@@ -13,15 +13,15 @@ Changes merged since the last release accumulate here, each with its label
 ### [feature] `uvd_describe_sdk.names` — the one name resolver of the stack
 
 Name → address and address → name, read on-chain, behind a new extra:
-`pip install "uvd-describe-sdk[names]"` (`ens-normalize`, `pycryptodome`, and
-`httpcore>=1.0,<2`, which httpx already installs and the sync deadline imports
-directly). The base
+`pip install "uvd-describe-sdk[names]"` (`ens-normalize`, `pycryptodome`). The base
 install still depends on `httpx` only.
 
 - **`NameResolver(rpc=..., systems=..., cache=..., timeout=...)`** with `resolve`,
-  `reverse`, `text`, `avatar` (async) and their `*_sync` variants, built on one set
-  of resolution steps; `normalize` and `detect` need no network. `rpc` is keyed by
-  CAIP-2 chain id and the SDK ships no RPC URL.
+  `reverse`, `text`, `avatar` (async) and their `*_sync` variants — ONE engine: the
+  `*_sync` variants run the async one on a private event loop; `normalize` and
+  `detect` need no network. `rpc` is keyed by CAIP-2 chain id and the SDK ships no
+  RPC URL. `transport=` must be usable by an async client (`httpx.MockTransport`
+  is); a sync-only transport is refused at construction.
 - **Systems**: ENS (`.eth`, subnames, ENSIP-10 wildcards, EIP-3668 CCIP-Read,
   expiry), Basenames (`*.base.eth` through L1 + CCIP; expiry and the ENSIP-19
   primary name on Base), DNS names imported into ENS (DNSSEC / offchain resolver),
@@ -54,13 +54,13 @@ install still depends on `httpx` only.
   `verified_onchain=False`.
 - CCIP gateway and NFT metadata URLs go through a guard: `https://` only, no
   credentials, no `localhost`, no IP literal outside the global address space.
-- The `timeout` bounds the whole call. Async: `asyncio.wait_for`. Sync: the
-  resolver's default transport caps every connect, read, write and TLS handshake
-  to what is left of the budget (a server dripping its headers is cut), bodies are
-  read in chunks against the clock, and no redirect is followed past it. Not
-  bounded in sync: DNS resolution, and a `transport=` the consumer passes (only
-  the chunk and redirect checks apply to it). The names clients read nothing from
-  the environment, proxies included.
+- The `timeout` bounds the whole call, counted from its start, with ONE
+  `asyncio.wait_for` in both flavours: a dripping body, dripping headers, a gzip
+  header that never ends, a connect over N addresses and a slow DNS lookup are all
+  cut at the budget (tests against a local server). The sync flavour does not use
+  `asyncio.run`, which waits for the executor where DNS runs. Environment proxies
+  are honoured as in `DescribeClient` (httpx's default); a `transport=` replaces
+  them.
 - Gateway and NFT metadata requests send `Accept-Encoding: identity`; a body in
   any other encoding is refused (`rpc_unavailable`), and the size cap counts wire
   bytes.

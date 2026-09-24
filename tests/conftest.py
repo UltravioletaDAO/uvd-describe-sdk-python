@@ -14,14 +14,21 @@ de referencia de Execution Market.
 
 from __future__ import annotations
 
+import errno
+import ipaddress
 import json
+import socket
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import httpx
 import pytest
 
 from uvd_describe_sdk import DescribeClient
+
+# Los fixtures del servidor local de los tests de `names` (rondas 3 y 4 del PR
+# #6), registrados acá para que los módulos no los importen como nombres sueltos.
+from .names_servidor import servidor, sin_proxies  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Capturas literales de api.describe.net — 2026-08-30
@@ -333,3 +340,77 @@ def make_client() -> Callable[..., DescribeClient]:
 def recorded_errors() -> List[Any]:
     """Lista donde el `on_error` del cliente deja lo que el fail-open tragó."""
     return []
+
+
+# ---------------------------------------------------------------------------
+# La red cerrada, VERIFICADA: ningún test sale de loopback
+# ---------------------------------------------------------------------------
+#
+# Hasta la ronda 3 del PR #6 la red se cerraba desde afuera, con
+# `HTTPS_PROXY=http://127.0.0.1:9`. Desde la ronda 4 `names` usa httpx con sus
+# defaults y un test con `transport=` no pasa por ningún proxy, así que eso ya no
+# PRUEBA nada. Y se midió que hacía falta: el primer doble de DNS del test de la
+# ronda 4 comparaba el host con un `str`, anyio lo pasa en bytes, y la consulta
+# se fue al DNS real — en verde. Este guard corta `getaddrinfo` y `connect` fuera
+# de loopback, anota cada intento, y la sesión falla si hubo alguno aunque el
+# test que lo hizo haya pasado.
+
+_INTENTOS_DE_RED: List[str] = []
+
+
+def _es_loopback(host: Any) -> bool:
+    if host is None:
+        return True
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    host = str(host).strip("[]").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _red_cerrada() -> Iterator[None]:
+    real_getaddrinfo = socket.getaddrinfo
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if not _es_loopback(host):
+            _INTENTOS_DE_RED.append(f"getaddrinfo({host!r})")
+            raise socket.gaierror(socket.EAI_NONAME, f"red cerrada en los tests: {host!r}")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def _fuera(sock: socket.socket, address: Any) -> bool:
+        if sock.family not in (socket.AF_INET, socket.AF_INET6):
+            return False
+        destino = address[0] if isinstance(address, tuple) else address
+        return not _es_loopback(destino)
+
+    def connect(self: socket.socket, address: Any) -> None:
+        if _fuera(self, address):
+            _INTENTOS_DE_RED.append(f"connect({address!r})")
+            raise OSError(f"red cerrada en los tests: {address!r}")
+        real_connect(self, address)
+
+    def connect_ex(self: socket.socket, address: Any) -> int:
+        if _fuera(self, address):
+            _INTENTOS_DE_RED.append(f"connect_ex({address!r})")
+            return errno.ECONNREFUSED
+        return real_connect_ex(self, address)
+
+    socket.getaddrinfo = getaddrinfo  # type: ignore[assignment]
+    socket.socket.connect = connect  # type: ignore[method-assign]
+    socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real_getaddrinfo  # type: ignore[assignment]
+        socket.socket.connect = real_connect  # type: ignore[method-assign]
+        socket.socket.connect_ex = real_connect_ex  # type: ignore[method-assign]
+    assert not _INTENTOS_DE_RED, (
+        f"hubo {len(_INTENTOS_DE_RED)} intento(s) de red fuera de loopback: {_INTENTOS_DE_RED}"
+    )

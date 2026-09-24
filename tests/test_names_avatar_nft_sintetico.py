@@ -25,9 +25,8 @@ import pytest
 from uvd_describe_sdk.names import _abi
 from uvd_describe_sdk.names._avatar import NoAvatar, nft_image
 from uvd_describe_sdk.names._hash import selector
-from uvd_describe_sdk.names._proto import run_sync
 
-from .names_replay import answer_chain_id
+from .names_replay import answer_chain_id, drive
 
 DUENO = "0x" + "11" * 20
 OTRO = "0x" + "22" * 20
@@ -52,10 +51,7 @@ def _responde(tabla: Dict[bytes, bytes], http: Dict[str, Any]) -> httpx.MockTran
 
 
 def _correr(record: str, transport: httpx.MockTransport) -> str:
-    with httpx.Client(transport=transport) as client:
-        url: str = run_sync(
-            nft_image(record, DUENO, "https://ipfs.io"), rpc=RPC, client=client, timeout=5
-        )
+    url: str = drive(nft_image(record, DUENO, "https://ipfs.io"), transport, rpc=RPC, timeout=5)
     return url
 
 
