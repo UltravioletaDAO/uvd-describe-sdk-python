@@ -619,7 +619,12 @@ RPC's `eth_chainId` once against its key: a Sepolia URL under `eip155:1` is
 the WHOLE call, counted from its start: there is ONE engine (async), and the
 `_sync` variants run it on a private event loop under the same `asyncio.wait_for`
 — dripping bodies or headers, a connect over many addresses, a slow DNS lookup
-are cut at the budget. Environment proxies are honoured as in `DescribeClient`.
+are cut at the budget. The `_sync` variants open a client per call: a new TCP (and
+TLS) connection each time, no keep-alive between calls (measured: 10
+`resolve_sync()` → 10 connections; 10 `await resolve()` on one resolver → 1), so
+resolve in bulk with the async flavour. A `_sync` call made from async code
+(asyncio, trio) runs on a thread of its own. Environment proxies are honoured as in
+`DescribeClient`.
 The cache is an LRU with a positive TTL (300 s) and a shorter negative
 TTL (60 s), never stores `rpc_unavailable`, and its key is the question, not the
 resolver's configuration — share one only between resolvers configured alike.

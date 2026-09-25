@@ -21,7 +21,14 @@ install still depends on `httpx` only.
   `*_sync` variants run the async one on a private event loop; `normalize` and
   `detect` need no network. `rpc` is keyed by CAIP-2 chain id and the SDK ships no
   RPC URL. `transport=` must be usable by an async client (`httpx.MockTransport`
-  is); a sync-only transport is refused at construction.
+  is); a sync-only transport is refused at construction, and so are two different
+  ones in `transport=` and `async_transport=` (the same object in both is fine).
+- **The `*_sync` variants open a client per call — a new TCP (and TLS) connection
+  each time, no keep-alive from one call to the next.** Measured against a local
+  keep-alive server (2026-09-24): 10 `resolve_sync()` → 10 connections; 10
+  `await resolve()` on one resolver → 1. Code that resolves in bulk should use the
+  async flavour. A `*_sync` call made from async code (asyncio, or trio and any
+  library `sniffio` knows) runs on its own loop in a thread of its own.
 - **Systems**: ENS (`.eth`, subnames, ENSIP-10 wildcards, EIP-3668 CCIP-Read,
   expiry), Basenames (`*.base.eth` through L1 + CCIP; expiry and the ENSIP-19
   primary name on Base), DNS names imported into ENS (DNSSEC / offchain resolver),

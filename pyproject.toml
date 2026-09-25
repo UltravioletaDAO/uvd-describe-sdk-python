@@ -82,6 +82,10 @@ dev = [
     # resolver no pueden correr y un resolver roto pasaría en verde.
     "ens-normalize>=3.0.7,<4",
     "pycryptodome>=3.19,<4",
+    # Mismo criterio: el test de `resolve_sync()` dentro de `trio.run` se
+    # saltea sin trio, y un `run_blocking` que sólo le pregunta a asyncio pasa
+    # en verde. Trae `sniffio`, que es lo que el SDK consulta (sin depender).
+    "trio>=0.22",
 ]
 
 [project.urls]

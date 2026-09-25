@@ -38,25 +38,52 @@ MARGEN = 0.6
 
 @pytest.fixture
 def agujero_negro() -> Iterator[int]:
-    """Un puerto en 127.0.0.1 que acepta el SYN en cola y nunca atiende."""
+    """Un puerto en 127.0.0.1 con el backlog LLENO: un SYN más no entra.
+
+    ⚠️ Corregido en la ronda 5 del PR #6, y se deja escrito: la receta vieja
+    (`listen(0)` + 8 connects no bloqueantes, sin mirar) en macOS NO llenaba
+    nada —medido por el verificador de la ronda 4: el connect entraba en 0,00 s,
+    1 connect y no N— y los dos tests
+    pasaban igual, porque un connect que entra y un 500 también caen dentro del
+    presupuesto. Ahora se llena hasta que un connect de PRUEBA, con 0,3 s, vence:
+    eso es lo que el test necesita que pase, medido en el SO donde corre
+    (Windows, 2026-09-24: 1 relleno entra, la prueba 2 vence, y un connect más
+    queda 2,00 s antes del rechazo). Y el test cuenta los connects.
+    """
     servidor = socket.socket()
     servidor.bind(("127.0.0.1", 0))
     servidor.listen(0)
     puerto = servidor.getsockname()[1]
     rellenos: List[socket.socket] = []
-    for _ in range(8):
-        relleno = socket.socket()
-        relleno.setblocking(False)
+    for _ in range(512):
+        prueba = socket.socket()
+        prueba.settimeout(0.3)
         try:
-            relleno.connect(("127.0.0.1", puerto))
-        except OSError:
-            pass
-        rellenos.append(relleno)
-    time.sleep(0.2)
+            prueba.connect(("127.0.0.1", puerto))
+        except socket.timeout:
+            prueba.close()
+            break
+        rellenos.append(prueba)
+    else:
+        pytest.fail("512 connects entraron: este SO no deja un backlog lleno en loopback")
     yield puerto
     for relleno in rellenos:
         relleno.close()
     servidor.close()
+
+
+def _contar_connects(monkeypatch: pytest.MonkeyPatch, puerto: int) -> List[float]:
+    """Cada connect que el motor intenta a `puerto` (anyio → `create_connection`)."""
+    intentos: List[float] = []
+    real = asyncio.base_events.BaseEventLoop.create_connection
+
+    async def contar(self: Any, factory: Any, host: Any = None, port: Any = None, **kw: Any) -> Any:
+        if port == puerto:
+            intentos.append(time.monotonic())
+        return await real(self, factory, host, port, **kw)
+
+    monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "create_connection", contar)
+    return intentos
 
 
 def _dns(monkeypatch: pytest.MonkeyPatch, host: str, respuesta: Any) -> None:
@@ -91,12 +118,17 @@ def test_sync_un_connect_sobre_n_direcciones_que_no_contestan_se_corta(
         lambda port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", direccion)] * n,
     )
     url = f"http://agujero.test:{agujero_negro}/"
+    intentos = _contar_connects(monkeypatch, agujero_negro)
     with NameResolver(rpc={"eip155:1": url}, cache=False, timeout=PRESUPUESTO) as resolver:
         inicio = time.monotonic()
         result = resolver.resolve_sync("ultravioletadao.eth")
         duro = time.monotonic() - inicio
     assert result.error == "rpc_unavailable"
     assert duro < PRESUPUESTO + MARGEN, f"N={n}: presupuesto {PRESUPUESTO} s, tardó {duro:.2f} s"
+    # La premisa: los SYN quedaron retenidos y el motor pasó a la dirección
+    # siguiente (anyio escalona cada 0,25 s). Con UN connect el agujero no
+    # existió y el tiempo de arriba no prueba nada.
+    assert len(intentos) >= 2, f"N={n}: {len(intentos)} connect(s) — el agujero no retuvo el SYN"
 
 
 def test_sync_un_DNS_lento_no_retiene_la_llamada(

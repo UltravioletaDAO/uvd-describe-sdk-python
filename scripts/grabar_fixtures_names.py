@@ -20,11 +20,19 @@ Las reglas de la grabación (encargo del 2026-09-24):
 Se graba con `cache=False` (cada escenario pide todo) y con el reloj del
 momento de la grabación guardado en la fixture (`now`), para que el vencimiento
 de un nombre se evalúe en el test igual que se evaluó en vivo.
+
+⚠️ Desde la ronda 4 del PR #6 hay UN motor, el async, y el script quedó roto
+sin que nada lo viera: importaba `run_sync` (borrado) y su `Grabadora` era un
+transporte sólo-sync, que `NameResolver` ahora rechaza. Corregido en la ronda 5:
+la `Grabadora` es un `httpx.AsyncBaseTransport` y `poseidon_tld_avax` corre por
+el mismo motor (`run_blocking` + `run_bounded`). `tests/test_names_ronda5_script.py`
+lo importa y lo corre contra las fixtures, sin red.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 import time
@@ -37,7 +45,13 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from uvd_describe_sdk.names import NameResolver, _abi, _avvy  # noqa: E402
-from uvd_describe_sdk.names._proto import AVALANCHE, Call, Step, run_sync  # noqa: E402
+from uvd_describe_sdk.names._proto import (  # noqa: E402
+    AVALANCHE,
+    Call,
+    Step,
+    run_blocking,
+    run_bounded,
+)
 
 #: RPC públicos, sin llave. Las mismas URLs de la documentación de cada red.
 RPC_PUBLICOS: Dict[str, str] = {
@@ -119,21 +133,32 @@ class Detenido(Exception):
     """El RPC o un gateway contestó 429: se para todo."""
 
 
-class Grabadora(httpx.BaseTransport):
-    """Transporte que hace el request real, pausa antes, y anota el intercambio."""
+class Grabadora(httpx.AsyncBaseTransport):
+    """Transporte que hace el request real, pausa antes, y anota el intercambio.
 
-    def __init__(self) -> None:
-        self._real = httpx.HTTPTransport()
+    Async porque el motor es uno solo y es async (también bajo `*_sync`). Cada
+    escenario hace UNA llamada con su propia `Grabadora`: el modo sync abre y
+    cierra un cliente por llamada, y cerrarlo cierra este transporte.
+    """
+
+    def __init__(self, real: httpx.AsyncBaseTransport | None = None) -> None:
+        self._real = real if real is not None else httpx.AsyncHTTPTransport()
         self._ultimo = 0.0
         self.intercambios: List[Dict[str, Any]] = []
 
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
+    async def aclose(self) -> None:
+        await self._real.aclose()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         espera = PAUSA_S - (time.monotonic() - self._ultimo)
         if espera > 0:
-            time.sleep(espera)
+            await asyncio.sleep(espera)
         self._ultimo = time.monotonic()
-        response = self._real.handle_request(request)
-        response.read()
+        response = await self._real.handle_async_request(request)
+        try:
+            await response.aread()
+        finally:
+            await response.aclose()
         if response.status_code == 429:
             raise Detenido(f"429 de {request.url.host}")
         url = str(request.url)
@@ -186,8 +211,14 @@ class Grabadora(httpx.BaseTransport):
 
 def poseidon_tld_avax(grabadora: Grabadora) -> Dict[str, Any]:
     """Lee `poseidon([0, 2019653217, 0])` del contrato, sin la constante."""
-    with httpx.Client(transport=grabadora) as client:
-        salida = run_sync(_poseidon_en_vivo(), rpc=RPC_PUBLICOS, client=client, timeout=60.0)
+
+    async def una_llamada() -> int:
+        async with httpx.AsyncClient(transport=grabadora) as client:
+            return await run_bounded(
+                _poseidon_en_vivo(), rpc=RPC_PUBLICOS, client=client, timeout=60.0
+            )
+
+    salida = run_blocking(una_llamada)
     return {"now": time.time(), "result": {"poseidon": str(salida)}}
 
 
@@ -212,7 +243,7 @@ def correr(
         rpc=RPC_PUBLICOS,
         cache=False,
         timeout=180.0,
-        transport=grabadora,
+        async_transport=grabadora,
         clock=lambda: ahora,
         **opciones,
     )

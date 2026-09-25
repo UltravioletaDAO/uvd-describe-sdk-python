@@ -39,6 +39,10 @@ class ServidorLocal:
         self._sock.listen(8)
         self.puerto = self._sock.getsockname()[1]
         self.pedidos: List[bytes] = []
+        #: `time.monotonic()` de cada conexión que este lado cerró: al terminar
+        #: de responder, o cuando el cliente la cortó y el próximo `sendall`
+        #: falló (ronda 5 del PR #6: así se ve si al vencer se CANCELA).
+        self.cerradas: List[float] = []
         threading.Thread(target=self._aceptar, daemon=True).start()
 
     @property
@@ -62,6 +66,7 @@ class ServidorLocal:
             pass
         finally:
             conn.close()
+            self.cerradas.append(time.monotonic())
 
     def cerrar(self) -> None:
         self._sock.close()

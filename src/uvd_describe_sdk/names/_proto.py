@@ -537,17 +537,50 @@ def _run_on_private_loop(coro: typing.Coroutine[Any, Any, T]) -> T:
             loop.close()
 
 
-def run_blocking(make: Callable[[], typing.Coroutine[Any, Any, T]]) -> T:
-    """Run the coroutine `make()` returns, from sync code, and return its result.
+def _inside_async_code() -> bool:
+    """Is this thread running async code, of ANY library?
 
-    With no loop running in this thread, on a private loop right here. With one
-    running (a `_sync` call from async code), on a private loop in a thread of
-    its own — loops do not nest — and this thread waits for it: calling a
-    blocking function from async code blocks it, as it would anyway.
+    asyncio answers `get_running_loop()`; trio (and curio) do not have an
+    asyncio loop, and only `sniffio` knows about them. Asking asyncio alone was
+    a bug (round 5 of PR #6): `resolve_sync()` inside `trio.run` built its
+    private asyncio loop in trio's own thread, httpx's transport (httpcore) asked
+    sniffio which library it was on, heard «trio», and the call died with
+    `RuntimeError: Task got bad yield` (measured 2026-09-24, trio 0.34, py3.13).
+    `sniffio` is not a dependency: when it is not installed, no
+    library that needs it is running either. Mutation CD.
     """
     try:
         asyncio.get_running_loop()
+        return True
     except RuntimeError:
+        pass
+    try:
+        import sniffio
+    except ImportError:
+        return False
+    try:
+        sniffio.current_async_library()
+    except sniffio.AsyncLibraryNotFoundError:
+        return False
+    return True
+
+
+def run_blocking(make: Callable[[], typing.Coroutine[Any, Any, T]]) -> T:
+    """Run the coroutine `make()` returns, from sync code, and return its result.
+
+    With no async code running in this thread, on a private loop right here.
+    With some running (a `_sync` call from asyncio, trio or anything sniffio
+    knows), on a private loop in a thread of its own — loops do not nest, and
+    two libraries do not share a thread — and this thread waits for it: calling
+    a blocking function from async code blocks it, as it would anyway.
+
+    What the deadline does NOT reach: a `getaddrinfo` it abandons. The call
+    returns on time, but the lookup keeps running in its executor thread until
+    the OS answers (`close()` does not wait for it, and cannot kill it: a
+    thread in a C call is not cancellable). It costs a thread for that long,
+    not the caller's time.
+    """
+    if not _inside_async_code():
         return _run_on_private_loop(make())
     box: Dict[str, Any] = {}
 

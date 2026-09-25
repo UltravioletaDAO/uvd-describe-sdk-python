@@ -163,17 +163,25 @@ class NameResolver:
                 at the first request. The `_sync` flavour runs each call on a
                 fresh event loop: a transport passed here must not keep pooled
                 connections from one call to the next (an in-memory one does not;
-                the default one is built per call).
+                the default one is built per call). Passing BOTH is accepted only
+                if they are the same object: one engine, one transport — two
+                different ones would leave one of them unused in silence.
             clock: wall clock (epoch seconds) for expiry checks, for the tests.
         """
-        engine_transport = async_transport if async_transport is not None else transport
-        if engine_transport is not None and not isinstance(
-            engine_transport, httpx.AsyncBaseTransport
-        ):
+        if transport is not None and not isinstance(transport, httpx.AsyncBaseTransport):
             raise ValueError(
                 "transport= must also be an httpx.AsyncBaseTransport: the _sync "
                 "variants run on the async engine (pass async_transport=)"
             )
+        # Round 5 of PR #6: two different ones used to be accepted, and
+        # `transport=` was ignored in silence, in BOTH flavours. Mutation CC.
+        both = transport is not None and async_transport is not None
+        if both and transport is not async_transport:
+            raise ValueError(
+                "pass ONE transport: both flavours run on the same engine, so "
+                "transport= and async_transport= would be the same one"
+            )
+        engine_transport = async_transport if async_transport is not None else transport
         bad = [key for key in rpc if not isinstance(key, str) or not _CAIP2.fullmatch(key)]
         if bad:
             raise ValueError(
@@ -194,7 +202,13 @@ class NameResolver:
         self._user_agent = user_agent or default_user_agent("names")
         self._transport: Optional[httpx.AsyncBaseTransport] = engine_transport
         self._clock = clock
-        self._lock = threading.Lock()
+        # REENTRANT, and it is not a detail: `_async_client()` holds it while it
+        # builds the client, and building the default one calls `_ssl_context()`,
+        # which takes it again. With a plain `Lock` that was a self-deadlock —
+        # `await resolve()` with the default transport hung forever (round 5 of
+        # PR #6; py3.9/3.12/3.13), and no test ran the async flavour without a
+        # `transport=`. Mutation CA.
+        self._lock = threading.RLock()
         self._aclient: Optional[httpx.AsyncClient] = None
         self._ssl: Optional[ssl.SSLContext] = None
         #: Chains whose RPC already answered the right `eth_chainId` (once per

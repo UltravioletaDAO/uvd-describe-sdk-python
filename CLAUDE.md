@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 495 pasan, 24-26 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-24 en py3.13 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 4 del PR #6 de `names` — los de `test_names_ronda3.py` y `test_names_ronda4.py` usan un servidor local en 127.0.0.1; eran 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 524 pasan, 28-32 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-24 en py3.13 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 5 del PR #6 de `names` — los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -254,6 +254,44 @@ hallazgo se verificó contra el código antes de tocarlo):
     hashear; los internos de `_hash.py` no, porque sólo ven nombres ya
     normalizados. Para que EM borre su copia (DUP-04). Mutación AQ.
 
+**Ronda 5 del PR #6** (verificador sobre `8326ef2`: 1 P0, 0 P1, 1 P2, 5 P3; la
+arquitectura convergió y NO se tocó):
+
+17. 🔴 **El lock del resolver es REENTRANTE** (`threading.RLock`, `_resolver.py`).
+    `_async_client()` lo toma y arma el cliente; el cliente por defecto pide el
+    contexto TLS y `_ssl_context()` lo vuelve a tomar. Con un `Lock`, `await
+    resolve()` con el transporte POR DEFECTO se colgaba para siempre, y ningún
+    test corría la variante async sin `transport=`: todos pasaban un doble.
+    Los tests del P0 corren en un hilo con `join(5)` y NO bajo un
+    `asyncio.wait_for` externo, y es medido: un `threading.Lock` tomado dentro de
+    una corrutina bloquea el hilo del loop, y el `wait_for` de 5 s seguía colgado
+    a los 20 s. **Lo que enseña**: un camino que ningún test recorre con la
+    configuración por defecto es el camino del usuario. Mutación CA.
+18. **Al vencer se CANCELA, y se mira del lado del servidor** (la conexión
+    cerrada 0,5 s después de volver). Volver a tiempo no alcanza: con
+    `asyncio.wait` sin cancelar todos los tests de tiempo quedan verdes y la
+    request sigue viva en el loop de quien llamó. Mutación CB.
+19. **`transport=` y `async_transport=` distintos se rechazan** (antes
+    `transport=` se ignoraba en silencio, en las dos variantes). El mismo objeto
+    en los dos se acepta. Mutación CC.
+20. **`run_blocking` le pregunta también a `sniffio`**: `resolve_sync()` dentro
+    de `trio.run` daba `RuntimeError: Task got bad yield` (el loop privado de
+    asyncio en el hilo de trio, y httpx eligiendo primitivas de trio). `sniffio`
+    no es dependencia: si no está, ninguna librería que lo use está corriendo.
+    `trio` está en el extra `dev` porque sin él el test se saltea. Mutación CD.
+21. **El presupuesto cuenta desde la entrada**, ahora con test (armar el
+    cliente tarda 0,8 s de 1,0 → vuelve en ~1,0 s). Mutación CE.
+22. ⚠️ **El agujero negro de los tests se corrigió, y se deja escrito**: la
+    receta vieja (`listen(0)` + 8 connects sin mirar) en macOS no retenía el SYN
+    —1 connect en 0,00 s— y los tests pasaban igual, porque un connect que entra
+    también vuelve dentro del presupuesto. Ahora se llena el backlog hasta que
+    un connect de prueba de 0,3 s vence, y el test exige ≥ 2 connects. Mutación CH.
+23. **El modo sync abre un cliente (TCP + TLS) por llamada**, sin keep-alive:
+    medido contra un servidor keep-alive, 10 `resolve_sync()` → 10 conexiones y
+    10 `await resolve()` → 1. Está en README y CHANGELOG. Y lo que el deadline no
+    alcanza, escrito en `run_blocking`: un `getaddrinfo` abandonado sigue en su
+    hilo hasta que el SO contesta (la llamada vuelve a tiempo; el hilo no).
+
 **Las reglas de plata de UNS, Avvy y el reverse se prueban con dobles
 SINTÉTICOS** (`test_names_ronda2.py`, clase `Cadena`, rotulada): la cadena real no
 ofrece a pedido un UNS que conteste la dirección cero ni un reverse de Avvy que
@@ -264,6 +302,11 @@ dejaba los 448 en verde (mutaciones AI, AJ, AK, AL).
 `scripts/grabar_fixtures_names.py` contra RPC públicos sin llave (secuencial,
 pausa ≥ 1,1 s, se detiene al primer 429). `tests/names_replay.py` las reproduce
 en orden y exige consumirlas todas. **No se editan a mano**: se regraban.
+⚠️ En la ronda 4 el script quedó roto (importaba el `run_sync` borrado y su
+`Grabadora` era sólo-sync) y nada lo vio. Desde la ronda 5 se prueba sin red
+(`test_names_ronda5_script.py`): la `Grabadora` envuelve al reproductor, y
+regrabar cada fixture desde sí misma tiene que dar la MISMA fixture. Mutaciones
+CF y CG.
 
 **Paridad**: el gemelo TypeScript todavía NO tiene `names`. Es una superficie
 nueva, no un cambio del contrato núcleo — igual que el riel de partner — pero el
@@ -430,12 +473,20 @@ docstrings:
 | **AX.** 🔴 sacar el `eth_chainId` del motor ASYNC | **1 rojo**: el caso `[async]` del test de Sepolia. Antes de la ronda 3: 476 verdes. En la ronda 4 (un solo motor): **2**, sync y async |
 | **AY.** seguir un redirect pasado el plazo | **1 rojo**: `test_un_redirect_no_se_sigue_pasado_el_presupuesto`. Antes: 476 verdes |
 | **AZ.** decidir la colisión antes que la forma | **4 rojos**: `a b.travel`, `x..travel`, `a_b.guide` y el de ancho completo, que salía crudo de `normalize()` |
-| **BA.** 🔴 quitar EL `asyncio.wait_for` de `run_bounded` — ronda 4, la que pidió la decisión | **8 rojos**: los casos A/B/C/D contra el servidor local (RPC con cuerpo, headers y gzip goteando; gateway con cuerpo y headers goteando), los dos goteos de la ronda 2 y `test_async_el_timeout_es_duro_aunque_el_servidor_no_conteste` |
-| **BB.** que `run_blocking` no use un hilo propio cuando el hilo que llama ya corre un loop | **1 rojo**: `test_un_sync_llamado_desde_codigo_async_da_lo_mismo` (los loops no se anidan) |
+| **BA.** 🔴 quitar EL `asyncio.wait_for` de `run_bounded` — ronda 4, la que pidió la decisión | **8 rojos**: los casos A/B/C/D contra el servidor local (RPC con cuerpo, headers y gzip goteando; gateway con cuerpo y headers goteando), los dos goteos de la ronda 2 y `test_async_el_timeout_es_duro_aunque_el_servidor_no_conteste`. En la ronda 5: **11** (se suman el de cancelación y los dos del presupuesto desde la entrada). ⚠️ En la ronda 5 esta mutación **colgó la suite 20 min**: el doble del test del presupuesto dormía 3600 s y, sin el deadline, los esperaba; ahora duerme 5 s y falla |
+| **BB.** que `run_blocking` no use un hilo propio cuando el hilo que llama ya corre un loop | **1 rojo**: `test_un_sync_llamado_desde_codigo_async_da_lo_mismo` (los loops no se anidan). En la ronda 5: **2** (se suma el de trio) |
 | **BC.** usar `asyncio.run` en vez del loop propio | **1 rojo**: `test_sync_un_DNS_lento_no_retiene_la_llamada` — `asyncio.run` espera al `getaddrinfo` del executor |
-| **BD.** aceptar un transporte sólo-sync | **1 rojo**: `test_un_transporte_solo_sync_se_rechaza_al_construir` |
+| **BD.** aceptar un transporte sólo-sync | **1 rojo**: `test_un_transporte_solo_sync_se_rechaza_al_construir`. En la ronda 5: **2** (se suma el de dos transportes) |
 | **BE.** un contexto TLS por llamada | **1 rojo**: `test_un_solo_contexto_TLS_por_resolver` (0,34 s cada uno, medido) |
-| **BF.** 🔴 el guard de red: el doble de DNS de la ronda 4 vuelve a comparar bytes con `str` (el bug que tuvo) | **1 ERROR de sesión**: el test pasa en VERDE —la consulta se va al DNS real y falla rápido— y el guard de `tests/conftest.py` hace fallar la sesión con el intento anotado (el único rojo de la corrida es ese error de teardown) |
+| **BF.** 🔴 el guard de red: el doble de DNS de la ronda 4 vuelve a comparar bytes con `str` (el bug que tuvo) | **1 ERROR de sesión**: el test pasa en VERDE —la consulta se va al DNS real y falla rápido— y el guard de `tests/conftest.py` hace fallar la sesión con el intento anotado (el único rojo de la corrida es ese error de teardown). En la ronda 5: **2 rojos + el error de sesión** — el test ya no pasa en verde: cuenta 0 connects (CH) |
+| **CA.** 🔴 volver al `threading.Lock` (el P0 de la ronda 5) | **5 rojos**: las cuatro operaciones async con el transporte por defecto (`resolve`, `reverse`, `text`, `avatar`) y el de cancelación, que también lo usa. Antes: 495 verdes. Cada uno falla a los 5 s del `join`, no cuelga |
+| **CB.** 🔴 no cancelar al vencer (`asyncio.wait` sin cancel en vez de `wait_for`) | **1 rojo**: `test_al_vencer_se_CANCELA_y_el_servidor_ve_cerrarse_la_conexion`. Antes: 495 verdes — todos los tests de TIEMPO quedan verdes, porque la llamada vuelve igual |
+| **CC.** aceptar `transport=` y `async_transport=` distintos | **1 rojo**: `test_dos_transportes_distintos_se_rechazan_y_el_mismo_se_acepta` |
+| **CD.** que `run_blocking` sólo le pregunte a asyncio (sin `sniffio`) | **1 rojo**: `test_un_sync_dentro_de_trio_no_revienta` (`Task got bad yield`) |
+| **CE.** `left = self._timeout` (el presupuesto no cuenta desde la entrada) | **2 rojos**: el test del presupuesto, sync y async (~1,8 s contra 1,0). Antes: 495 verdes |
+| **CF.** 🔴 el script de `8326ef2` entero (`git show`) | **20 rojos**: los 20 de `test_names_ronda5_script.py` (`ImportError: run_sync`). Antes: ningún test lo importaba |
+| **CG.** la `Grabadora` hereda de `httpx.BaseTransport` (con el import ya arreglado) | **2 rojos**: el de importación (`issubclass`) y el de `poseidon_tld_avax` (`AsyncClient` le pide `__aenter__`). ⚠️ Los otros 18 quedan VERDES: el resolver no mira el tipo de `async_transport=` y la `Grabadora` igual tiene `handle_async_request` — el que ata el tipo es el `issubclass` |
+| **CH.** el agujero no retiene el SYN (`listen(64)`, sin rellenos: lo que pasaba en macOS) | **2 rojos**: N=3 y N=5 cuentan 1 connect. El tiempo quedó VERDE en los dos — el connect entra, el servidor no contesta, y el presupuesto corta igual: sin contar connects el test no probaba el agujero |
 
 **M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
 KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un
