@@ -1,0 +1,56 @@
+{
+ "scenario": "resolve_avvy_avax_vencido",
+ "recorded_at": "2026-09-24T20:13:55Z",
+ "op": "resolve",
+ "args": [
+  "avvy.avax"
+ ],
+ "options": {},
+ "chains": [
+  "eip155:1",
+  "eip155:137",
+  "eip155:43114",
+  "eip155:8453"
+ ],
+ "now": 1790280834.4406354,
+ "result": {
+  "input": "avvy.avax",
+  "normalized": "avvy.avax",
+  "address": null,
+  "family": "evm",
+  "system": "avvy",
+  "verified_onchain": true,
+  "cached": false,
+  "error": "expired",
+  "tried": [
+   "avvy"
+  ],
+  "detail": "avvy.avax expired on 2026-05-28T01:39:13Z"
+ },
+ "exchanges": [
+  {
+   "kind": "rpc",
+   "chain": "eip155:43114",
+   "to": "0x6e03620156860584870b6415447770BbC7D6eB0E",
+   "data": "0x25cc70e80972566abecfd569eb5919f1d86ff44a35741bb364a6604fbeb87b7420a3d72900000000000000000000000000000000000000000000000000000000797676610000000000000000000000000000000000000000000000000000000000000000",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x136f488c821130a0279963a64d6b7204f5b40ec5af627ea949562844ece3b742"
+   }
+  },
+  {
+   "kind": "rpc",
+   "chain": "eip155:43114",
+   "to": "0x797AC669A1908ca68CD9854994345f570495541A",
+   "data": "0x9c9e3698136f488c821130a0279963a64d6b7204f5b40ec5af627ea949562844ece3b742",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x000000000000000000000000000000000000000000000000000000006a179cc1"
+   }
+  }
+ ]
+}

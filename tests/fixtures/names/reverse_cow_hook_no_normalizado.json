@@ -1,0 +1,72 @@
+{
+ "scenario": "reverse_cow_hook_no_normalizado",
+ "recorded_at": "2026-09-24T20:13:28Z",
+ "op": "reverse",
+ "args": [
+  "0xd02abdf2fb37a50d574292b0625ca2591922a513"
+ ],
+ "options": {
+  "systems": [
+   "ens"
+  ]
+ },
+ "chains": [
+  "eip155:1",
+  "eip155:137",
+  "eip155:43114",
+  "eip155:8453"
+ ],
+ "now": 1790280806.6077144,
+ "result": {
+  "input": "0xd02abdf2fb37a50d574292b0625ca2591922a513",
+  "normalized": null,
+  "address": "0xd02abdf2fB37A50D574292B0625Ca2591922A513",
+  "family": "evm",
+  "system": null,
+  "verified_onchain": true,
+  "cached": false,
+  "error": "reverse_mismatch",
+  "tried": [
+   "ens"
+  ],
+  "detail": "the reverse record is not a normalized name"
+ },
+ "exchanges": [
+  {
+   "kind": "rpc",
+   "chain": "eip155:1",
+   "to": "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e",
+   "data": "0x0178b8bf690780a3a7e4df43994d4eb533ed0f51c4076008b040c3d8bf4992eb0faa8231",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x000000000000000000000000312f92fe5f1710408b20d52a374fa29e099cfa86"
+   }
+  },
+  {
+   "kind": "rpc",
+   "chain": "eip155:1",
+   "to": "0x312f92fe5f1710408b20d52a374fa29e099cfa86",
+   "data": "0x01ffc9a79061b92300000000000000000000000000000000000000000000000000000000",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x0000000000000000000000000000000000000000000000000000000000000000"
+   }
+  },
+  {
+   "kind": "rpc",
+   "chain": "eip155:1",
+   "to": "0x312f92fe5f1710408b20d52a374fa29e099cfa86",
+   "data": "0x691f3431690780a3a7e4df43994d4eb533ed0f51c4076008b040c3d8bf4992eb0faa8231",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000383078356534303546396530393039333637316236663861383037334530396442374263383343354561462e686f6f6b732e636f772e6574680000000000000000"
+   }
+  }
+ ]
+}

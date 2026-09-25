@@ -1,0 +1,80 @@
+{
+ "scenario": "resolve_ultravioletadao_eth",
+ "recorded_at": "2026-09-24T20:12:52Z",
+ "op": "resolve",
+ "args": [
+  "ultravioletadao.eth"
+ ],
+ "options": {},
+ "chains": [
+  "eip155:1",
+  "eip155:137",
+  "eip155:43114",
+  "eip155:8453"
+ ],
+ "now": 1790280769.3012798,
+ "result": {
+  "input": "ultravioletadao.eth",
+  "normalized": "ultravioletadao.eth",
+  "address": "0xe4dc963c56979E0260fc146b87eE24F18220e545",
+  "family": "evm",
+  "system": "ens",
+  "verified_onchain": true,
+  "cached": false,
+  "error": null,
+  "tried": [
+   "ens"
+  ],
+  "detail": null
+ },
+ "exchanges": [
+  {
+   "kind": "rpc",
+   "chain": "eip155:1",
+   "to": "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85",
+   "data": "0xd6e4fa861d1510d676e1a5f31cf38646aa85917378ee9738ef9a2dfcd2f04e89916eaee9",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x000000000000000000000000000000000000000000000000000000007573d333"
+   }
+  },
+  {
+   "kind": "rpc",
+   "chain": "eip155:1",
+   "to": "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e",
+   "data": "0x0178b8bf199babeb7b9f06cec86bb7c6417e8b1429deee2e34c0bd6baba7c86af9156312",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x000000000000000000000000231b0ee14048e9dccd1d247744d114a4eb5e8e63"
+   }
+  },
+  {
+   "kind": "rpc",
+   "chain": "eip155:1",
+   "to": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
+   "data": "0x01ffc9a79061b92300000000000000000000000000000000000000000000000000000000",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x0000000000000000000000000000000000000000000000000000000000000000"
+   }
+  },
+  {
+   "kind": "rpc",
+   "chain": "eip155:1",
+   "to": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
+   "data": "0x3b3b57de199babeb7b9f06cec86bb7c6417e8b1429deee2e34c0bd6baba7c86af9156312",
+   "status": 200,
+   "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x000000000000000000000000e4dc963c56979e0260fc146b87ee24f18220e545"
+   }
+  }
+ ]
+}

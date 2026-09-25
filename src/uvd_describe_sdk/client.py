@@ -254,6 +254,7 @@ from .models import (
     parse_leaderboard,
     parse_wallet_reputation,
 )
+from .name_models import NameResolution, parse_name_resolution
 from .partner import PartnerSignature, PartnerSigner, sign_partner_headers
 from .payment import TREASURY_EVM, Payer, build_payment_header
 from .version import default_user_agent
@@ -803,6 +804,16 @@ class DescribeClient:
         """
         return _badge_url(address, base_url=self._base_url)
 
+    @property
+    def names(self) -> DescribeNames:
+        """Name ↔ address through `api.describe.net/v1/names`. **FREE** routes.
+
+        For frontends, which should not hold RPC URLs. Every result comes back
+        with `verified_onchain=False`: this process did not read the chain. To
+        pay a name, resolve it with `uvd_describe_sdk.names.NameResolver`.
+        """
+        return DescribeNames(self)
+
     # ------------------------------------------------------------------
     # Rutas MEDIDAS (x402)
     # ------------------------------------------------------------------
@@ -1155,3 +1166,52 @@ class DescribeClient:
             f"/{quote(str(agent_id), safe='')}"
         )
         return self._paid(path, parse_agent_reputation)
+
+
+class DescribeNames:
+    """`DescribeClient.names` — the name resolver, over describe's HTTP API.
+
+    THE CONTRACT THIS CLIENT SETS FOR THE SERVER (describe-net builds the route
+    in its own change; this is the shape it has to serve):
+
+        GET /v1/names/resolve?name=<name>        → 200 + NameResolution JSON
+        GET /v1/names/reverse?address=<address>  → 200 + NameResolution JSON
+
+    The JSON is `NameResolution.to_dict()` of the server's own
+    `uvd_describe_sdk.names.NameResolver` — one resolver, served. Every outcome
+    of the resolver is a 200, `not_found` and `invalid_name` included: a missing
+    name is an ANSWER (R4), and a 404 here can only mean the route is not
+    deployed.
+
+    Both routes are FREE, so R5 applies as to `wallet()`: on a service failure
+    (transport, non-2xx, unreadable body) with `fail_open=True` they return
+    `None`, always observed — never a fabricated `not_found`, which would be a
+    false statement about the name.
+
+    🔴 `verified_onchain` is always `False` here (see `parse_name_resolution`):
+    fine to SHOW a name, not to pay one — `require_onchain_address()` refuses it.
+    """
+
+    def __init__(self, client: DescribeClient) -> None:
+        self._client = client
+
+    def _get(self, path: str, params: Dict[str, Any]) -> Optional[NameResolution]:
+        try:
+            body = self._client._get_json(path, params=params)
+            try:
+                return parse_name_resolution(body)
+            except ValueError as exc:
+                raise DescribeUnparseable(f"GET {path} did not return a names object") from exc
+        except DescribeError as exc:
+            if not self._client._fail_open:
+                raise
+            self._client._observe(exc, path)
+            return None
+
+    def resolve(self, name: str) -> Optional[NameResolution]:
+        """`GET /v1/names/resolve?name=` — name → address, as describe read it."""
+        return self._get("/v1/names/resolve", {"name": name})
+
+    def reverse(self, address: str) -> Optional[NameResolution]:
+        """`GET /v1/names/reverse?address=` — address → confirmed primary name."""
+        return self._get("/v1/names/reverse", {"address": address})

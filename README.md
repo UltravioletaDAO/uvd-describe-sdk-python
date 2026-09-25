@@ -6,6 +6,7 @@ Python client of **describe**'s ERC-8004 reputation index — `api.describe.net`
 pip install uvd-describe-sdk            # the free path: one single dependency (httpx)
 pip install "uvd-describe-sdk[x402]"    # + pay the metered routes
 pip install "uvd-describe-sdk[partner]" # + the partner rail (signs, does not pay)
+pip install "uvd-describe-sdk[names]"   # + the name resolver (ENS, Basenames, DNS, UNS, Avvy)
 ```
 
 ```python
@@ -565,6 +566,88 @@ being ignored.
 
 ---
 
+## Names: one resolver for the whole stack (`[names]` extra)
+
+Name → address and address → name, read on-chain through **your** RPCs, for every
+product of the stack. It replaces three partial copies (Execution Market's ENS
+client, karma-hello's `domain_resolver.py`, uvdweb's avatar), each broken
+somewhere else. The module docstring of `uvd_describe_sdk/names/__init__.py` has
+the measurements.
+
+```python
+from uvd_describe_sdk import require_onchain_address
+from uvd_describe_sdk.names import NameResolver
+
+names = NameResolver(rpc={
+    "eip155:1": ETH_RPC,          # ENS, DNS names, UNS (L1)
+    "eip155:8453": BASE_RPC,      # Basenames, UNS on Base
+    "eip155:137": POLYGON_RPC,    # UNS
+    "eip155:43114": AVAX_RPC,     # Avvy
+})
+
+r = names.resolve_sync("jesse.base.eth")      # or: await names.resolve(...)
+r.address          # "0x2211d1D0020DAEA8039E46Cf1367962070d77DA9"
+r.system           # "basenames"  (via L1 + CCIP-Read)
+pay_to = require_onchain_address(r)           # raises unless verified on-chain
+
+names.reverse_sync("0xe4dc963c56979E0260fc146b87eE24F18220e545").normalized
+# "0xultravioleta.eth" — confirmed forward, always
+names.resolve_sync("0xultravioletadao.eth").error   # "not_found", never an exception
+```
+
+| System | Suffix | How it is read |
+|---|---|---|
+| `ens` | `.eth` | L1 registry, ENSIP-10 wildcard + EIP-3668 CCIP-Read, expiry checked |
+| `basenames` | `.base.eth` | L1 + CCIP; expiry and primary name (ENSIP-19) on Base |
+| `ens-dns` | any DNS TLD | ENS's DNSSEC / offchain DNS resolvers, through CCIP |
+| `unstoppable` | UD's TLDs (dated table) | UD's ProxyReader on Polygon or Base, then L1 |
+| `avvy` | `.avax` | Avalanche, on-chain (Poseidon computed by Avvy's own contract) |
+| `sns` | `.sol` | **`unsupported_system`**: SNS is migrating `.sol` to a new registry |
+
+**The result is an object, never `Optional[str]`.** `error` is a code you branch on
+(`NameErrorCode`): `not_found`, `invalid_name` (ENSIP-15), `reverse_mismatch`,
+`expired`, `unsupported_system`, `rpc_unavailable`. `address` is never the zero
+address. `tried` lists the systems asked. `verified_onchain` is `False` for anything
+that came over HTTP — a payment destination demands `True`
+(`require_onchain_address()`).
+
+**Configuration, defined once:** the RPC URLs come in by constructor, keyed by
+CAIP-2 chain id; the SDK ships none (a public default is a shared rate limit nobody
+chose, a keyed one a leaked key) and never prints one. Each resolver checks each
+RPC's `eth_chainId` once against its key: a Sepolia URL under `eip155:1` is
+`rpc_unavailable`, not a mainnet answer. `timeout` (default 10 s) is a budget for
+the WHOLE call, counted from its start: there is ONE engine (async), and the
+`_sync` variants run it on a private event loop under the same `asyncio.wait_for`
+— dripping bodies or headers, a connect over many addresses, a slow DNS lookup
+are cut at the budget. The `_sync` variants open a client per call: a new TCP (and
+TLS) connection each time, no keep-alive between calls (measured: 10
+`resolve_sync()` → 10 connections; 10 `await resolve()` on one resolver → 1), so
+resolve in bulk with the async flavour. A `_sync` call made from async code
+(asyncio, trio) runs on a thread of its own. Environment proxies are honoured as in
+`DescribeClient`.
+The cache is an LRU with a positive TTL (300 s) and a shorter negative
+TTL (60 s), never stores `rpc_unavailable`, and its key is the question, not the
+resolver's configuration — share one only between resolvers configured alike.
+
+**Five TLDs are both ICANN and Unstoppable** (`UNS_ICANN_COLLISIONS`: graphics,
+gripe, guide, shiksha, travel — IANA list 2026092400): names under them answer
+`unsupported_system` instead of silently picking a namespace.
+
+`namehash(name)` and `labelhash(label)` are exported too, and they **normalize with
+ENSIP-15 first** (`InvalidNameError` otherwise): the node ENS uses, not a
+lower-cased guess.
+
+**For frontends**, `DescribeClient.names.resolve(name)` / `.reverse(address)` read
+the same result from `api.describe.net/v1/names` — free routes, R5 like `wallet()`,
+and always `verified_onchain=False`.
+
+**Weight** (Linux wheels, py3.12, measured 2026-09-24): the extra adds
+`ens-normalize` and `pycryptodome` — 14.8 MiB unpacked with httpx, against 54.7 MiB
+for `web3>=7,<8`. On describe-net's Lambda, which already ships `pycryptodome`, it
+adds 2 packages and 5.7 MiB (web3 would add 14 and 17.6 MiB).
+
+---
+
 ## What this SDK does NOT do
 
 - It writes to no chain and issues no ratings. It is a **reader**.
@@ -575,11 +658,17 @@ being ignored.
   consumer injects. What never changed, and is what the sentence meant, is that **no
   key lives here**: not in a default, not in an env var, not in a parameter. It also
   does not implement EIP-3009, RFC 9421 or EIP-191.
-- It does not cache. That is a decision, not an oversight: the right TTL depends on
-  what the read is for (mesh uses 12 min for a channel; a profile wants the value
-  hot) and a cache inside the SDK with the wrong default is worse than none.
-  Freshness travels in `refreshed_at` so the caller decides.
-- It has no async API. See risks.
+- It does not cache **reputation**. That is a decision, not an oversight: the right
+  TTL depends on what the read is for (mesh uses 12 min for a channel; a profile
+  wants the value hot) and a cache inside the SDK with the wrong default is worse
+  than none. Freshness travels in `refreshed_at` so the caller decides. ⚠️ Narrowed
+  on 2026-09-24: the name resolver (`[names]`) DOES cache, because there both
+  copies it replaces already did and the defaults were measured (EM's 300 s); it
+  is bounded, has a shorter negative TTL, and `cache=False` turns it off.
+- `DescribeClient` has no async API. See risks. ⚠️ The name resolver does
+  (`await resolve()` next to `resolve_sync()`), and it has ONE engine: the sync
+  flavour runs the async one under a hard deadline — the pattern the risk below
+  asks for, applied to the new module first.
 
 ---
 
@@ -690,7 +779,7 @@ INC-2026-08-26).
 
 ```bash
 python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
-.venv/Scripts/python -m pytest        # 215 tests, ~15 s, NO NETWORK
+.venv/Scripts/python -m pytest        # 495 tests, ~25 s, NO NETWORK — a guard fails the run otherwise (2026-09-24)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python examples/smoke_gratis.py   # this one DOES hit the live API

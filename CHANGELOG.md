@@ -5,7 +5,92 @@ tag that does not match `src/uvd_describe_sdk/version.py`. Up to 0.5.0 each
 release is recorded in its commit message (`git log`, tags `v0.1.0`…`v0.5.0`);
 this file starts with 0.6.0, the first release that asked for one.
 
-## 0.6.1 — unreleased
+## [Unreleased]
+
+Changes merged since the last release accumulate here, each with its label
+(`[security]`, `[money]`, `[feature]`, `[internal]`), and ship together.
+
+### [feature] `uvd_describe_sdk.names` — the one name resolver of the stack
+
+Name → address and address → name, read on-chain, behind a new extra:
+`pip install "uvd-describe-sdk[names]"` (`ens-normalize`, `pycryptodome`). The base
+install still depends on `httpx` only.
+
+- **`NameResolver(rpc=..., systems=..., cache=..., timeout=...)`** with `resolve`,
+  `reverse`, `text`, `avatar` (async) and their `*_sync` variants — ONE engine: the
+  `*_sync` variants run the async one on a private event loop; `normalize` and
+  `detect` need no network. `rpc` is keyed by CAIP-2 chain id and the SDK ships no
+  RPC URL. `transport=` must be usable by an async client (`httpx.MockTransport`
+  is); a sync-only transport is refused at construction, and so are two different
+  ones in `transport=` and `async_transport=` (the same object in both is fine).
+- **The `*_sync` variants open a client per call — a new TCP (and TLS) connection
+  each time, no keep-alive from one call to the next.** Measured against a local
+  keep-alive server (2026-09-24): 10 `resolve_sync()` → 10 connections; 10
+  `await resolve()` on one resolver → 1. Code that resolves in bulk should use the
+  async flavour. A `*_sync` call made from async code (asyncio, or trio and any
+  library `sniffio` knows) runs on its own loop in a thread of its own.
+- **Systems**: ENS (`.eth`, subnames, ENSIP-10 wildcards, EIP-3668 CCIP-Read,
+  expiry), Basenames (`*.base.eth` through L1 + CCIP; expiry and the ENSIP-19
+  primary name on Base), DNS names imported into ENS (DNSSEC / offchain resolver),
+  Unstoppable Domains (UD's ProxyReader on Polygon or Base, then L1; TLD table dated
+  `UNS_TLDS_MEASURED_AT = "2026-09-24"`) and Avvy (`.avax`, on-chain — no HTTP
+  API). `.sol` is detected and answered `unsupported_system`: SNS is migrating
+  `.sol` to a new registry (legacy resolution stops at finalized slot 452,825,395,
+  about 2026-10-15, and the new path is still disabled upstream).
+- **Normalization**: ENSIP-15 for the ENS family (`invalid_name` on error); each
+  other system's own rule.
+- **Reverse is always confirmed forward**; a failed confirmation (or a claimed name
+  that is not in ENSIP-15 normal form) is `reverse_mismatch`, and the claimed name is
+  not returned.
+- **Records**: ENSIP-5 text records (the consumer passes its own keys) and the
+  ENSIP-12 avatar resolved to a final URL, NFT ownership checked.
+- **`NameResolution` / `NameRecord`** (exported by the base package, no extra
+  needed): `input`, `normalized`, `address` (never the zero address), `family`,
+  `system`, `verified_onchain`, `cached`, `error` (`not_found` | `invalid_name` |
+  `reverse_mismatch` | `expired` | `unsupported_system` | `rpc_unavailable` — a
+  missing name is an answer, never an exception), `tried`, `detail`.
+- **`require_onchain_address(result)`** returns the address only when it was read
+  on-chain; otherwise `NameNotVerifiedError` (deliberately not a `DescribeError`).
+- **`NameCache`**: LRU with `max_entries` (1024), a positive TTL (300 s), a
+  negative TTL (60 s), and `rpc_unavailable` is never cached. A hard `timeout`
+  (10 s) covers the whole call.
+- **`DescribeClient.names.resolve()` / `.reverse()`** against
+  `api.describe.net/v1/names/resolve?name=` and `/v1/names/reverse?address=`: the
+  contract the service is to serve (`NameResolution.to_dict()`, 200 for every
+  resolver outcome). Free routes with R5 semantics; the result always carries
+  `verified_onchain=False`.
+- CCIP gateway and NFT metadata URLs go through a guard: `https://` only, no
+  credentials, no `localhost`, no IP literal outside the global address space.
+- The `timeout` bounds the whole call, counted from its start, with ONE
+  `asyncio.wait_for` in both flavours: a dripping body, dripping headers, a gzip
+  header that never ends, a connect over N addresses and a slow DNS lookup are all
+  cut at the budget (tests against a local server). The sync flavour does not use
+  `asyncio.run`, which waits for the executor where DNS runs. Environment proxies
+  are honoured as in `DescribeClient` (httpx's default); a `transport=` replaces
+  them.
+- Gateway and NFT metadata requests send `Accept-Encoding: identity`; a body in
+  any other encoding is refused (`rpc_unavailable`), and the size cap counts wire
+  bytes.
+- Each resolver checks every RPC's `eth_chainId` once against its CAIP-2 key: an
+  RPC that serves another chain is `rpc_unavailable`, naming the chain it serves.
+- `reverse()` answers `rpc_unavailable` (never raises) when a contract that does
+  not revert, reverts — an RPC that answers "execution reverted" to everything.
+- `UNS_ICANN_COLLISIONS` (graphics, gripe, guide, shiksha, travel; IANA list
+  version 2026092400): names under TLDs that are both ICANN and Unstoppable
+  answer `unsupported_system` instead of silently picking one namespace.
+- `namehash()` and `labelhash()` exported from `uvd_describe_sdk.names`; both
+  normalize with ENSIP-15 first and raise `InvalidNameError` otherwise.
+- `require_onchain_address()` also refuses the zero address.
+- `scripts/grabar_fixtures_names.py` records the fixtures in
+  `tests/fixtures/names/` from public RPCs (sequential, ≥ 1.1 s apart, stops at the
+  first HTTP 429). No RPC URL is written to a fixture.
+
+## 0.6.1 — 2026-09-15
+
+⚠️ Corrected 2026-09-24, left written: this heading said "unreleased". The tag
+`v0.6.1` exists, its publish run succeeded on 2026-09-15 and PyPI lists 0.6.1
+uploaded that day. It shipped the 0.6.0 entry below as well: `v0.6.0` was never
+tagged nor uploaded.
 
 ### Added
 
@@ -25,7 +110,7 @@ this file starts with 0.6.0, the first release that asked for one.
 
 Both SDKs add `thin-chain` in the same release and know the same ten caveat codes.
 
-## 0.6.0 — unreleased (tag `v0.6.0` pending)
+## 0.6.0 — never published (shipped inside 0.6.1)
 
 The upstream-first row `describe-net/docs/BACKLOG.md:19`: describe.net serves both
 fields in production since 2026-09-14 (PR #21, deployed `aa1bd75`). This version
