@@ -31,6 +31,8 @@ from ._hash import selector
 from ._proto import Call, Fetch, FetchResponse, Reverted, Step, Unavailable, check_url
 
 _NFT = re.compile(r"eip155:(\d+)/(erc721|erc1155):(0x[0-9a-fA-F]{40})/(\d+)", re.IGNORECASE)
+#: Decimal digits of the largest uint256 (78).
+_UINT256_DIGITS = len(str((1 << 256) - 1))
 _SEL_OWNER_OF = selector("ownerOf(uint256)")
 _SEL_BALANCE_OF = selector("balanceOf(address,uint256)")
 _SEL_TOKEN_URI = selector("tokenURI(uint256)")
@@ -65,6 +67,17 @@ def nft_reference(record: str) -> Optional[Tuple[str, str, str, int]]:
     if not match:
         return None
     chain_id, standard, contract, token = match.groups()
+    # A token id is a uint256, and a reference whose id is not one is not an NFT
+    # reference. The digits are counted BEFORE `int()`: `int()` refuses more
+    # than 4,300 digits with `ValueError` (py3.11+, 3.9.14+), the record is
+    # written by the name's owner, and a 5,000-digit id escaped the resolver
+    # (SDK-5, measured py3.9.24/3.12/3.13). Mutation DG.
+    chain_id = chain_id.lstrip("0") or "0"
+    token = token.lstrip("0") or "0"
+    if len(chain_id) > _UINT256_DIGITS or len(token) > _UINT256_DIGITS:
+        return None
+    if int(token) >= 1 << 256:
+        return None
     return f"eip155:{int(chain_id)}", standard.lower(), contract, int(token)
 
 
@@ -79,7 +92,9 @@ def _metadata(uri: str, ipfs_gateway: str) -> Step[Any]:
                 else unquote(payload).encode()
             )
             return json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # `RecursionError` (1,000+ nested `[`) is not a `ValueError` and
+            # escaped the resolver (SDK-5). Mutation DF.
             raise NoAvatar("the NFT metadata (a data: URI) is not JSON") from None
     url = plain_url(uri, ipfs_gateway)
     if url is None or not url.lower().startswith("https://"):
@@ -90,7 +105,7 @@ def _metadata(uri: str, ipfs_gateway: str) -> Step[Any]:
         raise Unavailable(f"the NFT metadata answered HTTP {response.status}")
     try:
         return json.loads(response.body)
-    except ValueError:
+    except (ValueError, RecursionError):  # Mutation DE; see the data: branch
         raise NoAvatar("the NFT metadata is not JSON") from None
 
 

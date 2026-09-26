@@ -64,6 +64,15 @@ global unicast space (or a bare number that `getaddrinfo` would read as one).
 Redirects are followed by hand, at most three, each re-checked. Bodies are
 capped. The residual risk, stated: a public hostname whose DNS answers with a
 private address is not detected (checking it would race the connect anyway).
+
+A URL that does not PARSE is refused the same way, as `Unavailable` — for
+`urlsplit` (`check_url`, `urljoin` on a redirect) or for httpx (`InvalidURL`) —
+and so is a gateway body `json.loads` cannot read (`RecursionError` included).
+⚠️ Until 0.7.0 those escaped the resolver as `ValueError`, `httpx.InvalidURL` or
+`RecursionError`, i.e. whoever controls a resolver could make a consumer's
+request fail with a 500 (SDK-5, describe-net's review of its PR 62). Each is
+caught by its concrete class, never `except Exception`: a bug of this SDK must
+still raise.
 """
 
 from __future__ import annotations
@@ -264,7 +273,11 @@ def _ccip_fetch(sender: str, urls: List[Any], call_data: bytes) -> Step[bytes]:
                 if not isinstance(hex_answer, str) or not _HEX.fullmatch(hex_answer):
                     raise ValueError
                 return bytes.fromhex(hex_answer[2:])
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, RecursionError):
+                # `RecursionError` is not a `ValueError`: a body of 1,000+ nested
+                # `[` (well under MAX_BODY_BYTES) made `json.loads` raise it and
+                # it escaped the resolver (SDK-5, measured py3.9/3.12/3.13).
+                # Mutation DD.
                 last = f"the gateway {host} answered a body without hex `data`"
                 continue
         if response.status == 404:
@@ -285,8 +298,20 @@ _LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain")
 
 
 def check_url(url: str) -> None:
-    """Refuse a URL this process must not fetch. Raises `Unavailable`."""
-    parts = urlsplit(url)
+    """Refuse a URL this process must not fetch. Raises `Unavailable`, and only that.
+
+    A URL that does not parse is refused like one that parses to somewhere
+    forbidden (SDK-5, found by describe-net's review of PR 62, 2026-09-25):
+    `urlsplit` raises `ValueError` on `https://[x/…` (an unclosed bracket) and on
+    `https://[zzz]/…` (a bracketed host that is not an IP — py3.9.24, 3.12, 3.13),
+    and whoever controls the resolver or the NFT contract picks that string. It
+    used to escape the resolver, and describe-net's route answered 500.
+    Mutation DA.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise Unavailable("refused a URL that does not parse") from None
     host = (parts.hostname or "").lower().rstrip(".")
     if parts.scheme != "https":
         raise Unavailable(f"refused a non-https URL ({parts.scheme or 'no scheme'})")
@@ -346,10 +371,23 @@ def _refuse_encoded(response: httpx.Response, host: Optional[str]) -> None:
 
 
 def _redirect_target(response: httpx.Response, url: str) -> Optional[str]:
+    """The next URL of a redirect, or `None`. Raises `Unavailable`, and only that.
+
+    A `Location` that httpx cannot parse never gets here: httpx builds the next
+    request itself and raises `RemoteProtocolError`, an `httpx.HTTPError`
+    (measured: `//[zzz]/a`, `https://gw.example/\\x01`). One httpx accepts and
+    `urljoin` does not — `https://[x/`, an unclosed bracket — raised `ValueError`
+    out of the resolver (SDK-5). Mutation DC.
+    """
     if response.status_code in (301, 302, 303, 307, 308):
         location = response.headers.get("location")
         if location:
-            return str(urljoin(url, location))
+            try:
+                return str(urljoin(url, location))
+            except ValueError:
+                raise Unavailable(
+                    f"{urlsplit(url).hostname} redirected to a URL that does not parse"
+                ) from None
     return None
 
 
@@ -506,6 +544,13 @@ async def _do_async(
                         raise Unavailable(f"{host} sent more than {MAX_BODY_BYTES} bytes")
                     parts.append(chunk)
                 return FetchResponse(response.status_code, b"".join(parts))
+        except httpx.InvalidURL:
+            # Not an `httpx.HTTPError`: httpx refuses to build the request at all.
+            # A URL `urlsplit` accepts and httpx does not (a control character,
+            # `https://gw.example/\x01…`) escaped here as `InvalidURL` (SDK-5).
+            # The detail does not repeat the URL: it is the part that is broken.
+            # Mutation DB.
+            raise Unavailable("refused a URL that httpx cannot request (InvalidURL)") from None
         except httpx.TimeoutException:
             raise Unavailable(f"{host} timed out") from None
         except httpx.HTTPError as err:
