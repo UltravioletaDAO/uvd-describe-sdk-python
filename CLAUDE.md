@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 551 pasan, 27-33 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-25 en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras SDK-5 y SDK-6 de 0.7.0 — `test_names_sdk5.py` y `test_names_sdk6.py`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 565 pasan, 27-33 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-26 en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 7 — `test_names_sdk5.py`, `test_names_sdk6.py` y `test_names_sdk7.py`; eran 551 tras SDK-5 y SDK-6; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -319,6 +319,28 @@ sobre `5ed00228`, encontró dos P1 del SDK; c0der los pidió acá antes de publi
     (2026-09-25) — `error` ya lo dice. Se deja tachada para que nadie la vuelva a
     proponer sin saber que se decidió.
 
+**Ronda 1 del PR 7** (del refutador de describe-net, 2026-09-26; cada caso se
+MIDIÓ con un doble antes de tocarlo — B sólo estaba leído en el código):
+
+27. 🔴 **Un sistema salteado por falta de RPC sigue OCUPANDO SU LUGAR en el
+    reverse.** Un negativo (`not_found`, `reverse_mismatch`, `expired`) es
+    `verified_onchain` sólo si no se salteó ninguno (sin RPC de Base salía
+    `not_found` verificado, y un consumidor lo cacheaba como verdad). Y un sistema
+    de abajo no da el primario si uno de arriba se salteó: sin RPC de `eip155:1`,
+    el nombre de Avvy salía como primario, verificado; ahora `rpc_unavailable`,
+    sin el nombre. Lo que NO ocupa lugar es un sistema fuera de `systems=`: eso es
+    una elección. Mutaciones DK, DL y DM.
+28. **Un `Reverted` de `nameExpires` es `rpc_unavailable`** (SDK-7). No puede
+    revertir: ENS (`return expiries[id]`) y Basenames (getter de un mapping
+    público) contestan 0 para un label sin registro, y la grabación de
+    `0xultravioletadao.eth` recibió 0. Un `AbiError` ahí sigue siendo
+    `not_found`. Mutación DN. ⚠️ **Medido y NO tocado** (fuera de la ronda): con
+    un RPC que revierte todo, un nombre DNS (`registry.resolver()` tampoco
+    revierte), uno de UNS (la grabación de un `.crypto` inexistente recibió
+    ceros, no un revert) y uno de Avvy siguen dando `not_found` verificado. En
+    Avvy el revert SÍ es la respuesta legítima de «no existe»; en los otros dos
+    es el mismo caso que SDK-7. Queda para c0der.
+
 **Las reglas de plata de UNS, Avvy y el reverse se prueban con dobles
 SINTÉTICOS** (`test_names_ronda2.py`, clase `Cadena`, rotulada): la cadena real no
 ofrece a pedido un UNS que conteste la dirección cero ni un reverse de Avvy que
@@ -525,6 +547,14 @@ docstrings:
 | **DH.** 🔴 el final de `_reverse_steps` como en `5ed00228` (SDK-6 deshecho) | **2 rojos**: el reverse sin ningún RPC, sync y async. El de «uno contesta que no hay nombre → `not_found`» queda VERDE: es el borde que no cambió |
 | **DI.** sin la respuesta temprana de «ningún sistema de reverse habilitado» | **1 rojo**: `systems=("ens-dns",)` sale `rpc_unavailable` en vez de `unsupported_system` |
 | **DJ.** `except Exception` en vez de `except ValueError` en `check_url` | **1 rojo**: el test AST. El comportamiento no cambia y los otros 26 tests nuevos quedan VERDES: sólo el de estructura ve la violación |
+| **DK.** 🔴 el `not_found` de reverse sin `verified_onchain=all_asked` (ronda 1 del PR 7, A) — 2026-09-26 | **2 rojos**: sin RPC de Base, sync y async. El de «todos preguntados → verificado» queda VERDE |
+| **DL.** lo mismo en `reverse_mismatch` / `expired` | **1 rojo**: el `reverse_mismatch` con Avvy salteado; el de todos preguntados, VERDE |
+| **DM.** 🔴 `if skipped:` → `if False:` antes de devolver el nombre (B) | **2 rojos**: sin RPC de L1, sync y async. Quedan VERDES el de «los de arriba contestaron» y el de Avvy solo en `systems=` |
+| **DN.** el `Reverted` de `nameExpires` vuelve a ser `not_found` «the registrar did not answer» (C, SDK-7) | **4 rojos**: `.eth` y `.base.eth`, sync y async. La grabación del `.eth` no registrado (el registrar contesta 0) queda VERDE |
+
+Desde la ronda 1 del PR 7 cada mutación nueva también va en JSON en el cuerpo
+del PR (`nombre`, `archivo`, `viejo`, `nuevo`, `test` = el comando exacto para
+bash), para que se pueda re-aplicar sin leer prosa.
 
 **M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
 KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un

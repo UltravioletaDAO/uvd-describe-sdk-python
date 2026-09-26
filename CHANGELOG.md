@@ -12,8 +12,8 @@ Changes merged since the last release accumulate here, each with its label
 
 ## 0.7.0 — prepared 2026-09-25; published by the `v0.7.0` tag
 
-`names` is new in this release, and the two fixes below were made to it before
-any version carrying it was published: no released version behaves the old way.
+`names` is new in this release, and the fixes below were made to it before any
+version carrying it was published: no released version behaves the old way.
 
 ### [security] SDK-5 — a URL chosen on-chain no longer makes the resolver raise
 
@@ -49,6 +49,34 @@ cached, `detail` naming the skipped systems. `not_found` comes out only when at
 least one system was asked and answered. A resolver with no reverse-capable
 system enabled (e.g. `systems=("ens-dns",)`) answers `unsupported_system`, decided
 without the network.
+
+### [feature] A system skipped for want of an RPC still ranks in `reverse()`
+
+Found by describe.net's refuter against `5ed00228`, and measured here with a
+synthetic double before changing anything:
+
+- **A negative is `verified_onchain` only if no system was skipped.** With no RPC
+  for Base, `reverse()` answered `not_found` with `verified_onchain=True`
+  (`tried` ens, unstoppable, avvy), and a consumer cached it as the truth. It is
+  still `not_found`, now with `verified_onchain=False`; `detail` names the skipped
+  systems. The same holds for `reverse_mismatch` and `expired`.
+- **A lower system does not give the primary name when one above was skipped.**
+  With no RPC for `eip155:1` (ENS, Basenames and UNS skipped), an Avvy name came out
+  as the primary, `verified_onchain=True` — against the strict order the SDK
+  already applied to a system that could not be asked. It is now
+  `rpc_unavailable`, the name not shown.
+- A system left out of `systems=` is a choice, not an outage: it does not rank.
+
+### [feature] SDK-7 — a reverted `nameExpires` is `rpc_unavailable`
+
+`resolve()` of a `.eth` or `.base.eth` name through an RPC that answers "execution
+reverted" to everything came out `not_found`, `verified_onchain=True` ("the
+registrar did not answer"). `nameExpires` cannot revert: in ENS's
+`BaseRegistrarImplementation` it is `return expiries[id]`, in Basenames'
+`BaseRegistrar` the getter of a public mapping, and the recording of an
+unregistered `.eth` name (mainnet, 2026-09-24) got `0`. A revert there is the RPC,
+so it is `rpc_unavailable` (never cached). A registrar answer that does not decode
+is still `not_found`.
 
 ### [feature] `uvd_describe_sdk.names` — the one name resolver of the stack
 

@@ -608,7 +608,10 @@ names.resolve_sync("0xultravioletadao.eth").error   # "not_found", never an exce
 (`NameErrorCode`): `not_found`, `invalid_name` (ENSIP-15), `reverse_mismatch`,
 `expired`, `unsupported_system`, `rpc_unavailable`. `address` is never the zero
 address. `tried` lists the systems asked, and `not_found` means at least one of them
-answered: a `reverse()` that could ask none (no RPC for any) is `rpc_unavailable`.
+answered: a `reverse()` that could ask none (no RPC for any) is `rpc_unavailable`. A
+system skipped for want of an RPC still ranks: a `reverse()` negative is
+`verified_onchain` only if none was skipped, and a lower system's name is not given
+as the primary when one above was skipped (`rpc_unavailable`).
 `verified_onchain` is `False` for anything that came over HTTP — a payment
 destination demands `True` (`require_onchain_address()`). A URL chosen on-chain — a
 CCIP gateway, NFT metadata, a redirect — that is forbidden or does not parse is
