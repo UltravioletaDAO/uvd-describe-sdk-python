@@ -63,7 +63,7 @@ from ._hash import (
     to_checksum_address,
 )
 from ._normalize import classify, ensip15_is_normalized
-from ._proto import BASE, ETHEREUM, Call, Outcome, Reverted, Step, ccip_call
+from ._proto import BASE, ETHEREUM, Call, Outcome, Reverted, Step, Unavailable, ccip_call
 
 #: The ENS registry, the same address on every chain ENS deployed it to.
 REGISTRY = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
@@ -109,8 +109,18 @@ def check_expiry(name: str, system: str, now: float) -> Step[None]:
         return
     try:
         out: bytes = yield Call(chain, registrar, _SEL_NAME_EXPIRES + labelhash(label))
+    except Reverted:
+        # SDK-7 (round 1 of PR 7, from describe-net's refuter): `nameExpires`
+        # CANNOT revert. In ENS's BaseRegistrarImplementation it is `return
+        # expiries[id]` and in Basenames' BaseRegistrar the getter of a public
+        # mapping — for a label never registered both answer 0, and the recording
+        # of `0xultravioletadao.eth` (2026-09-24, mainnet) got exactly 0x00…0. A
+        # revert here is an RPC that reverts everything, and it used to come out
+        # as `not_found` with `verified_onchain=True`. Mutation DN.
+        raise Unavailable(f"the {chain} RPC reverted nameExpires, which cannot revert") from None
+    try:
         (expires,) = _abi.decode(["uint256"], out)
-    except (Reverted, _abi.AbiError):
+    except _abi.AbiError:
         raise Outcome(
             NameErrorCode.NOT_FOUND, f"the registrar did not answer for {owner}"
         ) from None
