@@ -183,7 +183,17 @@ def rpc_body(call: Call) -> Dict[str, Any]:
     }
 
 
-_HEX = re.compile(r"0x([0-9a-fA-F]{2})*")
+_HEX_DIGITS = re.compile(r"0x[0-9a-fA-F]*")
+
+
+def _is_hex(value: str) -> bool:
+    """`0x` + whole bytes. A flat class and a parity check, NOT `0x([0-9a-f]{2})*`:
+    a repeated capturing group keeps state per repetition, and measured
+    2026-09-26 (round 2 of PR 7, R1) it cost ~150x the input — 24.4 MiB for a
+    164 KB revert (py3.13.6; 30.8 MiB on 3.9.24), 145-184 MiB for 1 MB, which
+    fits under MAX_BODY_BYTES. The revert data and the gateway's `data` are
+    chosen on-chain. This costs nothing. Mutation DS."""
+    return _HEX_DIGITS.fullmatch(value) is not None and len(value) % 2 == 0
 
 
 def rpc_result(status: int, payload: Any, chain: str) -> bytes:
@@ -198,13 +208,13 @@ def rpc_result(status: int, payload: Any, chain: str) -> bytes:
         if isinstance(data, dict):
             data = data.get("data")
         message = str(error.get("message", ""))
-        if isinstance(data, str) and _HEX.fullmatch(data):
+        if isinstance(data, str) and _is_hex(data):
             raise Reverted(bytes.fromhex(data[2:]))
         if "revert" in message.lower():
             raise Reverted(b"")
         raise Unavailable(f"the {chain} RPC answered error {error.get('code')}")
     result = payload.get("result")
-    if not isinstance(result, str) or not _HEX.fullmatch(result):
+    if not isinstance(result, str) or not _is_hex(result):
         raise Unavailable(f"the {chain} RPC answered a result that is not hex")
     return bytes.fromhex(result[2:])
 
@@ -272,7 +282,7 @@ def _ccip_fetch(sender: str, urls: List[Any], call_data: bytes) -> Step[bytes]:
             try:
                 parsed = json.loads(response.body)
                 hex_answer = parsed["data"]
-                if not isinstance(hex_answer, str) or not _HEX.fullmatch(hex_answer):
+                if not isinstance(hex_answer, str) or not _is_hex(hex_answer):
                     raise ValueError
                 return bytes.fromhex(hex_answer[2:])
             except (ValueError, KeyError, TypeError, RecursionError):
