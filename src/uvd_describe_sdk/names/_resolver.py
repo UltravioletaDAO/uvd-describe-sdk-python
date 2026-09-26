@@ -80,6 +80,8 @@ SNS_UNSUPPORTED_DETAIL = (
 #: The chains each system needs to answer a reverse lookup at all. A system
 #: whose chains the consumer did not configure is skipped (and named in
 #: `detail`), not failed: leaving Avalanche out is a choice, not an outage.
+#: But «no primary name» is an answer only when SOME system gave it: a reverse
+#: that could ask none is `rpc_unavailable`, never `not_found` (SDK-6).
 _REVERSE_NEEDS = {
     NameSystem.ENS: (ETHEREUM,),
     NameSystem.BASENAMES: (BASE, ETHEREUM),
@@ -490,6 +492,23 @@ class NameResolver:
                     detail="the zero address has no name",
                 ),
             )
+        if not any(system in self._systems for system in _REVERSE_ORDER):
+            # Configuration, not an outage, and decided without the network —
+            # what `resolve()` answers for a disabled system. Before SDK-6 this
+            # was a `not_found` with nothing tried. Mutation DI.
+            return _Plan(
+                raw,
+                NameResolution(
+                    input=raw,
+                    normalized=None,
+                    address=address,
+                    family=NameFamily.EVM,
+                    system=None,
+                    verified_onchain=False,
+                    error=NameErrorCode.UNSUPPORTED_SYSTEM,
+                    detail="no system that answers reverse lookups is enabled in this resolver",
+                ),
+            )
         # Shared with the steps, so an expired deadline still says what was tried.
         tried: List[str] = []
 
@@ -572,12 +591,24 @@ class NameResolver:
             return replace(
                 template, error=refused.code, tried=tuple(tried), detail=refused.detail + note
             )
+        if not tried:
+            # SDK-6 (describe-net's review of its PR 62, 2026-09-25): every
+            # system was skipped for want of an RPC. This used to be `not_found`
+            # with `verified_onchain=False` — the one `not_found` that meant «I
+            # do not know», and the cache kept it 60 s. `rpc_unavailable` is
+            # what the code means («no RPC configured for the chain») and it is
+            # never cached. Mutation DH.
+            return replace(
+                template,
+                verified_onchain=False,
+                error=NameErrorCode.RPC_UNAVAILABLE,
+                detail="no system could be asked" + note,
+            )
         return replace(
             template,
-            verified_onchain=bool(tried),
             error=NameErrorCode.NOT_FOUND,
             tried=tuple(tried),
-            detail=("no primary name" if tried else "no system could be asked") + note,
+            detail="no primary name" + note,
         )
 
     def _reverse_one(self, system: str, address: str, now: float) -> Step[Optional[str]]:
