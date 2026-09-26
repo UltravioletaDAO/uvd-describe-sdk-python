@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 #: The name that travels in the User-Agent. The `-py` tells this SDK apart from
 #: its TypeScript twin in the provider's logs: they are two different clients with

@@ -124,7 +124,24 @@ def _decode_at(typ: str, data: bytes, start: int) -> Any:
         count = _read_word(data, start)
         if count > (len(data) - start) // 32:
             raise AbiError("array length runs past the end of the data")
-        return list(decode([inner] * count, data[start + 32 :]))
+        body = data[start + 32 :]
+        if not _is_dynamic(inner):
+            return list(decode([inner] * count, body))
+        # A dynamic element is a copy of its bytes. N offsets that all point to
+        # the SAME long string decode N copies: measured 2026-09-26 (round 2 of
+        # PR 7, R1), an OffchainLookup of ~160 KB with 1,024 URLs sharing one
+        # 128 KB string peaked at 129 MiB. An encoder never overlaps elements, so
+        # what they decode to cannot add up to more than the data holding them.
+        # Mutation DR.
+        items: List[Any] = []
+        decoded = 0
+        for i in range(count):
+            item = _decode_one(inner, body, 32 * i)
+            decoded += len(item)
+            if decoded > len(body):
+                raise AbiError("dynamic array elements overlap: more content than data")
+            items.append(item)
+        return items
     if typ.endswith("]"):
         inner = typ[: typ.rindex("[")]
         if _is_dynamic(inner):

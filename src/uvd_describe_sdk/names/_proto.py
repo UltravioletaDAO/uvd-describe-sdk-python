@@ -36,6 +36,18 @@ Between requests the engine also checks the clock, and gives each request the
 remainder as httpx's timeout; those are what a test double that BLOCKS (instead
 of awaiting) runs into, since a blocked loop cannot deliver a cancellation.
 
+WHAT THE DEADLINE DOES NOT CUT: CPU INSIDE A STEP
+-------------------------------------------------
+`wait_for` cancels at an `await`. A step that COMPUTES — ENSIP-15 over a name,
+decoding ABI, checking hex — runs to its end, and in the async flavour it blocks
+the caller's event loop meanwhile: every other request of that process waits.
+Measured by the refuter of PR 7 (2026-09-26): a 900 KB reverse name of combining
+marks, 67.5 s with `timeout=1.0`. So what comes from the chain is bounded in
+SIZE before anything is computed on it: `MAX_BODY_BYTES` for a body, the overlap
+check for a dynamic ABI array (`_abi.py`), `MAX_NAME_BYTES` for a name
+(`_normalize.py`), and a flat hex check (`_is_hex`). A new step that computes
+over on-chain data needs its own bound; the deadline will not provide it.
+
 ⚠️ History, left written — three rounds of PR #6 found the SAME class of hole
 in a separate sync engine, each after the previous fix was declared hard:
 round 2, a dripping body (1.0 s budget → 6.36 s); round 3, dripping headers and a
@@ -60,10 +72,21 @@ CCIP-Read gateway URLs and NFT metadata URLs come from the chain, i.e. from
 whoever controls a resolver or an NFT contract. Inside a Lambda that is a
 server-side request forgery surface. `check_url` refuses anything that is not
 `https://`, carries userinfo, names `localhost`, or is an IP literal outside the
-global unicast space (or a bare number that `getaddrinfo` would read as one).
+global unicast space — an IPv6 form that embeds such an IPv4 included — or a
+host whose last label `getaddrinfo` would read as a number: decimal, octal or
+HEX (`0x7f000001`, `0xa9fea902`; the hex forms passed until round 2 of PR 7).
 Redirects are followed by hand, at most three, each re-checked. Bodies are
 capped. The residual risk, stated: a public hostname whose DNS answers with a
 private address is not detected (checking it would race the connect anyway).
+
+A URL that does not PARSE is refused the same way, as `Unavailable` — for
+`urlsplit` (`check_url`, `urljoin` on a redirect) or for httpx (`InvalidURL`) —
+and so is a gateway body `json.loads` cannot read (`RecursionError` included).
+⚠️ Until 0.7.0 those escaped the resolver as `ValueError`, `httpx.InvalidURL` or
+`RecursionError`, i.e. whoever controls a resolver could make a consumer's
+request fail with a 500 (SDK-5, describe-net's review of its PR 62). Each is
+caught by its concrete class, never `except Exception`: a bug of this SDK must
+still raise.
 """
 
 from __future__ import annotations
@@ -172,7 +195,17 @@ def rpc_body(call: Call) -> Dict[str, Any]:
     }
 
 
-_HEX = re.compile(r"0x([0-9a-fA-F]{2})*")
+_HEX_DIGITS = re.compile(r"0x[0-9a-fA-F]*")
+
+
+def _is_hex(value: str) -> bool:
+    """`0x` + whole bytes. A flat class and a parity check, NOT `0x([0-9a-f]{2})*`:
+    a repeated capturing group keeps state per repetition, and measured
+    2026-09-26 (round 2 of PR 7, R1) it cost ~150x the input — 24.4 MiB for a
+    164 KB revert (py3.13.6; 30.8 MiB on 3.9.24), 145-184 MiB for 1 MB, which
+    fits under MAX_BODY_BYTES. The revert data and the gateway's `data` are
+    chosen on-chain. This costs nothing. Mutation DS."""
+    return _HEX_DIGITS.fullmatch(value) is not None and len(value) % 2 == 0
 
 
 def rpc_result(status: int, payload: Any, chain: str) -> bytes:
@@ -187,13 +220,13 @@ def rpc_result(status: int, payload: Any, chain: str) -> bytes:
         if isinstance(data, dict):
             data = data.get("data")
         message = str(error.get("message", ""))
-        if isinstance(data, str) and _HEX.fullmatch(data):
+        if isinstance(data, str) and _is_hex(data):
             raise Reverted(bytes.fromhex(data[2:]))
         if "revert" in message.lower():
             raise Reverted(b"")
         raise Unavailable(f"the {chain} RPC answered error {error.get('code')}")
     result = payload.get("result")
-    if not isinstance(result, str) or not _HEX.fullmatch(result):
+    if not isinstance(result, str) or not _is_hex(result):
         raise Unavailable(f"the {chain} RPC answered a result that is not hex")
     return bytes.fromhex(result[2:])
 
@@ -261,10 +294,14 @@ def _ccip_fetch(sender: str, urls: List[Any], call_data: bytes) -> Step[bytes]:
             try:
                 parsed = json.loads(response.body)
                 hex_answer = parsed["data"]
-                if not isinstance(hex_answer, str) or not _HEX.fullmatch(hex_answer):
+                if not isinstance(hex_answer, str) or not _is_hex(hex_answer):
                     raise ValueError
                 return bytes.fromhex(hex_answer[2:])
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, RecursionError):
+                # `RecursionError` is not a `ValueError`: a body of 1,000+ nested
+                # `[` (well under MAX_BODY_BYTES) made `json.loads` raise it and
+                # it escaped the resolver (SDK-5, measured py3.9/3.12/3.13).
+                # Mutation DD.
                 last = f"the gateway {host} answered a body without hex `data`"
                 continue
         if response.status == 404:
@@ -282,11 +319,34 @@ def _ccip_fetch(sender: str, urls: List[Any], call_data: bytes) -> Step[bytes]:
 # ---------------------------------------------------------------------------
 
 _LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain")
+#: IPv6 prefixes whose last 32 bits ARE an IPv4 address: IPv4-mapped, the
+#: deprecated IPv4-compatible `::a.b.c.d`, and NAT64's well-known prefix.
+#: `ipaddress` calls `::169.254.170.2` and `64:ff9b::a9fe:aa02` global
+#: (py3.9.24 and 3.13.6, 2026-09-26), so the embedded IPv4 is checked too.
+_EMBEDS_IPV4 = tuple(
+    ipaddress.ip_network(net) for net in ("::ffff:0:0/96", "::/96", "64:ff9b::/96")
+)
+#: The last label of a host that `getaddrinfo` reads as a NUMBER: decimal and
+#: octal (`2130706433`, `0177`) and hex (`0x7f000001`, `127.0.0.0x1`). A real
+#: top-level domain is neither.
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*")
 
 
 def check_url(url: str) -> None:
-    """Refuse a URL this process must not fetch. Raises `Unavailable`."""
-    parts = urlsplit(url)
+    """Refuse a URL this process must not fetch. Raises `Unavailable`, and only that.
+
+    A URL that does not parse is refused like one that parses to somewhere
+    forbidden (SDK-5, found by describe-net's review of PR 62, 2026-09-25):
+    `urlsplit` raises `ValueError` on `https://[x/…` (an unclosed bracket) and on
+    `https://[zzz]/…` (a bracketed host that is not an IP — py3.9.24, 3.12, 3.13),
+    and whoever controls the resolver or the NFT contract picks that string. It
+    used to escape the resolver, and describe-net's route answered 500.
+    Mutation DA.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise Unavailable("refused a URL that does not parse") from None
     host = (parts.hostname or "").lower().rstrip(".")
     if parts.scheme != "https":
         raise Unavailable(f"refused a non-https URL ({parts.scheme or 'no scheme'})")
@@ -301,10 +361,20 @@ def check_url(url: str) -> None:
     if ip is not None:
         if not ip.is_global:
             raise Unavailable("refused an IP literal outside the global address space")
+        if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in _EMBEDS_IPV4):
+            if not ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF).is_global:
+                # Mutation DQ.
+                raise Unavailable("refused an IP literal outside the global address space")
         return
-    if not re.search(r"[a-z]", host.rsplit(".", 1)[-1]):
+    last = host.rsplit(".", 1)[-1]
+    if not re.search(r"[a-z]", last) or _NUMERIC_LABEL.fullmatch(last):
         # `https://2130706433/` and `https://127.1/` are 127.0.0.1 to
         # getaddrinfo on most platforms. A real top-level domain has letters.
+        # ⚠️ And not only decimal (round 2 of PR 7, R5, P1 [security]): the HEX
+        # forms `https://0x7f000001/`, `https://127.0.0.0x1/` and
+        # `https://0xa9fea902/` — 169.254.170.2, the ECS task-credentials
+        # endpoint a consumer on ECS can reach — have letters (`x`, `f`) and
+        # passed. Mutation DP.
         raise Unavailable("refused a host that is a number in disguise")
 
 
@@ -346,10 +416,23 @@ def _refuse_encoded(response: httpx.Response, host: Optional[str]) -> None:
 
 
 def _redirect_target(response: httpx.Response, url: str) -> Optional[str]:
+    """The next URL of a redirect, or `None`. Raises `Unavailable`, and only that.
+
+    A `Location` that httpx cannot parse never gets here: httpx builds the next
+    request itself and raises `RemoteProtocolError`, an `httpx.HTTPError`
+    (measured: `//[zzz]/a`, `https://gw.example/\\x01`). One httpx accepts and
+    `urljoin` does not — `https://[x/`, an unclosed bracket — raised `ValueError`
+    out of the resolver (SDK-5). Mutation DC.
+    """
     if response.status_code in (301, 302, 303, 307, 308):
         location = response.headers.get("location")
         if location:
-            return str(urljoin(url, location))
+            try:
+                return str(urljoin(url, location))
+            except ValueError:
+                raise Unavailable(
+                    f"{urlsplit(url).hostname} redirected to a URL that does not parse"
+                ) from None
     return None
 
 
@@ -506,6 +589,13 @@ async def _do_async(
                         raise Unavailable(f"{host} sent more than {MAX_BODY_BYTES} bytes")
                     parts.append(chunk)
                 return FetchResponse(response.status_code, b"".join(parts))
+        except httpx.InvalidURL:
+            # Not an `httpx.HTTPError`: httpx refuses to build the request at all.
+            # A URL `urlsplit` accepts and httpx does not (a control character,
+            # `https://gw.example/\x01…`) escaped here as `InvalidURL` (SDK-5).
+            # The detail does not repeat the URL: it is the part that is broken.
+            # Mutation DB.
+            raise Unavailable("refused a URL that httpx cannot request (InvalidURL)") from None
         except httpx.TimeoutException:
             raise Unavailable(f"{host} timed out") from None
         except httpx.HTTPError as err:

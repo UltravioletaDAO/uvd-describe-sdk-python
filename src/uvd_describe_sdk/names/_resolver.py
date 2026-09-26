@@ -37,7 +37,14 @@ from . import _avvy, _ens, _uns
 from ._avatar import NoAvatar, nft_image, nft_reference, plain_url
 from ._cache import NameCache
 from ._hash import ZERO_ADDRESS, is_hex_address, to_checksum_address
-from ._normalize import ENS_FAMILY, FAMILY_OF, Classified, InvalidNameError, classify
+from ._normalize import (
+    ENS_FAMILY,
+    FAMILY_OF,
+    Classified,
+    InvalidNameError,
+    classify,
+    too_long,
+)
 from ._proto import (
     AVALANCHE,
     BASE,
@@ -80,6 +87,11 @@ SNS_UNSUPPORTED_DETAIL = (
 #: The chains each system needs to answer a reverse lookup at all. A system
 #: whose chains the consumer did not configure is skipped (and named in
 #: `detail`), not failed: leaving Avalanche out is a choice, not an outage.
+#: But «no primary name» is an answer only when SOME system gave it: a reverse
+#: that could ask none is `rpc_unavailable`, never `not_found` (SDK-6). And a
+#: skipped system still RANKS: it might hold the primary name, so a lower one's
+#: name is not given (`rpc_unavailable`), and a negative is `verified_onchain`
+#: only if nothing was skipped (round 1 of PR 7).
 _REVERSE_NEEDS = {
     NameSystem.ENS: (ETHEREUM,),
     NameSystem.BASENAMES: (BASE, ETHEREUM),
@@ -490,6 +502,23 @@ class NameResolver:
                     detail="the zero address has no name",
                 ),
             )
+        if not any(system in self._systems for system in _REVERSE_ORDER):
+            # Configuration, not an outage, and decided without the network —
+            # what `resolve()` answers for a disabled system. Before SDK-6 this
+            # was a `not_found` with nothing tried. Mutation DI.
+            return _Plan(
+                raw,
+                NameResolution(
+                    input=raw,
+                    normalized=None,
+                    address=address,
+                    family=NameFamily.EVM,
+                    system=None,
+                    verified_onchain=False,
+                    error=NameErrorCode.UNSUPPORTED_SYSTEM,
+                    detail="no system that answers reverse lookups is enabled in this resolver",
+                ),
+            )
         # Shared with the steps, so an expired deadline still says what was tried.
         tried: List[str] = []
 
@@ -535,15 +564,16 @@ class NameResolver:
                 skipped.append(f"{system} (no RPC for {', '.join(missing)})")
                 continue
             tried.append(system)
+            unasked: List[str] = []
             try:
-                name = yield from self._reverse_one(system, address, now)
+                name = yield from self._reverse_one(system, address, now, unasked)
             except Outcome as outcome:
                 if (
                     outcome.code in (NameErrorCode.REVERSE_MISMATCH, NameErrorCode.EXPIRED)
                     and refused is None
                 ):
                     refused = outcome
-                continue
+                name = None
             except (Unavailable, Reverted) as failure:
                 # Strict order: a system above that could not be asked might
                 # hold the primary name, so a lower one's answer is not given.
@@ -559,8 +589,32 @@ class NameResolver:
                     tried=tuple(tried),
                     detail=str(failure),
                 )
+            if unasked:
+                # A system asked on SOME of its chains (round 2 of PR 7, R4,
+                # decided by c0der like A of round 1): UNS with only the L1 RPC
+                # answered `not_found` verified, and Polygon and Base were never
+                # asked. The chains it could not ask rank like a skipped system:
+                # named in `detail`, and they unverify a negative and hold back a
+                # name found below them. Mutation DX.
+                skipped.append(f"{system} on {', '.join(unasked)} (no RPC)")
             if name is None:
                 continue
+            if skipped:
+                # Strict order, for a system above that was SKIPPED too (round 1
+                # of PR 7, from describe-net's refuter, measured with a double
+                # 2026-09-26): with no RPC for eip155:1, ENS, Basenames and UNS
+                # were skipped and Avvy's name came out as the primary, with
+                # `verified_onchain=True`. A skipped system might hold the
+                # primary name exactly like one that could not be asked, so the
+                # lower answer is not given — nor named. Mutation DM.
+                return replace(
+                    template,
+                    verified_onchain=False,
+                    error=NameErrorCode.RPC_UNAVAILABLE,
+                    tried=tuple(tried),
+                    detail="a system (or a chain of one) that ranks above could not be "
+                    f"asked, so the primary name cannot be told; skipped: {', '.join(skipped)}",
+                )
             return replace(
                 template,
                 normalized=name,
@@ -568,20 +622,49 @@ class NameResolver:
                 tried=tuple(tried),
             )
         note = f"; skipped: {', '.join(skipped)}" if skipped else ""
+        # A negative is VERIFIED only when every enabled system was asked: with
+        # one skipped, the name it might hold was never read (round 1 of PR 7:
+        # no RPC for Base gave `not_found` with `verified_onchain=True`, and a
+        # consumer cached it as the truth). The code stays; the flag says it.
+        # Mutations DK (not_found) and DL (reverse_mismatch / expired).
+        all_asked = not skipped
         if refused is not None:
             return replace(
-                template, error=refused.code, tried=tuple(tried), detail=refused.detail + note
+                template,
+                error=refused.code,
+                verified_onchain=all_asked,
+                tried=tuple(tried),
+                detail=refused.detail + note,
+            )
+        if not tried:
+            # SDK-6 (describe-net's review of its PR 62, 2026-09-25): every
+            # system was skipped for want of an RPC. This used to be `not_found`
+            # with `verified_onchain=False` — the one `not_found` that meant «I
+            # do not know», and the cache kept it 60 s. `rpc_unavailable` is
+            # what the code means («no RPC configured for the chain») and it is
+            # never cached. Mutation DH.
+            return replace(
+                template,
+                verified_onchain=False,
+                error=NameErrorCode.RPC_UNAVAILABLE,
+                detail="no system could be asked" + note,
             )
         return replace(
             template,
-            verified_onchain=bool(tried),
             error=NameErrorCode.NOT_FOUND,
+            verified_onchain=all_asked,
             tried=tuple(tried),
-            detail=("no primary name" if tried else "no system could be asked") + note,
+            detail="no primary name" + note,
         )
 
-    def _reverse_one(self, system: str, address: str, now: float) -> Step[Optional[str]]:
-        """The confirmed primary name in ONE system, or `None` if it claims none."""
+    def _reverse_one(
+        self, system: str, address: str, now: float, unasked: List[str]
+    ) -> Step[Optional[str]]:
+        """The confirmed primary name in ONE system, or `None` if it claims none.
+
+        `unasked` gets the chains of the system that had no RPC and rank ABOVE
+        its answer (all of them when there is none). Only UNS reads several.
+        """
         if system in (NameSystem.ENS, NameSystem.BASENAMES):
             if system == NameSystem.ENS:
                 claimed = yield from _ens.claimed_l1(address)
@@ -594,12 +677,24 @@ class NameResolver:
             confirmed: str = yield from _ens.confirm(claimed, address, now, coin_type)
             return confirmed
         if system == NameSystem.UNSTOPPABLE:
-            chains = tuple(c for c in _uns.REVERSE_CHAINS if c in self._rpc)
-            claimed = yield from _uns.claimed(address, chains)
+            # The same calls, in the same order, as `_uns.claimed` over the
+            # configured chains — one chain at a time, to know which ones were
+            # passed over before an answer.
+            claimed = None
+            for chain in _uns.REVERSE_CHAINS:
+                if chain not in self._rpc:
+                    unasked.append(chain)
+                    continue
+                claimed = yield from _uns.claimed(address, (chain,))
+                if claimed is not None:
+                    break
         else:
             claimed = yield from _avvy.claimed(address)
         if claimed is None:
             return None
+        if too_long(claimed):
+            # Same cap as `_ens.confirm` (R2): refused before classifying. Mutation DV.
+            raise Outcome(NameErrorCode.REVERSE_MISMATCH, "the reverse record is too long")
         found = classify(claimed)
         if found.error or found.system != system or found.normalized != claimed:
             raise Outcome(
