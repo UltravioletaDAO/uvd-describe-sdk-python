@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 import httpx
 import pytest
@@ -243,19 +243,64 @@ def test_la_referencia_NFT_acepta_hasta_el_uint256_maximo_y_ni_uno_mas() -> None
 
 NAMES = Path(__file__).resolve().parents[1] / "src" / "uvd_describe_sdk" / "names"
 
+#: Los ÚNICOS tipos que un `except` de `names/` puede nombrar: una lista BLANCA.
+#: ⚠️ Ronda 2 del PR 7 (R6), y se deja escrito: hasta ahí este test era una
+#: lista NEGRA («ni `Exception` ni `BaseException` escritos así») y la mutación
+#: C6 del refutador —`except ValueError.__base__:`, que ES `except Exception`—
+#: sobrevivía en VERDE; tampoco veía un alias ni `builtins.Exception`. Un tipo
+#: nuevo se agrega acá a propósito, y es una clase concreta.
+TIPOS_PERMITIDOS = frozenset(
+    {
+        # builtins
+        "ImportError",
+        "KeyError",
+        "RecursionError",
+        "RuntimeError",
+        "StopIteration",
+        "TypeError",
+        "UnicodeDecodeError",
+        "ValueError",
+        # del SDK
+        "DisallowedSequence",
+        "InvalidNameError",
+        "NoAvatar",
+        "Outcome",
+        "Reverted",
+        "Unavailable",
+        "_abi.AbiError",
+        # de las dependencias
+        "asyncio.TimeoutError",
+        "httpx.HTTPError",
+        "httpx.InvalidURL",
+        "httpx.TimeoutException",
+        "sniffio.AsyncLibraryNotFoundError",
+    }
+)
+
 #: El único que atrapa todo, y no tapa nada: guarda la excepción del hilo
 #: propio para re-levantarla en el hilo de quien llamó (`_proto.run_blocking`).
-PERMITIDOS = {("_proto.py", "worker")}
+FUERA_DE_LA_LISTA_PERMITIDO = {("_proto.py", "worker", "BaseException")}
 
 
-class _AtrapaTodo(ast.NodeVisitor):
-    """Anota (archivo, función más interna) de cada `except:`, `except
-    Exception` o `except BaseException`, también dentro de una tupla."""
+def _nombre(expr: ast.expr) -> Optional[str]:
+    """`ValueError` o `httpx.InvalidURL`; `None` si no es un nombre con puntos."""
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        base = _nombre(expr.value)
+        return None if base is None else f"{base}.{expr.attr}"
+    return None
+
+
+class _TiposDeExcept(ast.NodeVisitor):
+    """Anota (archivo, función más interna, tipo) de cada tipo de un `except`
+    que no esté en `TIPOS_PERMITIDOS`: un `except:` pelado, un nombre o atributo
+    fuera de la lista, o cualquier otra expresión."""
 
     def __init__(self, archivo: str) -> None:
         self.archivo = archivo
         self.funciones = ["<módulo>"]
-        self.encontrados: List[Tuple[str, str]] = []
+        self.fuera: List[Tuple[str, str, str]] = []
 
     def _funcion(self, nodo: Any) -> None:
         self.funciones.append(nodo.name)
@@ -269,19 +314,39 @@ class _AtrapaTodo(ast.NodeVisitor):
         self._funcion(nodo)
 
     def visit_ExceptHandler(self, nodo: ast.ExceptHandler) -> None:
-        tipos = nodo.type.elts if isinstance(nodo.type, ast.Tuple) else [nodo.type]
-        amplios = {"Exception", "BaseException"}
-        if any(t is None or (isinstance(t, ast.Name) and t.id in amplios) for t in tipos):
-            self.encontrados.append((self.archivo, self.funciones[-1]))
+        if nodo.type is None:
+            self.fuera.append((self.archivo, self.funciones[-1], "except:"))
+        else:
+            tipos = nodo.type.elts if isinstance(nodo.type, ast.Tuple) else [nodo.type]
+            for tipo in tipos:
+                nombre = _nombre(tipo)
+                if nombre not in TIPOS_PERMITIDOS:
+                    self.fuera.append((self.archivo, self.funciones[-1], nombre or ast.dump(tipo)))
         self.generic_visit(nodo)
 
 
 def test_ningun_modulo_de_names_atrapa_Exception_salvo_el_que_re_levanta() -> None:
     """«Nunca un `except Exception` que tape errores del propio SDK; se atrapan
-    las clases concretas.» Mutación DJ."""
-    encontrados: List[Tuple[str, str]] = []
+    las clases concretas.» Mutaciones DJ, C6 (del refutador) y DZ (un alias)."""
+    fuera: List[Tuple[str, str, str]] = []
     for archivo in sorted(NAMES.glob("*.py")):
-        buscador = _AtrapaTodo(archivo.name)
+        buscador = _TiposDeExcept(archivo.name)
         buscador.visit(ast.parse(archivo.read_text(encoding="utf-8")))
-        encontrados.extend(buscador.encontrados)
-    assert set(encontrados) == PERMITIDOS, encontrados
+        fuera.extend(buscador.fuera)
+    assert set(fuera) == FUERA_DE_LA_LISTA_PERMITIDO, fuera
+
+
+def test_ningun_modulo_de_names_usa_suppress() -> None:
+    """`contextlib.suppress(Exception)` es un `except` que no se escribe
+    `except`, y el test de arriba no lo vería. Mutación DY."""
+    usos: List[Tuple[str, str]] = []
+    for archivo in sorted(NAMES.glob("*.py")):
+        texto = archivo.read_text(encoding="utf-8")
+        if "suppress(" in texto:
+            usos.append((archivo.name, "suppress("))
+        for nodo in ast.walk(ast.parse(texto)):
+            if isinstance(nodo, ast.ImportFrom) and any(a.name == "suppress" for a in nodo.names):
+                usos.append((archivo.name, f"from {nodo.module} import suppress"))
+            if isinstance(nodo, ast.Attribute) and nodo.attr == "suppress":
+                usos.append((archivo.name, f"{_nombre(nodo)}"))
+    assert usos == [], usos
