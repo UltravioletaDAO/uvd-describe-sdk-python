@@ -2,9 +2,9 @@
 rehúsa un host que `getaddrinfo` lee como número, también en HEX, y una IPv6
 que lleva adentro una IPv4 que no es global.
 
-Por qué subió a P1: un consumidor en ECS (Execution Market) alcanza el endpoint
-de credenciales de la tarea en 169.254.170.2, y un gateway CCIP o una metadata
-de NFT la elige quien controla un contrato. Medido el 2026-09-26 sobre
+Por qué subió a P1: un consumidor que corre en ECS alcanza el endpoint de
+credenciales de la tarea en 169.254.170.2, y un gateway CCIP o una metadata de
+NFT la elige quien controla un contrato. Medido el 2026-09-26 sobre
 `940685ec` (py3.9.24 y 3.13.6): `https://0xa9fea902/`, `https://0x7f000001/`,
 `https://127.0.0.0x1/` y `https://0x7f.0x0.0x0.0x1/` PASABAN (la última
 etiqueta tiene letras: `x`, `f`), y también `https://[::169.254.170.2]/`
