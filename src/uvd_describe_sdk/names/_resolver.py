@@ -81,7 +81,10 @@ SNS_UNSUPPORTED_DETAIL = (
 #: whose chains the consumer did not configure is skipped (and named in
 #: `detail`), not failed: leaving Avalanche out is a choice, not an outage.
 #: But «no primary name» is an answer only when SOME system gave it: a reverse
-#: that could ask none is `rpc_unavailable`, never `not_found` (SDK-6).
+#: that could ask none is `rpc_unavailable`, never `not_found` (SDK-6). And a
+#: skipped system still RANKS: it might hold the primary name, so a lower one's
+#: name is not given (`rpc_unavailable`), and a negative is `verified_onchain`
+#: only if nothing was skipped (round 1 of PR 7).
 _REVERSE_NEEDS = {
     NameSystem.ENS: (ETHEREUM,),
     NameSystem.BASENAMES: (BASE, ETHEREUM),
@@ -580,6 +583,22 @@ class NameResolver:
                 )
             if name is None:
                 continue
+            if skipped:
+                # Strict order, for a system above that was SKIPPED too (round 1
+                # of PR 7, from describe-net's refuter, measured with a double
+                # 2026-09-26): with no RPC for eip155:1, ENS, Basenames and UNS
+                # were skipped and Avvy's name came out as the primary, with
+                # `verified_onchain=True`. A skipped system might hold the
+                # primary name exactly like one that could not be asked, so the
+                # lower answer is not given — nor named. Mutation DM.
+                return replace(
+                    template,
+                    verified_onchain=False,
+                    error=NameErrorCode.RPC_UNAVAILABLE,
+                    tried=tuple(tried),
+                    detail="a system that ranks above could not be asked, so the primary "
+                    f"name cannot be told; skipped: {', '.join(skipped)}",
+                )
             return replace(
                 template,
                 normalized=name,
@@ -587,9 +606,19 @@ class NameResolver:
                 tried=tuple(tried),
             )
         note = f"; skipped: {', '.join(skipped)}" if skipped else ""
+        # A negative is VERIFIED only when every enabled system was asked: with
+        # one skipped, the name it might hold was never read (round 1 of PR 7:
+        # no RPC for Base gave `not_found` with `verified_onchain=True`, and a
+        # consumer cached it as the truth). The code stays; the flag says it.
+        # Mutations DK (not_found) and DL (reverse_mismatch / expired).
+        all_asked = not skipped
         if refused is not None:
             return replace(
-                template, error=refused.code, tried=tuple(tried), detail=refused.detail + note
+                template,
+                error=refused.code,
+                verified_onchain=all_asked,
+                tried=tuple(tried),
+                detail=refused.detail + note,
             )
         if not tried:
             # SDK-6 (describe-net's review of its PR 62, 2026-09-25): every
@@ -607,6 +636,7 @@ class NameResolver:
         return replace(
             template,
             error=NameErrorCode.NOT_FOUND,
+            verified_onchain=all_asked,
             tried=tuple(tried),
             detail="no primary name" + note,
         )
