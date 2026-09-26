@@ -10,6 +10,46 @@ this file starts with 0.6.0, the first release that asked for one.
 Changes merged since the last release accumulate here, each with its label
 (`[security]`, `[money]`, `[feature]`, `[internal]`), and ship together.
 
+## 0.7.0 — prepared 2026-09-25; published by the `v0.7.0` tag
+
+`names` is new in this release, and the two fixes below were made to it before
+any version carrying it was published: no released version behaves the old way.
+
+### [security] SDK-5 — a URL chosen on-chain no longer makes the resolver raise
+
+Found by describe.net's review of its name routes, against `5ed00228`: a CCIP
+gateway URL, a redirect `Location`, an NFT metadata URL or an avatar record — each
+written by whoever controls a resolver, an NFT contract or a name — could make
+`resolve()` / `text()` / `avatar()` (and `reverse()`, which resolves forward)
+**raise** instead of answering. A consumer without a guard of its own answered
+HTTP 500, chosen by the name's owner. Measured on py3.9.24, 3.12.12 and 3.13.6:
+
+| Input | Escaped as | Now |
+|---|---|---|
+| gateway `https://[x/{data}` (unclosed bracket) | `ValueError` from `urlsplit` | refused like any forbidden URL: the next gateway is tried; none left → `rpc_unavailable` |
+| gateway `https://[zzz]/{data}` (bracketed host, not an IP) | `ValueError` from `urlsplit` | same |
+| gateway `https://gw.example/\x01{data}` | `httpx.InvalidURL` | same |
+| redirect to `Location: https://[x/` | `ValueError` from `urljoin` | `rpc_unavailable` |
+| gateway body of 1,000+ nested `[` | `RecursionError` from `json.loads` | a body without hex `data`: the next gateway, then `rpc_unavailable` |
+| NFT metadata (https or `data:`) of 1,000+ nested `[` | `RecursionError` | no URL, `detail` "the NFT metadata … is not JSON" — as any non-JSON metadata |
+| NFT avatar whose token id has 5,000 digits | `ValueError` from `int()` | no URL, `detail` "the avatar record is not an ENSIP-12 URI": a token id that is not a uint256 is not an NFT reference |
+| NFT metadata URL `https://[x/…` | `ValueError` from `urlsplit` | `rpc_unavailable` for that `avatar()` |
+
+A `Location` httpx itself cannot parse (`//[zzz]/a`, a control character) was
+already `rpc_unavailable` (`RemoteProtocolError`); it is now pinned by a test.
+Every one is caught by its concrete class — a test fails if any module of
+`names/` gains an `except Exception` — so a bug of the SDK itself still raises.
+
+### [feature] SDK-6 — `reverse()` that could ask no system is `rpc_unavailable`
+
+A `reverse()` whose systems were ALL skipped for want of an RPC answered
+`not_found` (with `verified_onchain=False`), and the cache kept it 60 s: the one
+`not_found` that meant «I do not know». It now answers `rpc_unavailable` — never
+cached, `detail` naming the skipped systems. `not_found` comes out only when at
+least one system was asked and answered. A resolver with no reverse-capable
+system enabled (e.g. `systems=("ens-dns",)`) answers `unsupported_system`, decided
+without the network.
+
 ### [feature] `uvd_describe_sdk.names` — the one name resolver of the stack
 
 Name → address and address → name, read on-chain, behind a new extra:

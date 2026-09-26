@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 524 pasan, 28-32 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-24 en py3.13 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 5 del PR #6 de `names` — los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 551 pasan, 27-33 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-25 en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras SDK-5 y SDK-6 de 0.7.0 — `test_names_sdk5.py` y `test_names_sdk6.py`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -292,6 +292,33 @@ arquitectura convergió y NO se tocó):
     alcanza, escrito en `run_blocking`: un `getaddrinfo` abandonado sigue en su
     hilo hasta que el SO contesta (la llamada vuelve a tiempo; el hilo no).
 
+**Antes del tag v0.7.0** (la revisión de las rutas de nombres de describe.net,
+sobre `5ed00228`, encontró dos P1 del SDK; c0der los pidió acá antes de publicar,
+2026-09-25):
+
+24. 🔴 **Una URL elegida on-chain nunca hace LEVANTAR al resolver** (SDK-5).
+    Un gateway CCIP, un `Location`, una metadata o un registro de avatar los
+    escribe quien controla un resolver, un contrato o un nombre, y hacían escapar
+    `ValueError` (`urlsplit` en `check_url`; `urljoin` en un redirect),
+    `httpx.InvalidURL`, `RecursionError` (`json.loads` de 1.000+ `[`, que NO es un
+    `ValueError`) y el `ValueError` de `int()` con más de 4.300 dígitos: un 500
+    que elige el dueño del nombre. Medidos en py3.9.24, 3.12.12 y 3.13.6. Cada una
+    se atrapa por su CLASE y va a lo que ese sitio ya contestaba ante una entrada
+    ilegible: una URL → `Unavailable` (se prueba el gateway siguiente); una
+    metadata → «not JSON»; un token id que no es uint256 → «not an ENSIP-12
+    URI». **Nunca `except Exception`**: un test AST falla si un módulo de
+    `names/` lo agrega (el único permitido es el `worker` de `run_blocking`, que
+    re-levanta). Un `Location` que httpx mismo no parsea ya salía
+    `RemoteProtocolError`, y quedó fijado como guarda. Mutaciones DA–DG y DJ.
+25. **Un `not_found` de `reverse()` quiere decir que alguien contestó** (SDK-6).
+    Con todos los sistemas salteados por falta de RPC es `rpc_unavailable` (no
+    se cachea); sin ningún sistema de reverse habilitado, `unsupported_system`
+    sin red. Antes era `not_found` con `verified_onchain=False`, cacheado 60 s.
+    Mutaciones DH y DI.
+26. ~~**SDK-4**, `resolved` literal en `to_dict()`~~: **descartada por c0der**
+    (2026-09-25) — `error` ya lo dice. Se deja tachada para que nadie la vuelva a
+    proponer sin saber que se decidió.
+
 **Las reglas de plata de UNS, Avvy y el reverse se prueban con dobles
 SINTÉTICOS** (`test_names_ronda2.py`, clase `Cadena`, rotulada): la cadena real no
 ofrece a pedido un UNS que conteste la dirección cero ni un reverse de Avvy que
@@ -487,6 +514,17 @@ docstrings:
 | **CF.** 🔴 el script de `8326ef2` entero (`git show`) | **20 rojos**: los 20 de `test_names_ronda5_script.py` (`ImportError: run_sync`). Antes: ningún test lo importaba |
 | **CG.** la `Grabadora` hereda de `httpx.BaseTransport` (con el import ya arreglado) | **2 rojos**: el de importación (`issubclass`) y el de `poseidon_tld_avax` (`AsyncClient` le pide `__aenter__`). ⚠️ Los otros 18 quedan VERDES: el resolver no mira el tipo de `async_transport=` y la `Grabadora` igual tiene `handle_async_request` — el que ata el tipo es el `issubclass` |
 | **CH.** el agujero no retiene el SYN (`listen(64)`, sin rellenos: lo que pasaba en macOS) | **2 rojos**: N=3 y N=5 cuentan 1 connect. El tiempo quedó VERDE en los dos — el connect entra, el servidor no contesta, y el presupuesto corta igual: sin contar connects el test no probaba el agujero |
+| **M0.** los tres archivos de `names/` (`_proto`, `_avatar`, `_resolver`) como en `5ed00228` — 2026-09-25, SDK-5 y SDK-6 | **20 rojos**, todos de `test_names_sdk5.py` / `test_names_sdk6.py`: los tests reproducen los bugs. Quedan VERDES 7, y es lo esperado: los 4 de los `Location` que httpx ya rechazaba, los 2 del reverse que sí contesta `not_found` y el test AST |
+| **DA.** 🔴 `check_url` sin el `try` alrededor de `urlsplit` | **7 rojos**: los gateways `https://[x/…` y `https://[zzz]/…` (sync y async), el de «se saltea y el siguiente contesta» y la metadata en `https://[x/…` (sync y async) |
+| **DB.** que `_do_async` no atrape `httpx.InvalidURL` | **2 rojos**: el gateway `https://gw.example/\x01…`, sync y async |
+| **DC.** que `_redirect_target` no atrape el `ValueError` de `urljoin` | **2 rojos**: `Location: https://[x/`, sync y async. Los `Location` que httpx mismo rechaza (`//[zzz]/a`, `\x01`) quedan VERDES: ya salían `RemoteProtocolError` |
+| **DD.** sacar `RecursionError` de la tupla de `_ccip_fetch` | **2 rojos**: el gateway que contesta 200.000 `[` anidados, sync y async |
+| **DE.** sacar `RecursionError` de la metadata https (`_avatar._metadata`) | **1 rojo**: `test_una_metadata_https_con_JSON_anidado_sin_fin_no_da_URL` |
+| **DF.** sacarlo de la rama `data:` | **1 rojo**: `test_una_metadata_data_URI_con_JSON_anidado_sin_fin_no_da_URL` |
+| **DG.** no contar los dígitos antes de `int()` en `nft_reference` | **2 rojos**: el avatar con token id de 5.000 dígitos y el de los bordes del uint256 |
+| **DH.** 🔴 el final de `_reverse_steps` como en `5ed00228` (SDK-6 deshecho) | **2 rojos**: el reverse sin ningún RPC, sync y async. El de «uno contesta que no hay nombre → `not_found`» queda VERDE: es el borde que no cambió |
+| **DI.** sin la respuesta temprana de «ningún sistema de reverse habilitado» | **1 rojo**: `systems=("ens-dns",)` sale `rpc_unavailable` en vez de `unsupported_system` |
+| **DJ.** `except Exception` en vez de `except ValueError` en `check_url` | **1 rojo**: el test AST. El comportamiento no cambia y los otros 26 tests nuevos quedan VERDES: sólo el de estructura ve la violación |
 
 **M y N son el par que sostiene el respaldo** (`fallback_reader`, PR #2 de
 KarmaKadabra), y cada una fija un borde distinto. **M** fija *cuándo* corre: un

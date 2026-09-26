@@ -607,9 +607,12 @@ names.resolve_sync("0xultravioletadao.eth").error   # "not_found", never an exce
 **The result is an object, never `Optional[str]`.** `error` is a code you branch on
 (`NameErrorCode`): `not_found`, `invalid_name` (ENSIP-15), `reverse_mismatch`,
 `expired`, `unsupported_system`, `rpc_unavailable`. `address` is never the zero
-address. `tried` lists the systems asked. `verified_onchain` is `False` for anything
-that came over HTTP — a payment destination demands `True`
-(`require_onchain_address()`).
+address. `tried` lists the systems asked, and `not_found` means at least one of them
+answered: a `reverse()` that could ask none (no RPC for any) is `rpc_unavailable`.
+`verified_onchain` is `False` for anything that came over HTTP — a payment
+destination demands `True` (`require_onchain_address()`). A URL chosen on-chain — a
+CCIP gateway, NFT metadata, a redirect — that is forbidden or does not parse is
+refused (`rpc_unavailable`), never raised.
 
 **Configuration, defined once:** the RPC URLs come in by constructor, keyed by
 CAIP-2 chain id; the SDK ships none (a public default is a shared rate limit nobody
