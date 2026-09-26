@@ -119,7 +119,11 @@ def test_A_not_found_con_un_sistema_salteado_NO_esta_verificado(asincrono: bool)
     assert result.error == "not_found"
     assert result.verified_onchain is False
     assert result.tried == ("ens", "unstoppable", "avvy")
-    assert "no primary name; skipped: basenames (no RPC for eip155:8453)" == result.detail
+    # Desde la ronda 2 (R4) también se nombra la cadena de UNS que quedó sin preguntar.
+    assert result.detail == (
+        "no primary name; skipped: basenames (no RPC for eip155:8453), "
+        "unstoppable on eip155:8453 (no RPC)"
+    )
     assert resolver.cache is not None and len(resolver.cache) == 1, "es una respuesta: se cachea"
 
 
@@ -206,3 +210,78 @@ def test_B_un_sistema_DESHABILITADO_no_ocupa_lugar() -> None:
         result = resolver.reverse_sync(A)
     assert result.error is None
     assert result.normalized == "miniholder.avax" and result.verified_onchain is True
+
+
+# ---------------------------------------------------------------------------
+# R4 (ronda 2) · UNS preguntado en ALGUNAS de sus cadenas
+# ---------------------------------------------------------------------------
+#
+# Decisión de c0der: igual que A. Medido por el refutador sobre `e1d311c7`:
+# `systems=("unstoppable",)` con sólo el RPC de L1 contestaba `not_found`
+# verificado, cacheado, sin decir que Polygon y Base no se preguntaron. Las
+# cadenas sin preguntar cuentan como salteadas: se nombran, desverifican un
+# negativo, y retienen un nombre hallado DEBAJO de ellas (el orden de UNS es
+# L1, Polygon, Base). Mutación DX.
+
+BALD = "alguien.bald"  # un TLD de UNS en Base: su forward lee Base y L1, no Polygon
+
+
+def _uns_reclama(cadena: Cadena, por_cadena: dict) -> None:
+    for chain, nombre in por_cadena.items():
+        cadena.ok(_uns.PROXY_READERS[chain], "reverseNameOf(address)", ["string"], [nombre])
+
+
+def _bald_apunta_a_A(cadena: Cadena) -> None:
+    cadena.ok(
+        _uns.PROXY_READERS[BASE],
+        "getData(string[],uint256)",
+        ["address", "address", "string[]"],
+        ["0x" + "33" * 20, "0x" + "44" * 20, [A]],
+    )
+
+
+@asincronia
+def test_R4_UNS_sin_nombre_con_solo_L1_NO_esta_verificado(asincrono: bool) -> None:
+    cadena = Cadena()
+    _uns_reclama(cadena, {ETH: ""})
+    resolver = _resolver(cadena, (ETH,), systems=("unstoppable",))
+    result = call_op(resolver, "reverse", [A], asynchronous=asincrono)
+    assert result.error == "not_found" and result.verified_onchain is False
+    assert result.detail == (
+        "no primary name; skipped: unstoppable on eip155:137, eip155:8453 (no RPC)"
+    )
+    assert resolver.cache is not None and len(resolver.cache) == 1, "sigue siendo una respuesta"
+
+
+@asincronia
+def test_R4_UNS_sin_nombre_en_sus_tres_cadenas_SI_esta_verificado(asincrono: bool) -> None:
+    cadena = Cadena()
+    _uns_reclama(cadena, {ETH: "", POLYGON: "", BASE: ""})
+    resolver = _resolver(cadena, (ETH, POLYGON, BASE), systems=("unstoppable",))
+    result = call_op(resolver, "reverse", [A], asynchronous=asincrono)
+    assert result.error == "not_found" and result.verified_onchain is True
+    assert result.detail == "no primary name"
+
+
+def test_R4_un_nombre_en_L1_se_da_aunque_falte_Polygon() -> None:
+    """L1 va primero: lo que diga Polygon ya no cambia la respuesta."""
+    cadena = Cadena()
+    _uns_reclama(cadena, {ETH: BALD})
+    _bald_apunta_a_A(cadena)
+    with _resolver(cadena, (ETH, BASE), systems=("unstoppable",)) as resolver:
+        result = resolver.reverse_sync(A)
+    assert result.error is None
+    assert result.normalized == BALD and result.verified_onchain is True
+
+
+@asincronia
+def test_R4_un_nombre_en_Base_con_Polygon_sin_preguntar_NO_se_da(asincrono: bool) -> None:
+    """Polygon va antes que Base y no se preguntó: el de Base puede no ser el primario."""
+    cadena = Cadena()
+    _uns_reclama(cadena, {ETH: "", BASE: BALD})
+    _bald_apunta_a_A(cadena)
+    resolver = _resolver(cadena, (ETH, BASE), systems=("unstoppable",))
+    result = call_op(resolver, "reverse", [A], asynchronous=asincrono)
+    assert result.error == "rpc_unavailable" and result.verified_onchain is False
+    assert result.normalized is None and "alguien" not in repr(result)
+    assert "unstoppable on eip155:137 (no RPC)" in (result.detail or "")

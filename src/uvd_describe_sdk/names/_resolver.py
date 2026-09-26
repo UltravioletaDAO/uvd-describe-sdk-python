@@ -564,15 +564,16 @@ class NameResolver:
                 skipped.append(f"{system} (no RPC for {', '.join(missing)})")
                 continue
             tried.append(system)
+            unasked: List[str] = []
             try:
-                name = yield from self._reverse_one(system, address, now)
+                name = yield from self._reverse_one(system, address, now, unasked)
             except Outcome as outcome:
                 if (
                     outcome.code in (NameErrorCode.REVERSE_MISMATCH, NameErrorCode.EXPIRED)
                     and refused is None
                 ):
                     refused = outcome
-                continue
+                name = None
             except (Unavailable, Reverted) as failure:
                 # Strict order: a system above that could not be asked might
                 # hold the primary name, so a lower one's answer is not given.
@@ -588,6 +589,14 @@ class NameResolver:
                     tried=tuple(tried),
                     detail=str(failure),
                 )
+            if unasked:
+                # A system asked on SOME of its chains (round 2 of PR 7, R4,
+                # decided by c0der like A of round 1): UNS with only the L1 RPC
+                # answered `not_found` verified, and Polygon and Base were never
+                # asked. The chains it could not ask rank like a skipped system:
+                # named in `detail`, and they unverify a negative and hold back a
+                # name found below them. Mutation DX.
+                skipped.append(f"{system} on {', '.join(unasked)} (no RPC)")
             if name is None:
                 continue
             if skipped:
@@ -603,8 +612,8 @@ class NameResolver:
                     verified_onchain=False,
                     error=NameErrorCode.RPC_UNAVAILABLE,
                     tried=tuple(tried),
-                    detail="a system that ranks above could not be asked, so the primary "
-                    f"name cannot be told; skipped: {', '.join(skipped)}",
+                    detail="a system (or a chain of one) that ranks above could not be "
+                    f"asked, so the primary name cannot be told; skipped: {', '.join(skipped)}",
                 )
             return replace(
                 template,
@@ -648,8 +657,14 @@ class NameResolver:
             detail="no primary name" + note,
         )
 
-    def _reverse_one(self, system: str, address: str, now: float) -> Step[Optional[str]]:
-        """The confirmed primary name in ONE system, or `None` if it claims none."""
+    def _reverse_one(
+        self, system: str, address: str, now: float, unasked: List[str]
+    ) -> Step[Optional[str]]:
+        """The confirmed primary name in ONE system, or `None` if it claims none.
+
+        `unasked` gets the chains of the system that had no RPC and rank ABOVE
+        its answer (all of them when there is none). Only UNS reads several.
+        """
         if system in (NameSystem.ENS, NameSystem.BASENAMES):
             if system == NameSystem.ENS:
                 claimed = yield from _ens.claimed_l1(address)
@@ -662,8 +677,17 @@ class NameResolver:
             confirmed: str = yield from _ens.confirm(claimed, address, now, coin_type)
             return confirmed
         if system == NameSystem.UNSTOPPABLE:
-            chains = tuple(c for c in _uns.REVERSE_CHAINS if c in self._rpc)
-            claimed = yield from _uns.claimed(address, chains)
+            # The same calls, in the same order, as `_uns.claimed` over the
+            # configured chains — one chain at a time, to know which ones were
+            # passed over before an answer.
+            claimed = None
+            for chain in _uns.REVERSE_CHAINS:
+                if chain not in self._rpc:
+                    unasked.append(chain)
+                    continue
+                claimed = yield from _uns.claimed(address, (chain,))
+                if claimed is not None:
+                    break
         else:
             claimed = yield from _avvy.claimed(address)
         if claimed is None:
