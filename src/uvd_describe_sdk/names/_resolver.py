@@ -37,7 +37,14 @@ from . import _avvy, _ens, _uns
 from ._avatar import NoAvatar, nft_image, nft_reference, plain_url
 from ._cache import NameCache
 from ._hash import ZERO_ADDRESS, is_hex_address, to_checksum_address
-from ._normalize import ENS_FAMILY, FAMILY_OF, Classified, InvalidNameError, classify
+from ._normalize import (
+    ENS_FAMILY,
+    FAMILY_OF,
+    Classified,
+    InvalidNameError,
+    classify,
+    too_long,
+)
 from ._proto import (
     AVALANCHE,
     BASE,
@@ -661,6 +668,9 @@ class NameResolver:
             claimed = yield from _avvy.claimed(address)
         if claimed is None:
             return None
+        if too_long(claimed):
+            # Same cap as `_ens.confirm` (R2): refused before classifying. Mutation DV.
+            raise Outcome(NameErrorCode.REVERSE_MISMATCH, "the reverse record is too long")
         found = classify(claimed)
         if found.error or found.system != system or found.normalized != claimed:
             raise Outcome(

@@ -36,6 +36,18 @@ Between requests the engine also checks the clock, and gives each request the
 remainder as httpx's timeout; those are what a test double that BLOCKS (instead
 of awaiting) runs into, since a blocked loop cannot deliver a cancellation.
 
+WHAT THE DEADLINE DOES NOT CUT: CPU INSIDE A STEP
+-------------------------------------------------
+`wait_for` cancels at an `await`. A step that COMPUTES — ENSIP-15 over a name,
+decoding ABI, checking hex — runs to its end, and in the async flavour it blocks
+the caller's event loop meanwhile: every other request of that process waits.
+Measured by the refuter of PR 7 (2026-09-26): a 900 KB reverse name of combining
+marks, 67.5 s with `timeout=1.0`. So what comes from the chain is bounded in
+SIZE before anything is computed on it: `MAX_BODY_BYTES` for a body, the overlap
+check for a dynamic ABI array (`_abi.py`), `MAX_NAME_BYTES` for a name
+(`_normalize.py`), and a flat hex check (`_is_hex`). A new step that computes
+over on-chain data needs its own bound; the deadline will not provide it.
+
 ⚠️ History, left written — three rounds of PR #6 found the SAME class of hole
 in a separate sync engine, each after the previous fix was declared hard:
 round 2, a dripping body (1.0 s budget → 6.36 s); round 3, dripping headers and a

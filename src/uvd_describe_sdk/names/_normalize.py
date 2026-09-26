@@ -88,6 +88,25 @@ class InvalidNameError(ValueError):
         self.code = NameErrorCode.INVALID_NAME
 
 
+#: The longest name, in UTF-8 bytes, this SDK normalizes at all — the input of
+#: `resolve()` / `text()` / `avatar()` and a name a reverse record claims.
+#: ENSIP-15 costs more than linearly and the deadline does not cut CPU inside a
+#: step (`_proto.py`): measured 2026-09-26 (py3.13.6, ens-normalize 3.0.10),
+#: combining marks cost 4.1 ms at 1,024 bytes, 118 ms at 16 KB and 4.9 s at
+#: 150 KB; the refuter of PR 7 measured 67.5 s for a 900 KB reverse name with a
+#: 1 s timeout. 1,024 is four times the 255 bytes of a DNS name on the wire.
+#: Round 2 of PR 7, R2. Checked by `too_long()`, in ONE place.
+MAX_NAME_BYTES = 1024
+
+
+def too_long(name: str) -> bool:
+    """Is `name` over `MAX_NAME_BYTES` in UTF-8? Cheap, and never raises: a
+    lone surrogate (only a consumer's input can carry one) counts 3 bytes."""
+    if len(name) > MAX_NAME_BYTES:
+        return True
+    return len(name.encode("utf-8", "surrogatepass")) > MAX_NAME_BYTES
+
+
 def _ensip15(name: str) -> str:
     try:
         normalized: str = ens_normalize(name)
@@ -353,6 +372,11 @@ def classify(raw: str) -> Classified:
     """Detect the system and normalize for it. Pure; never raises for bad input."""
     if not isinstance(raw, str):
         return Classified(None, None, NameErrorCode.INVALID_NAME, "a name is a string")
+    if too_long(raw):
+        # Before ENSIP-15, never after (R2). Mutation DT.
+        return Classified(
+            None, None, NameErrorCode.INVALID_NAME, f"a name is at most {MAX_NAME_BYTES} bytes"
+        )
     low = raw.strip().lower()
     system = _suffix_system(low)
     if system is None or system in ENS_FAMILY:

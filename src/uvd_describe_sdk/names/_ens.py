@@ -62,7 +62,7 @@ from ._hash import (
     selector,
     to_checksum_address,
 )
-from ._normalize import classify, ensip15_is_normalized
+from ._normalize import classify, ensip15_is_normalized, too_long
 from ._proto import BASE, ETHEREUM, Call, Outcome, Reverted, Step, Unavailable, ccip_call
 
 #: The ENS registry, the same address on every chain ENS deployed it to.
@@ -277,6 +277,10 @@ def confirm(claimed: str, address: str, now: float, coin_type: int) -> Step[str]
     Raises `Outcome(reverse_mismatch)` — or `expired`, which says more — and
     lets `Unavailable` through: a name that could not be checked is not shown.
     """
+    if too_long(claimed):
+        # The owner of the address writes this string; ENSIP-15 over 900 KB of
+        # combining marks took 67.5 s (R2). Refused before normalizing. Mutation DU.
+        raise Outcome(NameErrorCode.REVERSE_MISMATCH, "the reverse record is too long")
     if not ensip15_is_normalized(claimed):
         raise Outcome(NameErrorCode.REVERSE_MISMATCH, "the reverse record is not a normalized name")
     found = classify(claimed)
