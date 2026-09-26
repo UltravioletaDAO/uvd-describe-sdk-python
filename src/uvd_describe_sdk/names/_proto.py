@@ -60,7 +60,9 @@ CCIP-Read gateway URLs and NFT metadata URLs come from the chain, i.e. from
 whoever controls a resolver or an NFT contract. Inside a Lambda that is a
 server-side request forgery surface. `check_url` refuses anything that is not
 `https://`, carries userinfo, names `localhost`, or is an IP literal outside the
-global unicast space (or a bare number that `getaddrinfo` would read as one).
+global unicast space — an IPv6 form that embeds such an IPv4 included — or a
+host whose last label `getaddrinfo` would read as a number: decimal, octal or
+HEX (`0x7f000001`, `0xa9fea902`; the hex forms passed until round 2 of PR 7).
 Redirects are followed by hand, at most three, each re-checked. Bodies are
 capped. The residual risk, stated: a public hostname whose DNS answers with a
 private address is not detected (checking it would race the connect anyway).
@@ -295,6 +297,17 @@ def _ccip_fetch(sender: str, urls: List[Any], call_data: bytes) -> Step[bytes]:
 # ---------------------------------------------------------------------------
 
 _LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain")
+#: IPv6 prefixes whose last 32 bits ARE an IPv4 address: IPv4-mapped, the
+#: deprecated IPv4-compatible `::a.b.c.d`, and NAT64's well-known prefix.
+#: `ipaddress` calls `::169.254.170.2` and `64:ff9b::a9fe:aa02` global
+#: (py3.9.24 and 3.13.6, 2026-09-26), so the embedded IPv4 is checked too.
+_EMBEDS_IPV4 = tuple(
+    ipaddress.ip_network(net) for net in ("::ffff:0:0/96", "::/96", "64:ff9b::/96")
+)
+#: The last label of a host that `getaddrinfo` reads as a NUMBER: decimal and
+#: octal (`2130706433`, `0177`) and hex (`0x7f000001`, `127.0.0.0x1`). A real
+#: top-level domain is neither.
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*")
 
 
 def check_url(url: str) -> None:
@@ -326,10 +339,20 @@ def check_url(url: str) -> None:
     if ip is not None:
         if not ip.is_global:
             raise Unavailable("refused an IP literal outside the global address space")
+        if isinstance(ip, ipaddress.IPv6Address) and any(ip in net for net in _EMBEDS_IPV4):
+            if not ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF).is_global:
+                # Mutation DQ.
+                raise Unavailable("refused an IP literal outside the global address space")
         return
-    if not re.search(r"[a-z]", host.rsplit(".", 1)[-1]):
+    last = host.rsplit(".", 1)[-1]
+    if not re.search(r"[a-z]", last) or _NUMERIC_LABEL.fullmatch(last):
         # `https://2130706433/` and `https://127.1/` are 127.0.0.1 to
         # getaddrinfo on most platforms. A real top-level domain has letters.
+        # ⚠️ And not only decimal (round 2 of PR 7, R5, P1 [security]): the HEX
+        # forms `https://0x7f000001/`, `https://127.0.0.0x1/` and
+        # `https://0xa9fea902/` — 169.254.170.2, the ECS task-credentials
+        # endpoint a consumer on ECS can reach — have letters (`x`, `f`) and
+        # passed. Mutation DP.
         raise Unavailable("refused a host that is a number in disguise")
 
 
