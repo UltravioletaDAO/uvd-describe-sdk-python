@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 565 pasan, 27-33 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-26 en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 7 — `test_names_sdk5.py`, `test_names_sdk6.py` y `test_names_sdk7.py`; eran 551 tras SDK-5 y SDK-6; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 634 pasan, 27-36 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-26 en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -341,6 +341,39 @@ MIDIÓ con un doble antes de tocarlo — B sólo estaba leído en el código):
     Avvy el revert SÍ es la respuesta legítima de «no existe»; en los otros dos
     es el mismo caso que SDK-7. Queda para c0der.
 
+**Ronda 2 del PR 7** (del refutador del PR, REF-SDK-7, con decisiones de c0der,
+2026-09-26; cada caso se reprodujo sobre `940685ec` antes de tocarlo):
+
+29. 🔴 **El plazo NO corta CPU dentro de un paso** (`wait_for` cancela en un
+    `await`). Todo lo que viene de la cadena se acota en TAMAÑO antes de
+    computarlo, y está escrito en el header de `_proto.py`: `MAX_BODY_BYTES`, el
+    tope de solapamiento de un arreglo ABI dinámico (R1, mutación DR), el chequeo
+    plano de hex (`_is_hex`: `0x([0-9a-f]{2})*` costaba ~150× la entrada, 24 MiB
+    por 164 KB — mutación DS) y `MAX_NAME_BYTES` = 1.024 antes de ENSIP-15 (R2:
+    4,1 ms en el peor caso a ese largo, 4,9 s a 150 KB; mutaciones DT, DU, DV).
+    Un paso nuevo que compute sobre datos de la cadena necesita su propio tope.
+30. 🔴 **`check_url` rehúsa un número disfrazado también en HEX** (R5, P1
+    [security] por decisión de c0der: un consumidor en ECS alcanza
+    169.254.170.2). `https://0xa9fea902/` pasaba. Y una IPv6 de `::ffff:0:0/96`,
+    `::/96` o `64:ff9b::/96` se mira por su IPv4 de adentro: `ipaddress` llama
+    globales a `::169.254.170.2` y `64:ff9b::a9fe:aa02`. Mutaciones DP y DQ.
+    ⚠️ **Límite conocido y NO arreglado** (decisión de c0der): no resuelve DNS.
+31. **Una señal de Avvy ≥ `2**248` no es un nombre** (R3): `claimed()` contesta
+    `None`, como ante un `AbiError`. Antes, `OverflowError`. Mutación DW.
+32. **Las cadenas de UNS cuentan como sistemas en el orden estricto** (R4,
+    decidido como la A de la ronda 1): una sin RPC antes de la respuesta se
+    nombra en `detail`, desverifica un negativo y retiene un nombre de más abajo.
+    Mutación DX.
+33. **El test AST de los `except` es una lista BLANCA** (R6). La lista negra de
+    antes dejaba pasar en verde `except ValueError.__base__:` (mutación C6 del
+    refutador). Un tipo nuevo en un `except` de `names/` se agrega a
+    `TIPOS_PERMITIDOS` a propósito. Y `suppress` da rojo. Mutaciones C6, DY, DZ.
+34. ⚠️ **Los tests de tiempo con servidor local (rondas 3 y 4 del PR #6) fallan
+    intermitentes con la máquina cargada**: medido con la CPU al 100 % por otros
+    procesos, en 8 vueltas intercaladas falló `940685e` en 3 y la punta de la
+    ronda 2 en 2, en los mismos tests. No es un cambio del código; si fallan,
+    re-medir la carga antes de sospechar del motor.
+
 **Las reglas de plata de UNS, Avvy y el reverse se prueban con dobles
 SINTÉTICOS** (`test_names_ronda2.py`, clase `Cadena`, rotulada): la cadena real no
 ofrece a pedido un UNS que conteste la dirección cero ni un reverse de Avvy que
@@ -551,6 +584,22 @@ docstrings:
 | **DL.** lo mismo en `reverse_mismatch` / `expired` | **1 rojo**: el `reverse_mismatch` con Avvy salteado; el de todos preguntados, VERDE |
 | **DM.** 🔴 `if skipped:` → `if False:` antes de devolver el nombre (B) | **2 rojos**: sin RPC de L1, sync y async. Quedan VERDES el de «los de arriba contestaron» y el de Avvy solo en `systems=` |
 | **DN.** el `Reverted` de `nameExpires` vuelve a ser `not_found` «the registrar did not answer» (C, SDK-7) | **4 rojos**: `.eth` y `.base.eth`, sync y async. La grabación del `.eth` no registrado (el registrar contesta 0) queda VERDE |
+| **DP.** 🔴 `check_url` sin rechazar la última etiqueta en hex (ronda 2 del PR 7, R5) — 2026-09-26 | **6 rojos**: las seis formas hex, `0xa9fea902` (credenciales de ECS) incluida. Las decimales y octales quedan VERDES: ya se rechazaban |
+| **DQ.** 🔴 no mirar la IPv4 dentro de una IPv6 | **4 rojos**: `::127.0.0.1`, `::169.254.170.2` y las dos de `64:ff9b::`. Las `::ffff:` quedan VERDES: `ipaddress` ya las llama no globales |
+| **DR.** 🔴 sin el tope de solapamiento del arreglo ABI dinámico (R1) | **2 rojos**: el `OffchainLookup` malicioso, sync y async (pico de 129 MiB) |
+| **DS.** el chequeo de hex vuelve a `0x([0-9a-fA-F]{2})*` | **3 rojos**: los dos del `OffchainLookup` (pico de 25 MiB) y el de 1 MB de hex |
+| **DT.** 🔴 sin el tope de largo en la entrada (R2) | **7 rojos**: `resolve`/`text`/`avatar` × sync/async y el borde del tope |
+| **DU.** 🔴 sin el tope en `_ens.confirm` | **4 rojos**: los dos nombres del refutador (combinantes y ASCII), sync y async |
+| **DV.** sin el tope en `_reverse_one` | **2 rojos**: el nombre enorme de UNS, sync y async |
+| **DW.** 🔴 sin la guarda de señales de Avvy (R3) | **6 rojos**: tres formas fuera de rango × sync/async. El borde `2**248 - 1` queda VERDE |
+| **DX.** las cadenas de UNS sin preguntar no cuentan (R4) | **6 rojos**: el A de la ronda 1 (ya nombraba Base de UNS) y los dos de R4 que dependen, sync y async |
+| **C6.** 🔴 `except ValueError.__base__:` en `check_url` (del refutador; con la lista negra sobrevivía VERDE) | **1 rojo**: el test AST |
+| **DY.** `from contextlib import suppress` en `_proto.py` | **1 rojo**: el test de `suppress` |
+| **DZ.** `_E = Exception` y `except _E:` en `check_url` | **1 rojo**: el test AST |
+
+Todas las de la ronda 2 se verificaron corriendo su comando `test` del JSON por
+bash (verde sin mutar, rojo mutado) y la suite entera mutada, con los nombres de
+los rojos: todos caen en su test, sin rojos colaterales.
 
 Desde la ronda 1 del PR 7 cada mutación nueva también va en JSON en el cuerpo
 del PR (`nombre`, `archivo`, `viejo`, `nuevo`, `test` = el comando exacto para

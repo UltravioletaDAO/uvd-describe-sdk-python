@@ -39,6 +39,54 @@ A `Location` httpx itself cannot parse (`//[zzz]/a`, a control character) was
 already `rpc_unavailable` (`RemoteProtocolError`); it is now pinned by a test.
 Every one is caught by its concrete class — a test fails if any module of
 `names/` gains an `except Exception` — so a bug of the SDK itself still raises.
+Since round 2 that test is an ALLOW-list of the exception types `names/` may
+catch (the deny-list it was let `except ValueError.__base__:` — which IS `except
+Exception` — pass green), and `contextlib.suppress` fails it too.
+
+### [security] A host that is an IP in disguise is refused, in hex too
+
+A CCIP gateway or an NFT metadata URL is chosen by whoever controls a contract,
+and a consumer on AWS ECS can reach the task-credentials endpoint at
+`169.254.170.2`. Measured against `940685ec` (py3.9.24, 3.13.6), these PASSED the
+URL guard: `https://0xa9fea902/` (that very address), `https://0x7f000001/`,
+`https://127.0.0.0x1/`, `https://0x7f.0x0.0x0.0x1/` — the last label has letters
+(`x`, `f`) and the guard only refused a last label without any — and
+`https://[::169.254.170.2]/` (IPv4-compatible) and `https://[64:ff9b::a9fe:aa02]/`
+(NAT64), which `ipaddress` calls global. Now a last label that is `[0-9]+` or
+`0x[0-9a-f]*` is refused, and so is an IPv6 address in `::ffff:0:0/96`, `::/96`
+or `64:ff9b::/96` whose embedded IPv4 is not global.
+
+**Known limit, not fixed:** the guard does not resolve DNS. A public host name
+whose DNS answers with a private address passes it.
+
+### [security] A dynamic ABI array with overlapping offsets is not a memory bomb
+
+The owner of a name chooses its resolver, and an ENSIP-10 resolver chooses the
+`OffchainLookup` revert: its `urls: string[]` could hold N offsets pointing at ONE
+long string, and the decoder built N copies. Measured: 1,024 offsets to a 128 KB
+string (a ~160 KB revert) → a 129 MiB peak; the refuter measured a 0.95 MB revert
+at ≈ 7 GB and 32 s — a `MemoryError` or the OOM killer in a small process. The
+elements of a dynamic array can no longer add up to more than the data that holds
+them (`AbiError`, "malformed OffchainLookup"). And the hex check of every RPC and
+gateway answer, `0x([0-9a-fA-F]{2})*`, kept state per repetition — ~150x the input,
+145-184 MiB for 1 MB of hex — and is now a flat class plus a parity check. The
+same revert now peaks at 1.5 MiB.
+
+### [security] A name is at most `MAX_NAME_BYTES` (1,024) before ENSIP-15
+
+ENSIP-15 costs more than linearly, and the deadline cannot cut CPU inside a step:
+the refuter measured a 900 KB reverse name of combining marks at 67.5 s with
+`timeout=1.0`, blocking the caller's event loop in the async flavour. Measured
+here (ens-normalize 3.0.10): 4.1 ms at 1,024 bytes, 4.9 s at 150 KB. A name over
+1,024 UTF-8 bytes is refused before normalizing: `invalid_name` as the input of
+`resolve()` / `text()` / `avatar()`, `reverse_mismatch` ("the reverse record is
+too long") as a name a reverse record claims — which also stops a 900,000-character
+ASCII name from coming back confirmed.
+
+### [security] An Avvy rainbow-table signal out of range is not a name
+
+A signal of 2**248 or more made `reverse()` raise `OverflowError`, sync and async.
+It is now unreadable, like an answer that does not decode: no claim.
 
 ### [feature] SDK-6 — `reverse()` that could ask no system is `rpc_unavailable`
 
@@ -66,6 +114,15 @@ synthetic double before changing anything:
   already applied to a system that could not be asked. It is now
   `rpc_unavailable`, the name not shown.
 - A system left out of `systems=` is a choice, not an outage: it does not rank.
+- **The chains of Unstoppable count too** (round 2). UNS reads a reverse record on
+  L1, then Polygon, then Base. With only the L1 RPC, `reverse()` answered
+  `not_found` verified and never said Polygon and Base were not asked. A chain
+  with no RPC now ranks like a skipped system — `detail` says
+  `unstoppable on eip155:137, eip155:8453 (no RPC)`, a negative is not verified,
+  and a name found on Base with Polygon unasked is not given — while a name found
+  on L1 is, since L1 comes first. The SDK's own `NameCache` still keeps that
+  `not_found`, like any answer; `verified_onchain=False` is what tells a
+  consumer's cache not to.
 
 ### [feature] SDK-7 — a reverted `nameExpires` is `rpc_unavailable`
 

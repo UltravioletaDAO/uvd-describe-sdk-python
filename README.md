@@ -609,13 +609,19 @@ names.resolve_sync("0xultravioletadao.eth").error   # "not_found", never an exce
 `expired`, `unsupported_system`, `rpc_unavailable`. `address` is never the zero
 address. `tried` lists the systems asked, and `not_found` means at least one of them
 answered: a `reverse()` that could ask none (no RPC for any) is `rpc_unavailable`. A
-system skipped for want of an RPC still ranks: a `reverse()` negative is
-`verified_onchain` only if none was skipped, and a lower system's name is not given
-as the primary when one above was skipped (`rpc_unavailable`).
+system skipped for want of an RPC still ranks — and so does a chain of Unstoppable
+(L1, Polygon, Base): a `reverse()` negative is `verified_onchain` only if nothing was
+skipped, and a lower name is not given as the primary when something above was
+skipped (`rpc_unavailable`). A name over `MAX_NAME_BYTES` (1,024 UTF-8 bytes) is
+`invalid_name`, and a reverse record that long is `reverse_mismatch`: ENSIP-15 is
+not run on it.
 `verified_onchain` is `False` for anything that came over HTTP — a payment
 destination demands `True` (`require_onchain_address()`). A URL chosen on-chain — a
 CCIP gateway, NFT metadata, a redirect — that is forbidden or does not parse is
-refused (`rpc_unavailable`), never raised.
+refused (`rpc_unavailable`), never raised: not `https://`, credentials, `localhost`,
+an IP literal outside the global space (IPv6 forms that embed one included), or a
+host that is a number in decimal, octal or hex (`0xa9fea902`). Known limit: it does
+not resolve DNS, so a public name whose DNS answers a private address passes.
 
 **Configuration, defined once:** the RPC URLs come in by constructor, keyed by
 CAIP-2 chain id; the SDK ships none (a public default is a shared rate limit nobody
