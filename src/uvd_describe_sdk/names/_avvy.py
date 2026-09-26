@@ -40,6 +40,8 @@ RAINBOW_TABLE = "0x3b17bAcEDF86f4d36563d2920771ed105D8B6636"
 
 #: The `EVM` standard record key (`records.json`: key 3, "C-Chain / EVM Address").
 EVM_KEY = 3
+#: A rainbow-table signal packs 31 bytes of a label: it is below 2**248.
+_SIGNAL_LIMIT = 1 << 248
 
 #: `poseidon([0, 2019653217, 0])`: the hash of the TLD `avax`, pre-cached by both
 #: official clients. `tests/` pins it against the value read from the contract.
@@ -200,6 +202,12 @@ def claimed(address: str) -> Step[Optional[str]]:
         (signals,) = _abi.decode(["uint256[]"], out)
     except (Reverted, _abi.AbiError):
         # "EVMReverseResolverV1: does not exist" / "RainbowTableV1: entry not found".
+        return None
+    if any(signal >= _SIGNAL_LIMIT for signal in signals):
+        # Each signal is 31 bytes of a label (`_decode_signals`). One of 2**248
+        # or more is not a name, and `to_bytes(31)` raised `OverflowError` out
+        # of `reverse()`, sync and async (round 2 of PR 7, R3, measured on
+        # 940685ec). Unreadable, like the `AbiError` above: no claim. Mutation DW.
         return None
     name = _decode_signals(list(signals))
     return name or None
