@@ -1,0 +1,9 @@
+# Vendoreado byte a byte de describe-net; tests/test_sdk_map.py verifica cada sha256.
+# Contra https://api.describe.net/openapi.json tiene las mismas operaciones, parámetros
+# y schemas (difieren textos de description); el overlay sólo agrega x-fern-* por operación.
+# Para actualizar: copiar los dos archivos de un commit nuevo, cambiar `commit` y
+# los sha256, y regenerar sdk-map.json con SDK_MAP_ESCRIBIR=1.
+repo: UltravioletaDAO/describe-net
+commit: 434e01c6f2826405d9dadcb473d71a8398371d3b
+openapi.json: openapi/openapi.json sha256=9b0cda254632ca43308b0745b02566ca36a8476e0e1bf3b929ec9f015fff2e51
+sdk.overlay.yaml: openapi/sdk.overlay.yaml sha256=a9bff9b0cc1ca8ebd28dfd313c7de8de131080019ace61bf18a3b50daee8483f

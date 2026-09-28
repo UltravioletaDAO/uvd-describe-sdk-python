@@ -1,0 +1,28 @@
+{
+  "mapeadas": {
+    "getAgentReputation": "agent",
+    "getHealth": "health",
+    "getLeaderboard": "leaderboard",
+    "getWalletChains": "wallet",
+    "getWalletHistory": "wallet_history",
+    "getWalletReputation": "wallet_breakdown",
+    "resolveName": "names.resolve",
+    "reverseName": "names.reverse"
+  },
+  "fuera": {
+    "getCategories": "sin método en el SDK Python",
+    "getChainDetail": "sin método en el SDK Python",
+    "getFacetStats": "sin método en el SDK Python",
+    "getFeed": "sin método en el SDK Python",
+    "getIssuerStats": "sin método en el SDK Python",
+    "getLeaderboardPage": "sin método en el SDK Python (ruta paga)",
+    "getManifesto": "sin método en el SDK Python",
+    "getPricing": "sin método en el SDK Python",
+    "getRaterProfile": "sin método en el SDK Python (ruta paga)",
+    "getTypeStats": "sin método en el SDK Python",
+    "getWalletBadge": "badge_url() arma la URL del SVG y no llama a la red",
+    "getWalletExists": "sin método en el SDK Python",
+    "listChains": "sin método en el SDK Python",
+    "search": "sin método en el SDK Python"
+  }
+}
