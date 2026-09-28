@@ -1,0 +1,112 @@
+# Overlay 1.0.0 del SDK sobre `openapi/openapi.json` (FG-DN-01).
+#
+# Anota el esquema SIN tocar el servicio: las rutas y los modelos de la API no
+# cambian, el overlay sólo agrega extensiones `x-fern-*` que un generador de
+# SDK lee. Se aplica con `oas-patch` (fijado en `requirements-openapi.txt`) y
+# `tests/test_openapi_overlay.py` falla si un `target` deja de coincidir con un
+# nodo, o si aparece una operación que este archivo no clasifica.
+#
+# Dos clases de operación, y ninguna queda afuera:
+#
+#   * 11 con `x-fern-ignore: true`: la web app (`/auth/*`, `/me*`, sesión por
+#     cookie) y los protocolos de agente (`/mcp`, `/a2a`). No son alcance de un
+#     SDK REST.
+#   * 22 públicas con `x-fern-sdk-group-name` + `x-fern-sdk-method-name`.
+#
+# LOS NOMBRES. Donde un SDK ya tiene el método, el nombre es el suyo (camelCase
+# como en `uvd-describe-sdk-typescript`; el generador de Python lo pasa a
+# snake_case, que es lo que usa `uvd-describe-sdk-python`). Medido el
+# 2026-09-28 sobre `uvd-describe-sdk-typescript@69bcb5e` y
+# `uvd-describe-sdk-python@f19bfb0`: sólo 9 de las 22 tienen método en algún
+# SDK (marcadas `SDK:` abajo). Los dos SDK son planos salvo `client.names` del
+# de Python, así que los GRUPOS y los nombres de las otras 13 son una propuesta
+# de este archivo, no un nombre existente. La tabla completa está en
+# `docs/handoffs/FG-DN-01-spec-overlay.md`.
+overlay: 1.0.0
+info:
+  title: describe.net SDK overlay
+  version: 1.0.0
+actions:
+  # ── Web app: sign-in por firma y «mis agentes» ────────────────────────────
+  - target: "$.paths['/auth/nonce'].post"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/auth/verify'].post"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/auth/logout'].post"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/auth/session/rotate'].post"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/me'].get"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/me/agents'].get"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/me/agents/{network}/{agent_id}/profile'].put"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/me/agents/{network}/{agent_id}/profile'].delete"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/me/agents/{network}/{agent_id}/profile/confirm'].post"
+    update: {x-fern-ignore: true}
+
+  # ── Protocolos de agente ──────────────────────────────────────────────────
+  - target: "$.paths['/mcp'].post"
+    update: {x-fern-ignore: true}
+  - target: "$.paths['/a2a'].post"
+    update: {x-fern-ignore: true}
+
+  # ── index: el índice como un todo ─────────────────────────────────────────
+  - target: "$.paths['/health'].get"          # SDK: health() / health()
+    update: {x-fern-sdk-group-name: index, x-fern-sdk-method-name: health}
+  - target: "$.paths['/pricing'].get"
+    update: {x-fern-sdk-group-name: index, x-fern-sdk-method-name: pricing}
+  - target: "$.paths['/manifesto'].get"
+    update: {x-fern-sdk-group-name: index, x-fern-sdk-method-name: manifesto}
+  - target: "$.paths['/leaderboard'].get"     # SDK: leaderboard() / leaderboard()
+    update: {x-fern-sdk-group-name: index, x-fern-sdk-method-name: leaderboard}
+  - target: "$.paths['/leaderboard/page'].get"
+    update: {x-fern-sdk-group-name: index, x-fern-sdk-method-name: leaderboardPage}
+  - target: "$.paths['/feed'].get"
+    update: {x-fern-sdk-group-name: index, x-fern-sdk-method-name: feed}
+  - target: "$.paths['/search/{q}'].get"
+    update: {x-fern-sdk-group-name: index, x-fern-sdk-method-name: search}
+  - target: "$.paths['/categories'].get"
+    update: {x-fern-sdk-group-name: index, x-fern-sdk-method-name: categories}
+
+  # ── stats ─────────────────────────────────────────────────────────────────
+  - target: "$.paths['/stats/types'].get"
+    update: {x-fern-sdk-group-name: stats, x-fern-sdk-method-name: types}
+  - target: "$.paths['/stats/facets'].get"
+    update: {x-fern-sdk-group-name: stats, x-fern-sdk-method-name: facets}
+  - target: "$.paths['/stats/issuers'].get"
+    update: {x-fern-sdk-group-name: stats, x-fern-sdk-method-name: issuers}
+
+  # ── chains ────────────────────────────────────────────────────────────────
+  - target: "$.paths['/chains'].get"
+    update: {x-fern-sdk-group-name: chains, x-fern-sdk-method-name: list}
+  - target: "$.paths['/chains/{network}'].get"
+    update: {x-fern-sdk-group-name: chains, x-fern-sdk-method-name: get}
+
+  # ── wallets: las puertas gratis por wallet ────────────────────────────────
+  - target: "$.paths['/wallets/{wallet}/chains'].get"   # SDK: wallet() / wallet()
+    update: {x-fern-sdk-group-name: wallets, x-fern-sdk-method-name: wallet}
+  - target: "$.paths['/wallets/{wallet}/exists'].get"
+    update: {x-fern-sdk-group-name: wallets, x-fern-sdk-method-name: exists}
+  # SDK: badgeUrl() / badge_url() — pero esos NO llaman a la red, sólo arman la
+  # URL. Un método generado sí baja el SVG, así que se llama `badge`.
+  - target: "$.paths['/badge/{wallet}.svg'].get"
+    update: {x-fern-sdk-group-name: wallets, x-fern-sdk-method-name: badge}
+
+  # ── reputation: las rutas medidas (x402) ──────────────────────────────────
+  - target: "$.paths['/reputation/wallet/{wallet}'].get"          # SDK: walletBreakdown() / wallet_breakdown()
+    update: {x-fern-sdk-group-name: reputation, x-fern-sdk-method-name: walletBreakdown}
+  - target: "$.paths['/reputation/wallet/{wallet}/history'].get"  # SDK: wallet_history() (sólo Python)
+    update: {x-fern-sdk-group-name: reputation, x-fern-sdk-method-name: walletHistory}
+  - target: "$.paths['/reputation/agent/{network}/{agent_id}'].get"  # SDK: agent() / agent()
+    update: {x-fern-sdk-group-name: reputation, x-fern-sdk-method-name: agent}
+  - target: "$.paths['/reputation/rater/{wallet}'].get"
+    update: {x-fern-sdk-group-name: reputation, x-fern-sdk-method-name: rater}
+
+  # ── names ─────────────────────────────────────────────────────────────────
+  - target: "$.paths['/names/resolve'].get"   # SDK: client.names.resolve() (sólo Python)
+    update: {x-fern-sdk-group-name: names, x-fern-sdk-method-name: resolve}
+  - target: "$.paths['/names/reverse'].get"   # SDK: client.names.reverse() (sólo Python)
+    update: {x-fern-sdk-group-name: names, x-fern-sdk-method-name: reverse}
