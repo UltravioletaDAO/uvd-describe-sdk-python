@@ -19,13 +19,18 @@ name: Publish to PyPI
 #        Required reviewers:   UltravioletaDAO, con "Prevent self-review"
 #        Deployment branches:  Selected branches → sólo `main`
 #        "Allow administrators to bypass": apagado
-#   2. pypi.org → uvd-describe-sdk → Publishing: el trusted publisher de GitHub
-#      de este proyecto tiene que quedar así:
+#   2. pypi.org → uvd-describe-sdk → Publishing. Ahí un trusted publisher NO se
+#      edita: se REEMPLAZA. Agregar el de GitHub con
 #        Owner:         UltravioletaDAO
 #        Repository:    uvd-describe-sdk-python
 #        Workflow name: publish.yml
 #        Environment:   pypi
+#      y BORRAR el que tiene el Environment vacío. Al terminar tiene que quedar
+#      UN SOLO publisher de GitHub para publish.yml en el proyecto, y con
+#      Environment `pypi`.
 #   3. Ruleset de `main` (el del molde: sin borrado, sin force, cambios por PR).
+#   4. Opcional, una segunda llave: un ruleset de tags `v*` que restrinja quién
+#      los crea. No reemplaza al 2.
 #
 # ⚠️ Ni el 1 ni el 2 fallan fuerte si faltan, y por eso el orden importa:
 #   · Sin el 1, el primer run CREA el environment `pypi` sin ninguna protección
@@ -37,9 +42,26 @@ name: Publish to PyPI
 #     cualquier environment, o de ninguno. pypi/warehouse
 #     `warehouse/oidc/models/github.py::_check_environment` (main 8e4dc6d6eb,
 #     leído el 2026-09-30): "If we haven't set an environment name for the
-#     publisher, we don't need to check this claim". El 2 es lo que hace que
-#     PyPI RECHACE todo lo que no salga del environment `pypi`, incluido el
-#     camino por tag de la versión anterior de este archivo.
+#     publisher, we don't need to check this claim".
+#   · Y el 2 a MEDIAS tampoco avisa. Si se agrega el publisher con `pypi` y el
+#     vacío se queda, PyPI busca primero el del environment del token y, si no
+#     hay, cae al vacío: `warehouse/oidc/models/github.py`
+#     `_get_publisher_for_environment`, :199-214 (main 79e9ba37db, leído el
+#     2026-09-30): "if general_publisher := first_true(publishers,
+#     pred=lambda p: p.environment == "")". Un token que no sale de ningún
+#     environment sigue entrando por el vacío. Sólo con el vacío BORRADO el 2
+#     hace que PyPI RECHACE todo lo que no salga del environment `pypi`,
+#     incluido el camino por tag de la versión anterior de este archivo.
+#     En `warehouse/manage/views/oidc_publishers.py`, «Add» sólo agrega
+#     (`add_github_oidc_publisher`, :285, `oidc_publishers.append`), y el único
+#     camino que agrega el nuevo Y quita el viejo es `constrain_environment`
+#     (:158-262). Su link («Constrain environment») no está en la página: PyPI
+#     lo manda por email cuando un job CON environment pidió un token al
+#     publisher vacío (`warehouse/oidc/views.py:395-412`), o sea después del
+#     primer dispatch. Antes del primero, el 2 es a mano: agregar y borrar.
+#   ⚠️ Corregido en la ronda 1 del PR 9, y se deja escrito: el 2 decía «el
+#   trusted publisher tiene que quedar así», que en pypi.org se hace con «Add»;
+#   y agregar sin borrar deja todo como estaba, sin ningún aviso.
 #   ⚠️ Corregido el 2026-09-30, y se deja escrito: este encabezado decía
 #   «Environment: (vacío)» y que sin el paso de pypi.org «el job FALLA al subir
 #   con un 403». Era cierto para lo que describía —sin publisher no hay subida—
@@ -50,12 +72,15 @@ name: Publish to PyPI
 # LO QUE CAMBIÓ Y POR QUÉ (2026-09-30, DN-PUB-02)
 # ----------------------------------------------
 # Hasta 0.7.0 este workflow publicaba también por tag `v*`, sin revisor: los
-# runs de v0.5.0, v0.6.1 y v0.7.0 subieron a PyPI solos (gh api
-# .../actions/runs). Eso viola la regla del stack: ningún evento de git
+# runs de v0.1.0, v0.2.0, v0.4.0, v0.5.0, v0.6.1 y v0.7.0 subieron a PyPI solos
+# (gh api .../actions/workflows/publish.yml/runs, los seis `success`; ⚠️ la
+# primera versión de este encabezado sólo nombraba los tres últimos, corregido
+# en la ronda 1 del PR 9). Eso viola la regla del stack: ningún evento de git
 # despliega ni publica solo. La forma de acá es la del molde ya migrado,
 # `uvd-x402-sdk-python/.github/workflows/publish.yml` (main e043d17a, leído el
 # 2026-09-30), con dos diferencias medidas: la versión sale de `version.py` y no
-# de `pyproject.toml` (acá es `dynamic`), y `build` corre `twine check`.
+# de `pyproject.toml` (acá es `dynamic`), y `build` corre `twine check`,
+# después de subir el artefacto.
 #
 # POR QUÉ NO HAY NINGÚN TOKEN DE PYPI ACÁ
 # ---------------------------------------
@@ -69,8 +94,9 @@ name: Publish to PyPI
 # (OIDC, sin twine ni contraseña) y este archivo copia su forma.
 #
 # 🔴 Un test lo ata: `tests/test_publish_workflow.py` se pone rojo si vuelve un
-# disparador que no sea el manual, un tag, un secreto del repo, o si el id-token
-# sale del job que espera en `pypi`.
+# disparador que no sea el manual, un tag, un secreto del repo, si el id-token
+# sale del job que espera en `pypi`, si ese job corre algo más que bajar el
+# artefacto y subirlo con LA action de pypa, o si twine corre antes del upload.
 on:
   workflow_dispatch:
     inputs:
@@ -167,15 +193,12 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          pip install build==1.6.1 twine==7.0.0
+          pip install build==1.6.1
           python -m build
           ls -l dist/
           test -f "dist/uvd_describe_sdk-$INPUT_VERSION.tar.gz"
           test -f "dist/uvd_describe_sdk-$INPUT_VERSION-py3-none-any.whl"
           test "$(ls dist/ | wc -l)" -eq 2
-
-      - name: Los artefactos están bien formados
-        run: python -m twine check dist/*
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -183,6 +206,18 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 1
+
+      # twine va DESPUÉS de subir el artefacto, no antes (ronda 1 del PR 9, P3-2
+      # del refutador). `twine==7.0.0` está pinneado y sus dependencias no, y
+      # corren con dist/ en disco: antes del upload, una comprometida podía
+      # cambiar el wheel que después aprueba el revisor, que no abre el wheel.
+      # Acá lo que se sube es lo que armó `python -m build`, antes de que corra
+      # ningún paquete de twine. Y el chequeo sigue siendo una barrera: si falla,
+      # este job falla y `publish` (que lo necesita) no corre.
+      - name: Los artefactos están bien formados (después de subirlos)
+        run: |
+          pip install twine==7.0.0
+          python -m twine check dist/*
 
   publish:
     name: Publicar en PyPI

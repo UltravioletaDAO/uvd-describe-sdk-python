@@ -17,23 +17,33 @@ Changes merged since the last release accumulate here, each with its label
 
 ### [security] Publishing to PyPI is manual only, from `main`, with a reviewer (DN-PUB-02)
 
-`publish.yml` no longer runs on a `v*` tag: the runs for v0.5.0, v0.6.1 and v0.7.0
-uploaded to PyPI on their own, with nobody approving them. It now runs only by
-`workflow_dispatch`, with a `version` input that must equal `__version__`, in three
-jobs: `check` (only on `main`: the version, the package name, the whole suite
-offline), `build` (sdist and wheel, `twine check`, and `dist/` holds exactly that
-version) and `publish`, the only job with an OIDC token, which waits in the `pypi`
-environment. It is the shape of `uvd-x402-sdk-python`'s workflow. Still trusted
-publishing, with no PyPI token in the repository. `tests/test_publish_workflow.py`
-fails if a trigger other than the manual one, a tag, a repository secret or a
-misplaced OIDC permission comes back.
+`publish.yml` no longer runs on a `v*` tag: the runs for v0.1.0, v0.2.0, v0.4.0,
+v0.5.0, v0.6.1 and v0.7.0 uploaded to PyPI on their own, with nobody approving
+them. It now runs only by `workflow_dispatch`, with a `version` input that must
+equal `__version__`, in three jobs: `check` (only on `main`: the version, the
+package name, the whole suite offline), `build` (sdist and wheel, `dist/` holds
+exactly that version, and `twine check` after the artifact is uploaded, so its
+unpinned dependencies never run next to a wheel not yet uploaded) and `publish`,
+the only job with an OIDC token, which waits in the `pypi` environment and only
+downloads the artifact and uploads it with `pypa/gh-action-pypi-publish` pinned by
+SHA. It is the shape of `uvd-x402-sdk-python`'s workflow. Still trusted publishing,
+with no PyPI token in the repository. `tests/test_publish_workflow.py` fails if any
+of that comes back undone.
 
 Two steps belong to the owner, outside the repository, and neither fails loudly if
-it is missing: the `pypi` environment (reviewer, prevent self-review, `main` only,
-no admin bypass) must exist before the first dispatch, because GitHub creates a
-missing environment with no protection; and the PyPI trusted publisher must say
-Environment = `pypi`, because while it is empty PyPI accepts a token from any
-environment. The header of `publish.yml` has both, with where each was read.
+it is missing or half done: the `pypi` environment (reviewer, prevent self-review,
+`main` only, no admin bypass) must exist before the first dispatch, because GitHub
+creates a missing environment with no protection; and the PyPI trusted publisher
+must be REPLACED, not added to. pypi.org has no "edit": add the GitHub publisher
+with Environment = `pypi` and remove the one with an empty Environment, so that
+exactly one GitHub publisher for `publish.yml` is left, with `pypi`. While the empty
+one exists PyPI falls back to it for a token from no environment
+(`warehouse/oidc/models/github.py`, `_get_publisher_for_environment`, main
+`79e9ba37db`), so adding without removing closes nothing. PyPI's own "Constrain
+environment" link does add-and-remove in one step, but it arrives by email only
+after a job with an environment has used the empty publisher, that is, after the
+first dispatch. Optional second key: a ruleset on `v*` tags. The header of
+`publish.yml` has the steps, with where each claim was read.
 
 ### [internal] CI runs only when something it processes changes
 
