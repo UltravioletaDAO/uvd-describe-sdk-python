@@ -1,9 +1,39 @@
 name: CI
 
+# Corre sólo cuando cambia algo que procesa (regla del stack, 2026-09-11: un
+# cambio de sólo docs no dispara nada). La lista es la de lo que la suite LEE del
+# disco, medida el 2026-09-30 con `grep read_text|open(` sobre tests/, y no sólo
+# src/ + tests/:
+#   · scripts/**      `test_names_ronda5_script.py` importa el grabador de fixtures
+#   · schema/**, sdk-map.json    `test_sdk_map.py` los compara con el SDK
+#   · publish.yml     `test_publish_workflow.py` lo ata: un PR que le devuelva el
+#                     tag tiene que correr ese test, o el guard no guarda nada
+#   · examples/**     el job `contra-la-api-viva` corre `smoke_gratis.py`
+# Las dos listas son iguales a propósito: sin anclas de YAML, se copian.
 on:
   push:
     branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/**"
+      - "schema/**"
+      - "sdk-map.json"
+      - "examples/**"
+      - "pyproject.toml"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/publish.yml"
   pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/**"
+      - "schema/**"
+      - "sdk-map.json"
+      - "examples/**"
+      - "pyproject.toml"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/publish.yml"
 
 jobs:
   test:

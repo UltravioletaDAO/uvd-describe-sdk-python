@@ -1,7 +1,12 @@
 # Changelog
 
-Published by tag: `vX.Y.Z` triggers `.github/workflows/publish.yml`, which refuses a
-tag that does not match `src/uvd_describe_sdk/version.py`. Up to 0.5.0 each
+Published by hand: `.github/workflows/publish.yml` is run from the Actions tab, on
+`main`, with the version to publish; it refuses a version that does not match
+`src/uvd_describe_sdk/version.py`, and the upload waits for the owner's approval in
+the `pypi` environment. The `vX.Y.Z` tag is still created after a release, and it
+triggers nothing. ⚠️ Corrected 2026-09-30, left written: up to 0.7.0 this line said
+"Published by tag", and it was true — pushing `vX.Y.Z` uploaded to PyPI with no
+reviewer (see `[Unreleased]`). Up to 0.5.0 each
 release is recorded in its commit message (`git log`, tags `v0.1.0`…`v0.5.0`);
 this file starts with 0.6.0, the first release that asked for one.
 
@@ -9,6 +14,33 @@ this file starts with 0.6.0, the first release that asked for one.
 
 Changes merged since the last release accumulate here, each with its label
 (`[security]`, `[money]`, `[feature]`, `[internal]`), and ship together.
+
+### [security] Publishing to PyPI is manual only, from `main`, with a reviewer (DN-PUB-02)
+
+`publish.yml` no longer runs on a `v*` tag: the runs for v0.5.0, v0.6.1 and v0.7.0
+uploaded to PyPI on their own, with nobody approving them. It now runs only by
+`workflow_dispatch`, with a `version` input that must equal `__version__`, in three
+jobs: `check` (only on `main`: the version, the package name, the whole suite
+offline), `build` (sdist and wheel, `twine check`, and `dist/` holds exactly that
+version) and `publish`, the only job with an OIDC token, which waits in the `pypi`
+environment. It is the shape of `uvd-x402-sdk-python`'s workflow. Still trusted
+publishing, with no PyPI token in the repository. `tests/test_publish_workflow.py`
+fails if a trigger other than the manual one, a tag, a repository secret or a
+misplaced OIDC permission comes back.
+
+Two steps belong to the owner, outside the repository, and neither fails loudly if
+it is missing: the `pypi` environment (reviewer, prevent self-review, `main` only,
+no admin bypass) must exist before the first dispatch, because GitHub creates a
+missing environment with no protection; and the PyPI trusted publisher must say
+Environment = `pypi`, because while it is empty PyPI accepts a token from any
+environment. The header of `publish.yml` has both, with where each was read.
+
+### [internal] CI runs only when something it processes changes
+
+`ci.yml` gets a `paths` filter on push and pull request: `src/`, `tests/`,
+`pyproject.toml`, the two workflows, and the files the suite reads from disk
+(`scripts/`, `schema/`, `sdk-map.json`) or the smoke job runs (`examples/`). The
+matrix is unchanged.
 
 ## 0.7.0 — prepared 2026-09-25; published by the `v0.7.0` tag
 
