@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 634 pasan, 27-36 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-26 en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 666 pasan, 27-36 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-30 en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -596,6 +596,27 @@ docstrings:
 | **C6.** 🔴 `except ValueError.__base__:` en `check_url` (del refutador; con la lista negra sobrevivía VERDE) | **1 rojo**: el test AST |
 | **DY.** `from contextlib import suppress` en `_proto.py` | **1 rojo**: el test de `suppress` |
 | **DZ.** `_E = Exception` y `except _E:` en `check_url` | **1 rojo**: el test AST |
+| **EA.** 🔴 vuelve el tag como disparador de `publish.yml` (DN-PUB-02) — 2026-09-30 | **3 rojos**: el de los disparadores y los de `push:` y `tags:`. Contra el `publish.yml` de `origin/main` (`0709428`): **8 rojos de 9**; queda VERDE el de SHA, porque el viejo ya pinneaba. Tras la ronda 1 del PR 9: **11 rojos de 12**, el mismo verde |
+| **EB.** 🔴 un disparador que el `grep` no ve (`release: types: [published]`) | **1 rojo**: `test_solo_se_dispara_a_mano`. Los de texto quedan VERDES: por eso se leen las claves de `on:` |
+| **EC.** `password: ${{ secrets.PYPI_TOKEN }}` en el paso de subida | **1 rojo**: el de `secrets.` (desde la ronda 1 del PR 9, `secrets` como palabra suelta) |
+| **ED.** 🔴 sin `environment: pypi` en el job que publica | **3 rojos**: el del environment, el del id-token y el del gate de main (que empieza por el job en `pypi`). Tras la ronda 1 del PR 9: **4**, se suma el del job con id-token |
+| **EE.** id-token de escritura también a nivel de workflow | **1 rojo**: el del id-token (aparece 2 veces) |
+| **EF.** 🔴 id-token movido al job `build`, con el environment todavía en `publish` | **1 rojo**: el del id-token (`'build' != 'publish'`) |
+| **EG.** `permissions: write-all` | **1 rojo**: el del id-token |
+| **EH.** `check` sin `if: github.ref == 'refs/heads/main'` | **2 rojos**: el del gate y el de la versión (que busca el job de main) |
+| **EI.** `if: always()` en `publish` (corre aunque `check` se saltee) | **1 rojo**: el del gate |
+| **EJ.** sin el paso que compara `inputs.version` con `version.py` | **1 rojo**: el de la versión |
+| **EK.** `environment: pypi` sólo en un COMENTARIO | **3 rojos**, los mismos de ED: las presencias miran líneas de código, no comentarios. Tras la ronda 1 del PR 9: **4**, los de ED |
+| **EL.** la action de subida por rama (`@release/v1`) y no por SHA | **1 rojo**: el de SHA. Tras la ronda 1 del PR 9: **2**, se suma el del job con id-token |
+| **EM.** 🔴 `password: ${{ secrets['PYPI_TOKEN'] }}`, sin punto (R1 del refutador, ronda 1 del PR 9) — 2026-09-30 | **1 rojo**: el de `secrets`. Antes de la ronda, VERDE: el test buscaba el literal `secrets.` |
+| **EN.** 🔴 `build` con `id-token: "write"`, el valor entre comillas (R2) | **1 rojo**: el del id-token. Antes, VERDE: la regex no aceptaba comillas |
+| **EO.** 🔴 `"id-token": write` a nivel de workflow, la clave entre comillas (R3; lo heredan `check` y `build`) | **1 rojo**: el del id-token. Antes, VERDE |
+| **EP.** 🔴 `if: success() \|\| true` en `build` y `publish` (R4) | **1 rojo**: el del gate. Antes, VERDE: `success()` no estaba en la lista, y cualquier función de estado quita el `success()` implícito (GitHub, `expressions.md:322`) |
+| **EQ.** la comparación de versión termina en `exit 0` (R5) | **1 rojo**: el de la versión, que ahora mira el paso y no sólo las cadenas. Antes, VERDE |
+| **ER.** `build` sin los tres `test` de «dist/ tiene exactamente esa versión» (R6) | **1 rojo**: `test_build_exige_que_dist_tenga_exactamente_esa_version`. Antes no había test |
+| **ES.** 🔴 `pypa-mirror/gh-action-pypi-publish@` el mismo SHA (R7, otro repo con el mismo formato) | **1 rojo**: el del job con id-token, que fija sus dos `uses:` exactos. El de SHA queda VERDE: sólo mira el formato |
+| **ET.** `twine` vuelve a correr ANTES de `upload-artifact` (P3-2 deshecho) | **1 rojo**: `test_twine_corre_despues_de_subir_el_artefacto` |
+| **EU.** 🔴 un `run:` en el job que tiene el id-token | **1 rojo**: el del job con id-token. Cualquier paso de ese job puede pedir el token OIDC |
 
 Todas las de la ronda 2 se verificaron corriendo su comando `test` del JSON por
 bash (verde sin mutar, rojo mutado) y la suite entera mutada, con los nombres de
@@ -743,3 +764,11 @@ publicada mienta.
   en el cuerpo y el trailer `Co-Authored-By: Claude <noreply@anthropic.com>`.
 - **Nunca `git add -A`** — staging por archivo.
 - **Push sólo con OK explícito de Saul, por push.**
+- **Publicar a PyPI es a mano** (DN-PUB-02, 2026-09-30): `publish.yml` corre
+  sólo por `workflow_dispatch` desde `main`, con `version` = `__version__`, y el
+  job que sube espera al revisor en el environment `pypi`. **Un tag no publica**
+  (hasta 0.7.0 sí). Los pasos del dueño, y por qué ninguno falla fuerte si
+  falta, están en el encabezado de `publish.yml`; `test_publish_workflow.py` lo
+  ata (mutaciones EA–EU). ⚠️ El paso 2 del dueño es REEMPLAZAR el publisher
+  de PyPI, no agregar otro: con el vacío vivo, agregar el de `pypi` no cierra
+  nada (ronda 1 del PR 9).

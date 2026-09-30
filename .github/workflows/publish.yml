@@ -1,97 +1,241 @@
 name: Publish to PyPI
 
-# ┌────────────────────────────────────────────────────────────────────────┐
-# │ 🔴 LEER ANTES DEL PRIMER TAG — este workflow NO tiene token y es a      │
-# │    propósito. Publica por OIDC trusted publishing, y eso exige UN paso  │
-# │    manual en pypi.org que NO se puede hacer desde el repo:              │
-# │                                                                        │
-# │      pypi.org → el proyecto (o "Publishing" si todavía no existe) →     │
-# │      Add a trusted publisher → GitHub                                   │
-# │        Owner:         UltravioletaDAO                                   │
-# │        Repository:    uvd-describe-sdk-python                           │
-# │        Workflow name: publish.yml                                       │
-# │        Environment:   (vacío)                                           │
-# │                                                                        │
-# │    Sin ese paso, el job FALLA al subir con un 403 del índice. Falla     │
-# │    fuerte y con un mensaje que se explica solo, que es exactamente lo   │
-# │    que se quiere: nadie publica creyendo que publicó.                   │
-# └────────────────────────────────────────────────────────────────────────┘
+# 🔴 LEER ANTES DEL PRIMER DISPATCH
+# ---------------------------------
+# Sólo manual: se corre desde la pestaña Actions, sobre main, con la versión a
+# publicar, y esa versión tiene que ser el `__version__` de
+# `src/uvd_describe_sdk/version.py`. Ningún evento de git (tag, merge, release)
+# dispara este workflow: el tag `vX.Y.Z` se sigue creando después de publicar, y
+# no dispara nada.
 #
-# POR QUÉ NO HAY `secrets.PYPI_TOKEN` ACÁ, Y LA DEUDA QUE ESTO SALDA
-# ------------------------------------------------------------------
-# El molde de la casa (`uvd-x402-sdk-python/.github/workflows/publish.yml`)
-# tiene un comentario que dice:
+# check -> build -> publish. `check` corre sólo en main, compara la versión y
+# corre la suite; `build` arma dist/ sin id-token; `publish` es el ÚNICO job con
+# id-token, y espera en el environment `pypi` hasta que el dueño lo aprueba
+# (Review deployments).
 #
-#     "This one already uses OIDC trusted publishing, so there is no token to
-#      steal"
+# Pasos del DUEÑO, que no se pueden hacer desde el repo, en ESTE orden:
 #
-# …y tres líneas más abajo el paso usa `TWINE_USERNAME: __token__` +
-# `TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}`. **El comentario miente sobre su
-# propio código.** Un repo nuevo que copie el molde hereda las dos cosas: el
-# token Y la afirmación falsa que dice que no hay token.
+#   1. GitHub → Settings → Environments → New environment → `pypi`
+#        Required reviewers:   UltravioletaDAO, con "Prevent self-review"
+#        Deployment branches:  Selected branches → sólo `main`
+#        "Allow administrators to bypass": apagado
+#   2. pypi.org → uvd-describe-sdk → Publishing. Ahí un trusted publisher NO se
+#      edita: se REEMPLAZA. Agregar el de GitHub con
+#        Owner:         UltravioletaDAO
+#        Repository:    uvd-describe-sdk-python
+#        Workflow name: publish.yml
+#        Environment:   pypi
+#      y BORRAR el que tiene el Environment vacío. Al terminar tiene que quedar
+#      UN SOLO publisher de GitHub para publish.yml en el proyecto, y con
+#      Environment `pypi`.
+#   3. Ruleset de `main` (el del molde: sin borrado, sin force, cambios por PR).
+#   4. Opcional, una segunda llave: un ruleset de tags `v*` que restrinja quién
+#      los crea. No reemplaza al 2.
 #
-# Acá se eligió la otra salida: hacer verdadera la afirmación. No hay ninguna
-# credencial de larga vida en este repo — el token de OIDC lo emite GitHub por
-# ejecución, dura minutos y está atado a ESTE workflow de ESTE repo. Un token
-# de PyPI robado publica cualquier versión de cualquier proyecto que alcance,
-# desde cualquier lado, hasta que alguien lo rote.
+# ⚠️ Ni el 1 ni el 2 fallan fuerte si faltan, y por eso el orden importa:
+#   · Sin el 1, el primer run CREA el environment `pypi` sin ninguna protección
+#     y el job publica sin revisor. GitHub, `manage-environments.md` (leído el
+#     2026-09-30): "Running a workflow that references an environment that does
+#     not exist will create an environment with the referenced name … the newly
+#     created environment will not have any protection rules".
+#   · Sin el 2 NO hay un 403: con Environment vacío, PyPI acepta el token de
+#     cualquier environment, o de ninguno. pypi/warehouse
+#     `warehouse/oidc/models/github.py::_check_environment` (main 8e4dc6d6eb,
+#     leído el 2026-09-30): "If we haven't set an environment name for the
+#     publisher, we don't need to check this claim".
+#   · Y el 2 a MEDIAS tampoco avisa. Si se agrega el publisher con `pypi` y el
+#     vacío se queda, PyPI busca primero el del environment del token y, si no
+#     hay, cae al vacío: `warehouse/oidc/models/github.py`
+#     `_get_publisher_for_environment`, :199-214 (main 79e9ba37db, leído el
+#     2026-09-30): "if general_publisher := first_true(publishers,
+#     pred=lambda p: p.environment == "")". Un token que no sale de ningún
+#     environment sigue entrando por el vacío. Sólo con el vacío BORRADO el 2
+#     hace que PyPI RECHACE todo lo que no salga del environment `pypi`,
+#     incluido el camino por tag de la versión anterior de este archivo.
+#     En `warehouse/manage/views/oidc_publishers.py`, «Add» sólo agrega
+#     (`add_github_oidc_publisher`, :285, `oidc_publishers.append`), y el único
+#     camino que agrega el nuevo Y quita el viejo es `constrain_environment`
+#     (:158-262). Su link («Constrain environment») no está en la página: PyPI
+#     lo manda por email cuando un job CON environment pidió un token al
+#     publisher vacío (`warehouse/oidc/views.py:395-412`), o sea después del
+#     primer dispatch. Antes del primero, el 2 es a mano: agregar y borrar.
+#   ⚠️ Corregido en la ronda 1 del PR 9, y se deja escrito: el 2 decía «el
+#   trusted publisher tiene que quedar así», que en pypi.org se hace con «Add»;
+#   y agregar sin borrar deja todo como estaba, sin ningún aviso.
+#   ⚠️ Corregido el 2026-09-30, y se deja escrito: este encabezado decía
+#   «Environment: (vacío)» y que sin el paso de pypi.org «el job FALLA al subir
+#   con un 403». Era cierto para lo que describía —sin publisher no hay subida—
+#   pero la tentación ahora es leerlo al revés, «si el publisher no dice `pypi`,
+#   da 403», y eso es falso: el publisher que ya existe, vacío, acepta el job
+#   nuevo en silencio.
 #
-# ⚠️ Y esto se REPORTÓ para el molde: el comentario de allá hay que corregirlo
-# o migrarlo. No se toca desde este repo.
-
+# LO QUE CAMBIÓ Y POR QUÉ (2026-09-30, DN-PUB-02)
+# ----------------------------------------------
+# Hasta 0.7.0 este workflow publicaba también por tag `v*`, sin revisor: los
+# runs de v0.1.0, v0.2.0, v0.4.0, v0.5.0, v0.6.1 y v0.7.0 subieron a PyPI solos
+# (gh api .../actions/workflows/publish.yml/runs, los seis `success`; ⚠️ la
+# primera versión de este encabezado sólo nombraba los tres últimos, corregido
+# en la ronda 1 del PR 9). Eso viola la regla del stack: ningún evento de git
+# despliega ni publica solo. La forma de acá es la del molde ya migrado,
+# `uvd-x402-sdk-python/.github/workflows/publish.yml` (main e043d17a, leído el
+# 2026-09-30), con dos diferencias medidas: la versión sale de `version.py` y no
+# de `pyproject.toml` (acá es `dynamic`), y `build` corre `twine check`,
+# después de subir el artefacto.
+#
+# POR QUÉ NO HAY NINGÚN TOKEN DE PYPI ACÁ
+# ---------------------------------------
+# El molde decía "there is no token to steal" y tres líneas más abajo subía con
+# twine y un token guardado en el repo: el comentario mentía sobre su propio
+# código. Este repo eligió hacer verdadera la afirmación: ninguna credencial de
+# larga vida, sólo el token OIDC que GitHub emite por ejecución, dura minutos y
+# está atado a ESTE workflow de ESTE repo. Un token de PyPI robado publica
+# cualquier versión de cualquier proyecto que alcance, desde cualquier lado,
+# hasta que alguien lo rote. ⚠️ Corregido el 2026-09-30: el molde YA migró
+# (OIDC, sin twine ni contraseña) y este archivo copia su forma.
+#
+# 🔴 Un test lo ata: `tests/test_publish_workflow.py` se pone rojo si vuelve un
+# disparador que no sea el manual, un tag, un secreto del repo, si el id-token
+# sale del job que espera en `pypi`, si ese job corre algo más que bajar el
+# artefacto y subirlo con LA action de pypa, o si twine corre antes del upload.
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
+    inputs:
+      version:
+        description: "Versión a publicar; tiene que ser el __version__ de src/uvd_describe_sdk/version.py"
+        required: true
+        type: string
+
+permissions:
+  contents: read # el job que publica agrega el id-token él mismo
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  # Los tests corren acá, con permiso de sólo lectura: sus dependencias no están
+  # pinneadas, y nada de lo que corren comparte runner con la subida ni con su
+  # id-token.
+  check:
+    name: Rama, versión y tests
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # Lo único que hace posible el trusted publishing. Sin esto, GitHub no
-      # emite el token OIDC y el upload no tiene con qué autenticarse.
-      id-token: write
+    timeout-minutes: 30
     steps:
       # Pinneadas por SHA y no por tag: un tag es mutable, y quien controle el
       # repo de la action puede cambiar qué corre adentro de un workflow que
-      # tiene permiso de publicar. Vale igual sin token: `id-token: write` es
-      # una credencial.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      # tiene permiso de publicar. Los SHA son los del molde, verificados el
+      # 2026-09-30 contra el tag que nombra cada comentario.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
-      - name: Install build tools
-        run: pip install build twine
-
-      - name: Build package
-        run: python -m build
-
-      # El tag TIENE que coincidir con `version.__version__`. Sin este chequeo,
-      # un `git tag v0.2.0` sobre un árbol que todavía dice `0.1.0` publica
-      # 0.1.0 con éxito y en silencio — y ese número ya está quemado en PyPI
-      # para siempre. Es la versión CI de la regla de la casa: la versión se
-      # define una vez y todo lo demás la lee.
-      - name: El tag coincide con la versión del código
+      # El input TIENE que ser `version.__version__`. Sin este chequeo, pedir
+      # 0.8.0 sobre un árbol que todavía dice 0.7.0 armaría y subiría otra cosa
+      # que la pedida, y un número subido a PyPI queda quemado para siempre.
+      # Se lee el ARCHIVO, no se importa el paquete: importar uvd_describe_sdk
+      # dispara el __init__ que trae httpx, y en este paso las deps aún no están
+      # instaladas — el run 1 del workflow viejo murió con ModuleNotFoundError
+      # acá, ANTES de llegar al OIDC que venía a probar.
+      - name: La versión del input es la del código
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          # Se lee el ARCHIVO, no se importa el paquete: importar uvd_describe_sdk
-          # dispara el __init__ que trae httpx, y en este paso las deps aun no
-          # estan instaladas — el run 1 murio con ModuleNotFoundError aqui,
-          # ANTES de llegar al OIDC que venia a probar.
           VER="$(grep -oP '(?<=__version__ = ")[^"]+' src/uvd_describe_sdk/version.py)"
-          echo "tag=$TAG  version.py=$VER"
-          if [ "$TAG" != "$VER" ]; then
-            echo "::error::el tag ($TAG) no coincide con version.__version__ ($VER)"
+          echo "input=$INPUT_VERSION  version.py=$VER"
+          if [ -z "$VER" ] || [ "$INPUT_VERSION" != "$VER" ]; then
+            echo "::error::el input ($INPUT_VERSION) no coincide con version.__version__ ($VER)"
             exit 1
           fi
-        if: startsWith(github.ref, 'refs/tags/v')
 
-      - name: Los artefactos están bien formados
-        run: python -m twine check dist/*
+      - name: El paquete conserva su nombre (PyPI confía en este workflow para ese proyecto)
+        run: |
+          NAME="$(sed -n 's/^name = "\(.*\)"$/\1/p' pyproject.toml)"
+          if [ "$NAME" != "uvd-describe-sdk" ]; then
+            echo "::error::pyproject.toml name $NAME (se esperaba uvd-describe-sdk)"
+            exit 1
+          fi
 
-      - name: Publish to PyPI (OIDC trusted publishing — sin token)
+      - name: Instalar el SDK con sus deps de test (las mismas que instala ci.yml)
+        run: pip install -e ".[dev]"
+
+      - name: El SDK de pagos está de verdad (si no, el test de redes miente)
+        run: python -c "import uvd_x402_sdk, uvd_x402_sdk.networks.base; print('uvd-x402-sdk OK')"
+
+      - name: Tests, sin red
+        env:
+          HTTPS_PROXY: http://127.0.0.1:9
+          HTTP_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost
+        run: python -m pytest
+
+  build:
+    name: sdist y wheel
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      # Los nombres son los que PyPI ya tiene para 0.7.0 (medido el 2026-09-30):
+      # `uvd_describe_sdk-0.7.0.tar.gz` y `uvd_describe_sdk-0.7.0-py3-none-any.whl`.
+      - name: Build, y dist/ tiene exactamente esta versión
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          pip install build==1.6.1
+          python -m build
+          ls -l dist/
+          test -f "dist/uvd_describe_sdk-$INPUT_VERSION.tar.gz"
+          test -f "dist/uvd_describe_sdk-$INPUT_VERSION-py3-none-any.whl"
+          test "$(ls dist/ | wc -l)" -eq 2
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+      # twine va DESPUÉS de subir el artefacto, no antes (ronda 1 del PR 9, P3-2
+      # del refutador). `twine==7.0.0` está pinneado y sus dependencias no, y
+      # corren con dist/ en disco: antes del upload, una comprometida podía
+      # cambiar el wheel que después aprueba el revisor, que no abre el wheel.
+      # Acá lo que se sube es lo que armó `python -m build`, antes de que corra
+      # ningún paquete de twine. Y el chequeo sigue siendo una barrera: si falla,
+      # este job falla y `publish` (que lo necesita) no corre.
+      - name: Los artefactos están bien formados (después de subirlos)
+        run: |
+          pip install twine==7.0.0
+          python -m twine check dist/*
+
+  publish:
+    name: Publicar en PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 15
+    permissions:
+      # Trusted publishing (OIDC): sin esto GitHub no emite el token y la subida
+      # no tiene con qué autenticarse. Es el único job que lo recibe.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publicar por trusted publishing (sin contraseña, sin twine)
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
