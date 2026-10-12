@@ -79,6 +79,7 @@ def test_segmentos_opacos_sin_normalizar(contrato: Dict[str, Any], path: str) ->
     ("GET", "catalog.example", CALL[2], CALL[3]),
     ("GET", "other.example:8443", CALL[2], CALL[3]),
     ("GET", CALL[1], "/api/v20/items/1", ()),
+    ("GET", CALL[1], "/bad/v2/items/1", ()),
     ("GET", CALL[1], "/api/v2/Items/1", ()),
     ("GET", CALL[1], "/api/v2/items/", ()),
     ("GET", CALL[1], "/api/v2/items/a/b", ()),
@@ -89,7 +90,7 @@ def test_una_llamada_fuera_del_contrato_no_se_mapea(
     contrato: Dict[str, Any], call: Any
 ) -> None:
     with pytest.raises(AssertionError, match="no está en el spec"):
-        verificar_cobertura(contrato, [("items.read", call)], OUTSIDE)
+        verificar_cobertura(contrato, TRACE + [("items.read", call)], OUTSIDE)
 
 
 @pytest.mark.parametrize("reason", ["", " ", "\t\n", "\u2003", None, False])
