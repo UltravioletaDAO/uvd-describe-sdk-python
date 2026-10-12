@@ -240,3 +240,11 @@ assert not {"pytest", "httpx", "uvd_describe_sdk"}.intersection(sys.modules)
         cwd=outside, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_el_PR_de_cobertura_no_dispara_el_smoke_vivo() -> None:
+    workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    # Este job es el último del workflow. El if debe estar a nivel del job,
+    # no en un comentario ni dentro de steps.
+    job = workflow.read_text(encoding="utf-8").split("  contra-la-api-viva:", 1)[1]
+    assert "    if: github.event_name == 'push'" in job.splitlines()

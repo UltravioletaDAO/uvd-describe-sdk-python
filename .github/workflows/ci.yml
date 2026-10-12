@@ -98,6 +98,8 @@ jobs:
   # 🔴 Sólo rutas GRATIS. Un job de CI que gasta USDC en cada push es un job
   # que alguien apaga.
   contra-la-api-viva:
+    # Los PR de cobertura se verifican sin tocar producción (2026-10-12).
+    if: github.event_name == 'push'
     name: Smoke contra api.describe.net (sólo rutas gratis)
     runs-on: ubuntu-latest
     continue-on-error: true

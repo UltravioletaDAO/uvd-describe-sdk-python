@@ -117,12 +117,7 @@ that one stands `PartnerRejectedError` (see `client.py::_paid`).
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
-
-try:  # pragma: no cover - depende de la versión de Python
-    from typing import Protocol, runtime_checkable
-except ImportError:  # pragma: no cover
-    from typing_extensions import Protocol, runtime_checkable
+from typing import Callable, Dict, Optional, Protocol, runtime_checkable
 
 from .errors import PartnerSigningError
 

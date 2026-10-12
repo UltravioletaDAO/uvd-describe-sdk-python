@@ -66,12 +66,7 @@ test touches a key**.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
-
-try:  # pragma: no cover - depende de la versión de Python
-    from typing import Protocol, runtime_checkable
-except ImportError:  # pragma: no cover
-    from typing_extensions import Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from .errors import DoNotPayError
 

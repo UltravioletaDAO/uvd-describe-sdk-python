@@ -772,3 +772,17 @@ publicada mienta.
   ata (mutaciones EA–EU). ⚠️ El paso 2 del dueño es REEMPLAZAR el publisher
   de PyPI, no agregar otro: con el vacío vivo, agregar el de `pypi` no cierra
   nada (ronda 1 del PR 9).
+
+### Cobertura compartida (2026-10-12)
+
+`uvd_sdk_map` es el motor stdlib extraído de `tests/test_sdk_map.py`; la guía para
+los otros cuatro SDK está en `docs/sdk-map/README.md`. Las decisiones y fixtures
+de describe quedan en sus tests. Para CI se importa `verificar_cobertura`:
+`medir_mapa` por sí solo permite cobertura parcial. El contrato sintético de
+`tests/test_sdk_map_library.py` ata los bordes sin depender de describe.
+
+Corrección medida del entorno: con el CI sin pin, mypy 2.4.0 rechazaba los
+fallbacks de `Protocol` en `payment.py` y `partner.py` ya en e5f0791. Python ≥3.9
+siempre dispone de `typing.Protocol`; se retira el fallback inalcanzable, sin
+cambiar comportamiento. El smoke vivo queda sólo en push a main; el PR se
+verifica offline, y un test ata ese gate.
