@@ -108,6 +108,7 @@ where = ["src"]
 # se rompe desde el paquete instalado, que es el unico que ve el usuario.
 [tool.setuptools.package-data]
 uvd_describe_sdk = ["py.typed"]
+uvd_sdk_map = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

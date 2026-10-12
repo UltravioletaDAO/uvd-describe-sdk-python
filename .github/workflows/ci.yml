@@ -82,7 +82,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: python -m ruff check src tests
-      - run: python -m mypy src/uvd_describe_sdk
+      - run: python -m mypy src/uvd_describe_sdk src/uvd_sdk_map
 
   # El chequeo que la suite mockeada NO puede hacer, y es el que atrapa el modo
   # de falla real de un cliente: **la API agrega o renombra un campo y el SDK lo
@@ -98,6 +98,8 @@ jobs:
   # 🔴 Sólo rutas GRATIS. Un job de CI que gasta USDC en cada push es un job
   # que alguien apaga.
   contra-la-api-viva:
+    # Los PR de cobertura se verifican sin tocar producción (2026-10-12).
+    if: github.event_name == 'push'
     name: Smoke contra api.describe.net (sólo rutas gratis)
     runs-on: ubuntu-latest
     continue-on-error: true
