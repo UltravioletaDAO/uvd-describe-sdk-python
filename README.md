@@ -804,3 +804,11 @@ the idea of whoever wrote it; a captured one tests against what the service send
 and that difference has already been paid for once in this ecosystem.
 
 MIT · [describe.net](https://describe.net) · [docs](https://docs.describe.net)
+
+## Verificador compartido de cobertura contrato ↔ SDK
+
+`uvd_sdk_map` se distribuye en este paquete y funciona sin importar el cliente.
+Los tests de describe lo usan para medir `sdk-map.json`; los otros SDK pueden
+pasarle su contrato y llamadas capturadas con transporte falso. La
+[guía de adopción](docs/sdk-map/README.md) documenta instalación por commit, API,
+uso desde Python/TypeScript y los límites del subconjunto OpenAPI soportado.
