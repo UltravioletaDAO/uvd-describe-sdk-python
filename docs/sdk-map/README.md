@@ -125,10 +125,17 @@ el error; además corremos con `HTTPS_PROXY`/`HTTP_PROXY=http://127.0.0.1:9` y
   llegar en mayúsculas; host debe coincidir con la autoridad del spec; ruta y
   claves de query son sensibles a mayúsculas. No elimina espacios ni normaliza
   nombres. Los segmentos de plantilla son opacos (incluidos Unicode, `0x`/`0X`).
+  Para cada servidor se elige la ruta con más segmentos enteramente literales:
+  una ruta literal precede a una plantilla, independientemente del orden del
+  contrato, como exige [OpenAPI 3.1, Paths Object](https://spec.openapis.org/oas/v3.1.0.html#paths-object).
+  Entre plantillas, ese conteo es la política de desempate de esta herramienta.
+  Si las mejores candidatas empatan, levanta `ValueError` con las rutas ambiguas.
+  Sólo después valida verbo y query: si no corresponden a la ruta elegida,
+  devuelve `None`, sin caer en una plantilla menos específica.
 - El subconjunto heredado requiere servidores raíz absolutos sin variables,
-  rutas no ambiguas y parámetros query inline en cada operación. No resuelve
-  overrides de servidores, parámetros heredados/por `$ref`, ni contratos con
-  rutas ambiguas. Preparar esos contratos antes de usarlos aquí. La tupla no
+  rutas con una ganadora según la precedencia anterior y parámetros query inline
+  en cada operación. No resuelve overrides de servidores, parámetros heredados/por
+  `$ref`, ni contratos con rutas ambiguas. Preparar esos contratos antes de usarlos aquí. La tupla no
   distingue esquemas HTTP/HTTPS, valores ni parámetros obligatorios; tampoco
   valida cuerpos, tipos de respuesta o semántica del protocolo.
 - Un `operationId` puede grabarse varias veces por el mismo método. Dos métodos

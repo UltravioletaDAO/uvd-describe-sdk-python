@@ -150,18 +150,38 @@ def resolver(spec: Dict[str, Any], llamada: Llamada) -> Optional[str]:
 
     La ruta se mira sin el prefijo de un `servers[].url` del mismo host (el spec
     declara `https://api.describe.net` y `https://api.describe.net/v1`), y cada
-    clave de query tiene que ser un parámetro `in: query` de esa operación."""
+    clave de query tiene que ser un parámetro `in: query` de esa operación.
+
+    Se elige primero la ruta con más segmentos literales (OpenAPI 3.1, Paths
+    Object: las literales preceden a las plantillas). Un empate levanta
+    ValueError; ni el verbo ni la query rescatan una ruta menos específica.
+    REF-DNSDK-10, 2026-10-12: tomar la primera coincidencia cubría getItem con
+    una llamada a /items/search cuando /items/{id} estaba declarada antes."""
     verbo, host, ruta, claves = llamada
     ops = operaciones(spec)
     for server_host, prefijo in _servidores(spec):
         if host != server_host or not ruta.startswith(prefijo + "/"):
             continue
         relativa = ruta[len(prefijo):]
+        candidatas = {
+            plantilla: sum(
+                bool(segmento) and "{" not in segmento for segmento in plantilla.split("/")
+            )
+            for plantilla in spec["paths"]
+            if _plantilla_a_regex(plantilla).fullmatch(relativa)
+        }
+        if not candidatas:
+            continue
+        prioridad = max(candidatas.values())
+        mejores = [plantilla for plantilla, puntos in candidatas.items() if puntos == prioridad]
+        if len(mejores) != 1:
+            raise ValueError(f"rutas ambiguas para {verbo} {ruta}: {sorted(mejores)}")
         for oid, (v, plantilla, op) in ops.items():
-            if v != verbo or not _plantilla_a_regex(plantilla).fullmatch(relativa):
+            if plantilla != mejores[0] or v != verbo:
                 continue
             declarados = {p["name"] for p in op.get("parameters", []) if p.get("in") == "query"}
             return oid if set(claves) <= declarados else None
+        return None
     return None
 
 
