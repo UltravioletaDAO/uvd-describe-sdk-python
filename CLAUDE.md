@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 666 pasan, 27-36 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-09-30 en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 848 pasan, ~31 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-11-16 en py3.12.12 y py3.9.24 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras SDKPY-503 — suma `test_503_tras_pagar.py`, 102 tests; eran 746 en `32a99ca`; eran 666 el 2026-09-30, re-medido en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -395,6 +395,49 @@ nueva, no un cambio del contrato núcleo — igual que el riel de partner — pe
 gemelo tiene que traer la misma forma de resultado (`NameResolution.to_dict()`
 es el contrato de `/v1/names`). Seguimiento de los dos SDK.
 
+### Después de pagar — SDKPY-503, la decimotercera superficie, y TAMPOCO es una regla
+
+`client.py` (`_paid`, `_send_pending`, `_classify_after_paying`) + `errors.py`
+(`mark_payment_sent`, `RESEND_*`). Revisión externa de describe.net del
+2026-11-15, refutada por RA el 2026-11-16 (fila F-A1 [money] P1 de
+`describe-net/docs/BACKLOG.md`). **R5 intacta**: las rutas pagas siguen
+levantando siempre; esto cambia QUÉ dicen y qué pasa al volver a llamarlas.
+
+1. 🔴 **Sólo dos respuestas dejan firmar otra**, y es una LISTA BLANCA: un 402
+   cuyo `error` es `payment_required` o `PAYMENT_VERIFICATION_FAILED`
+   (`describe-net site/paybox.md:151-163`, paso 7). Comparación exacta. Todo lo
+   demás —los cinco 503, todo 409, el 402 `FACILITATOR_ERROR` o
+   `PAYMENT_SETTLEMENT_FAILED`, un 5xx, un timeout, un cuerpo ilegible— dice «NO
+   firmes otra». Hasta 0.7.0 TODO status >= 400 decía «pedí un desafío nuevo,
+   no reenvíes éste»: la regla salió de la lista de EXCEPCIONES de
+   `site/api.md:236-240`, que deja del lado «firmá» al 402 `FACILITATOR_ERROR`
+   (BACKLOG `:106`). Mutaciones M1, M2, M29.
+2. 🔴 **El header vive en el CLIENTE** (`_pending`, por URL exacta), guardado al
+   firmar y ANTES de mandar, y volver a llamar al método lo REENVÍA directo al
+   pedido pagado hasta `validBefore` + 15 s (`MARGEN_FIRMA_MS` de
+   `site/dn-pay.js`). Un `validBefore` ilegible se sigue reenviando. Se olvida
+   con un 2xx que parsea, un 402 de la lista blanca, el margen o `close()`; un
+   409 NO lo olvida. Nada se reenvía solo. Mutaciones M3, M4, M8, M9, M14–M17.
+3. 🔴 **El header nunca llega a la excepción**: ni `str`, `repr`, `pickle`,
+   `payment`, ni los locals del traceback. En 0.7.0 salía por `_paid:header` y
+   `TracebackException(capture_locals=True)` lo imprimía. Por eso `_paid` no lo
+   ata a ninguna local, `_send_pending` es un frame propio y `_paid_stretch` lo
+   limpia (con la cadena `__cause__`, donde están los frames de httpx). Un eco en
+   el cuerpo se tacha. Mutaciones M5, M6, M12a/b, M27.
+4. **`payment["resend"]` es la decisión del SDK; `server_error`, `retryable` y
+   `next_action` son palabras del servidor.** Donde no coinciden gana `resend`:
+   hoy el 402 `FACILITATOR_ERROR` trae `next_action` «Firmá una autorización
+   nueva». `retry_after_seconds` lleva el techo de 30 s del servidor.
+5. **`payment_required` en un REENVÍO no está en la lista** (paybox paso 7: «that
+   `503` still rules»). Mutaciones M10, M18.
+6. ⚠️ **Paridad**: los tres valores de `resend` son los de la fila del gemelo TS
+   (F-A2, `'same-header' | 'reconcile' | 'new-challenge-ok'`), que hace otro
+   worker. Si el gemelo eligió otra forma, se alinean los dos; ninguno solo.
+7. ⚠️ **Límite conocido**: dos hilos que piden el MISMO recurso a la vez, sin
+   header pendiente, firman uno cada uno (dos llamadas, dos compras, como antes).
+   El header se guarda antes de mandarlo, así que un reintento POSTERIOR a un
+   timeout sí reenvía.
+
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
 `partner.py` + `partner=` del constructor. Entrar a las rutas medidas sin pagar,
@@ -617,6 +660,24 @@ docstrings:
 | **ES.** 🔴 `pypa-mirror/gh-action-pypi-publish@` el mismo SHA (R7, otro repo con el mismo formato) | **1 rojo**: el del job con id-token, que fija sus dos `uses:` exactos. El de SHA queda VERDE: sólo mira el formato |
 | **ET.** `twine` vuelve a correr ANTES de `upload-artifact` (P3-2 deshecho) | **1 rojo**: `test_twine_corre_despues_de_subir_el_artefacto` |
 | **EU.** 🔴 un `run:` en el job que tiene el id-token | **1 rojo**: el del job con id-token. Cualquier paso de ese job puede pedir el token OIDC |
+| **M0.** 🔴 el `src/` entero de `32a99ca` (0.7.0) con sólo las tres constantes `RESEND_*` agregadas (SDKPY-503) — 2026-11-16 | **103 rojos**: los 102 de `test_503_tras_pagar.py` y el 409 invertido de `test_r6_pago_x402.py` |
+| **M1.** 🔴 la lista blanca ampliada a cualquier 402 con código | **10 rojos**: el `FACILITATOR_ERROR` y el `PAYMENT_SETTLEMENT_FAILED` de punta a punta, y los de la clasificación exacta |
+| **M2.** comparar el `error` sin mayúsculas | **2 rojos**: `payment_verification_failed` y `PAYMENT_REQUIRED` |
+| **M3.** 🔴 sin reenvío (`if clave in self._pending:` → `if False:`, el bug de 0.7.0) | **21 rojos**: todos los casos que no son de la lista blanca firman 2 |
+| **M4.** un 409 olvida el header | **2 rojos**: los dos 409 |
+| **M5.** 🔴 sin `_scrub_frames` | **9 rojos**: los 9 casos de `test_el_header_no_sale_por_la_excepcion_ni_por_su_traceback` |
+| **M6.** el header como atributo de la excepción | **9 rojos**: los mismos 9 (`vars(exc)`, `pickle.dumps`) |
+| **M8.** margen de firma en 0 | **1 rojo**: a `validBefore` + 14 s firmaba otra |
+| **M9.** el header nunca vence | **1 rojo**: a `validBefore` + 15 s no firmaba |
+| **M10.** `payment_required` en un reenvío deja firmar | **1 rojo**: `test_un_payment_required_en_un_REENVIO_no_deja_firmar_otra` |
+| **M11.** vuelve el texto viejo en la rama de no-firmar | **15 rojos**, incluido el que cuenta las apariciones de la frase en `src/` |
+| **M14.** pedir otro 402 antes de reenviar | **21 rojos**: el `Guion` recibe una request de más |
+| **M27.** limpiar frames sin la cadena `__cause__` | **3 rojos**: timeout, socket muerto y 200 ilegible — los frames de httpx guardan el header |
+| **M29.** un 409 deja firmar otra | **5 rojos** |
+
+Las 29 de SDKPY-503 (M1–M29, con M12a/b), con su `viejo`/`nuevo`/comando, van en
+JSON en el cuerpo del PR; las que no están arriba (M7, M12a/b, M13, M15–M26, M28)
+también caen, cada una en su test con nombre.
 
 Todas las de la ronda 2 se verificaron corriendo su comando `test` del JSON por
 bash (verde sin mutar, rojo mutado) y la suite entera mutada, con los nombres de
@@ -694,6 +755,10 @@ publicada mienta.
   sync (`names/_proto.py`).
 - **No reintenta un pago.** El nonce se consume en el settlement: reenviar la
   misma credencial no vuelve a pagar. Un `retries=` quemaría credenciales.
+  ⚠️ Precisión del 2026-11-16 (SDKPY-503): no reintenta SOLO. Si quien llama
+  vuelve a llamar al método tras un fallo posterior a la firma, el cliente
+  reenvía el MISMO header (ver §«Después de pagar»), que es lo que el servidor
+  pide; lo que nunca hace es firmar otra fuera de la lista blanca.
 - **No lee env vars.** Todo entra por constructor. Es lo que lo hace testeable
   sin entorno y embebible en cualquier proceso. **El riel de partner no es una
   excepción**: recibe un objeto que firma, no una clave ni el nombre de la
