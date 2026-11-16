@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 873 pasan, ~28-32 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-11-16 en py3.12.12 y py3.9.24 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del refutador X2 de SDKPY-503 — `test_503_tras_pagar.py` pasa de 121 a 127 tests; eran 867 en `dbedc78`, re-medido ese día en py3.12.12, py3.11.14 y py3.9.24 tras SDKPY-503 y las dos vueltas de su refutador — suma `test_503_tras_pagar.py`, 121 tests; eran 746 en `32a99ca`; eran 666 el 2026-09-30, re-medido en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 881 pasan, ~37-45 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-11-16 en py3.12.12 y py3.9.24 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del refutador X2 de SDKPY-503 y su auto-refutación — `test_503_tras_pagar.py` pasa de 121 a 135 tests; eran 873 en `52f02f7` y 867 en `dbedc78`, re-medido ese día en py3.12.12, py3.11.14 y py3.9.24 tras SDKPY-503 y las dos vueltas de su refutador — suma `test_503_tras_pagar.py`, 121 tests; eran 746 en `32a99ca`; eran 666 el 2026-09-30, re-medido en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -455,7 +455,7 @@ levantando siempre; esto cambia QUÉ dicen y qué pasa al volver a llamarlas.
     rompía R5 en las gratis. Mutación D1.
 
 **Ronda 1 del refutador X2** (sobre `dbedc78`, MERGEABLE CON RONDA: 0 P1, 1 P2,
-8 P3; sin cambios en `src/`):
+8 P3; la ronda en sí no cambia `src/`, el punto 15, de su auto-refutación, sí):
 
 12. 🔴 **`RecursionError` también en un >= 400 pagado** (P2-1). `_server_fields`
     y `_server_reason` leen el mismo cuerpo que `_json`, y hasta esta ronda sólo
@@ -465,8 +465,12 @@ levantando siempre; esto cambia QUÉ dicen y qué pasa al volver a llamarlas.
 13. 🔴 **El lock de `_pending` no es decorativo** (P3-3). `_forget_pending` es
     «mirar y después borrar», y una purga en otro hilo cabe entre las dos: sin
     el lock, un 200 PAGADO termina en `KeyError`, que no es un `DescribeError`
-    y sale sin `payment_sent` (medido, no supuesto). Un método nuevo que toque
-    `_pending` lo hace con el lock: un test lo exige operación por operación.
+    y sale sin `payment_sent` (medido, no supuesto). Lo medido exige un pedido
+    pagado que vuelva pasado `validBefore` + 15 s; por lectura del código, sin
+    medir, dos reenvíos superpuestos del mismo header que vuelven los dos con
+    200 hacen el mismo `get`/`del` doble sin reloj. Un método nuevo que toque
+    `_pending` lo hace con el lock: un test lo exige operación por operación, y
+    acepta un `RLock` (le pregunta `_is_owned()`; la mutación Y7 queda VERDE).
     ⚠️ Se deja escrito: el cuerpo del PR lo descartaba con «bajo el GIL no
     afecta la plata», y era falso. Mutaciones X5, L1–L6.
 14. ⚠️ **La paridad, medida contra el gemelo en `b8768b9`** (su PR #8), para
@@ -475,14 +479,24 @@ levantando siempre; esto cambia QUÉ dicen y qué pasa al volver a llamarlas.
     olvidan. Difieren en dos cosas, y ninguna se alineó de un solo lado: el TS
     **nunca suelta por reloj** (la salida es `forgetAuthorization(error)`), y
     llama `reconcile` a todo 402 fuera de la lista, todo otro 4xx y todo 3xx
-    (acá, `same-header`). 🔴 El reloj es de plata: describe.net repone una
+    (acá, `same-header`; en los dos, un `payment_required` en un REENVÍO es
+    `same-header`, `errors.ts:406`). 🔴 El reloj es de plata: describe.net repone una
     lectura liquidada desde su recibo durante `min(1800, max(300, (verify +
     settle) × 3))` s (`describenet/paywall.py:1289-1294`), sin mirar el
     `validBefore`. Con el payer de `uvd-x402-sdk` Python (3600 s,
     `client.py:3529` de 0.114.0) este SDK suelta después de esa ventana; con
     un payer que firme por menos de la ventana − 15 s, compra dos veces una
     lectura que el servidor reponía gratis (medido: validez 60 s → 1 firma a
-    +74 s, 2 a +76 s). Es una decisión de c0der para los dos SDK.
+    +74 s, 2 a +76 s). Es una decisión de c0der para los dos SDK; mientras
+    tanto, el README y el CHANGELOG avisan la precondición.
+15. 🔴 **Un 200 pagado con JSON VÁLIDO de forma inesperada sale marcado**
+    (auto-refutación de la ronda, P2-a; ya estaba en 0.7.0). Los tres parsers
+    pagos atrapaban sólo `KeyError`/`TypeError`/`ValueError`: `per_chain`,
+    `facets` o `points` como lista (`AttributeError`) y `1e400` o un entero de
+    401 dígitos (`OverflowError`) escapaban del tramo pagado sin
+    `payment_sent`. Las dos clases entraron SÓLO en `parse_breakdown`,
+    `parse_agent_reputation` y `parse_history`; en los parsers gratis es la
+    fila aparte del P3-8. Mutaciones PA1–PA6.
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
@@ -706,7 +720,7 @@ docstrings:
 | **ES.** 🔴 `pypa-mirror/gh-action-pypi-publish@` el mismo SHA (R7, otro repo con el mismo formato) | **1 rojo**: el del job con id-token, que fija sus dos `uses:` exactos. El de SHA queda VERDE: sólo mira el formato |
 | **ET.** `twine` vuelve a correr ANTES de `upload-artifact` (P3-2 deshecho) | **1 rojo**: `test_twine_corre_despues_de_subir_el_artefacto` |
 | **EU.** 🔴 un `run:` en el job que tiene el id-token | **1 rojo**: el del job con id-token. Cualquier paso de ese job puede pedir el token OIDC |
-| **M0-503.** 🔴 el `src/` entero de `32a99ca` (0.7.0) con sólo las tres constantes `RESEND_*` agregadas (SDKPY-503) — 2026-11-16. ⚠️ Se llamaba **M0**, el mismo nombre que la de `names/` de más arriba (ronda 1 del refutador X2, P3-4) | **128 rojos**: los 127 de `test_503_tras_pagar.py` (0 verdes) y el 409 invertido de `test_r6_pago_x402.py`. ⚠️ Decía «103: los 102 de entonces»; X2 midió 122 en `dbedc78`, antes de los 6 tests de su ronda |
+| **M0-503.** 🔴 el `src/` entero de `32a99ca` (0.7.0) con sólo las tres constantes `RESEND_*` agregadas (SDKPY-503) — 2026-11-16. ⚠️ Se llamaba **M0**, el mismo nombre que la de `names/` de más arriba (ronda 1 del refutador X2, P3-4) | **136 rojos**: los 135 de `test_503_tras_pagar.py` (0 verdes) y el 409 invertido de `test_r6_pago_x402.py`. ⚠️ Decía «103: los 102 de entonces»; X2 midió 122 en `dbedc78`, antes de los 14 tests de su ronda |
 | **R1.** 🔴 sin re-chequeo antes de firmar (ronda 1 del refutador, P1-a) | **1 rojo**: `test_dos_llamadas_a_la_vez_no_pierden_la_autorizacion_que_recibio_el_503` |
 | **R2.** 🔴 la segunda firma pisa a la primera (`[clave] = nuevo` en vez de `setdefault`) | **2 rojos**: `test_si_dos_firmaron_a_la_vez_gana_la_primera_y_la_otra_nunca_sale` y `test_toda_operacion_sobre_pending_toma_el_lock` (no ve el `setdefault`). El de la carrera queda VERDE: el re-chequeo lo tapa, y por eso hay dos tests |
 | **R3.** olvidar por clave, sin identidad | **4 rojos**: el de R2, los dos de `test_la_respuesta_tardia_de_una_llamada_no_borra_la_entrada_que_dejo_otra` y `test_una_purga_en_otro_hilo_no_rompe_el_200_pagado_que_se_esta_olvidando`. ⚠️ Decía «1, el mismo de R2»; X2 midió 3 en `dbedc78` (P3-4) |
@@ -718,7 +732,7 @@ docstrings:
 | **D1.** sin el `except httpx.DecodingError` de `_request` | **3 rojos**: el gzip roto pagado (200 y 503) y el de `wallet()` con `fail_open=True` |
 | **M1.** 🔴 la lista blanca ampliada a cualquier 402 con código | **10 rojos**: el `FACILITATOR_ERROR` y el `PAYMENT_SETTLEMENT_FAILED` de punta a punta, y los de la clasificación exacta |
 | **M2.** comparar el `error` sin mayúsculas | **2 rojos**: `payment_verification_failed` y `PAYMENT_REQUIRED` |
-| **M3.** 🔴 sin reenvío (`if clave in self._pending:` → `if False:`, el bug de 0.7.0) | **35 rojos**: los 15 casos que no son de la lista blanca firman 2, y los del ciclo de vida del header. ⚠️ Decía 21 |
+| **M3.** 🔴 sin reenvío (`if clave in self._pending:` → `if False:`, el bug de 0.7.0) | **41 rojos**: los 15 casos que no son de la lista blanca firman 2, y los del ciclo de vida del header. ⚠️ Decía 21 |
 | **M4.** un 409 olvida el header | **3 rojos**: los dos 409 y el `[409-reconcile]` del JSON anidado sin fin. ⚠️ Decía 2 |
 | **M5.** 🔴 sin `_scrub_frames` | **12 rojos**: los 10 casos de `test_el_header_no_sale_por_la_excepcion_ni_por_su_traceback`, el `KeyboardInterrupt` y la causa de httpx. ⚠️ Decía 9 |
 | **M6.** el header como atributo de la excepción | **10 rojos**: los mismos 10 (`vars(exc)`, `pickle.dumps`). ⚠️ Decía 9 |
@@ -726,7 +740,7 @@ docstrings:
 | **M9.** el header nunca vence | **2 rojos**: a `validBefore` + 15 s no firmaba, y el del lock (la purga no borra la vencida) |
 | **M10.** `payment_required` en un reenvío deja firmar | **3 rojos**: en un reenvío, tras un timeout y superpuesto. ⚠️ Decía 1 |
 | **M11.** vuelve el texto viejo en la rama de no-firmar | **15 rojos**, incluido el que cuenta las apariciones de la frase en `src/` |
-| **M14.** pedir otro 402 antes de reenviar | **34 rojos**: el `Guion` recibe una request de más. ⚠️ Decía 21 |
+| **M14.** pedir otro 402 antes de reenviar | **40 rojos**: el `Guion` recibe una request de más. ⚠️ Decía 21 |
 | **M27.** limpiar frames sin la cadena `__cause__` | **5 rojos**: timeout, socket muerto, 200 ilegible y protocolo roto de `test_el_header_no_sale_…` — los frames de httpx guardan el header — y la causa de httpx. ⚠️ Decía 3 |
 | **M29.** un 409 deja firmar otra | **6 rojos**: los dos 409 de punta a punta, dos de la clasificación exacta, el 409 del JSON anidado y el 409 invertido de `test_r6_pago_x402.py` |
 | **X1.** 🔴 `_server_fields` atrapa sólo `ValueError` (ronda 1 del refutador X2, P2-1; sobrevivía con los 144 de pago verdes) | **3 rojos**: `test_un_error_pagado_con_JSON_anidado_sin_fin_sale_marcado_y_se_reenvia[503-same-header]`, `[409-reconcile]` y `[402-same-header]` («salió RecursionError después de pagar, sin `payment_sent`») |
@@ -737,10 +751,15 @@ docstrings:
 | **X5.** 🔴 el lock de `_pending` cambiado por `contextlib.nullcontext()` (P3-3; sobrevivía) | **2 rojos**: `test_una_purga_en_otro_hilo_no_rompe_el_200_pagado_que_se_esta_olvidando` (`KeyError` sobre la URL del recurso DESPUÉS de un 200 pagado) y `test_toda_operacion_sobre_pending_toma_el_lock` |
 | **L1, L2.** sin lock en `_forget_pending` o en `_purge_dead_pending` | **2 rojos** cada una: los dos de X5 — el intercalado del `get` y el `del` |
 | **L3–L6.** sin lock en `_store_pending`, `_has_pending`, el `get` de `_send_pending` o `close()` | **1 rojo** cada una: `test_toda_operacion_sobre_pending_toma_el_lock`. El de la purga queda VERDE: esas cuatro no son «mirar y después borrar» |
+| **Y7.** el lock pasa a `threading.RLock()` (CORRECTO: se mide que el test no dé un rojo falso; del auto-refutador) | **0 rojos**, a propósito. Antes de preguntarle `_is_owned()` daba 1 rojo falso (`'_thread.RLock' object has no attribute 'locked'`) |
+| **Y4.** `retry_after_seconds` del cuerpo acepta un float (del auto-refutador; sobrevivía) | **1 rojo**: `test_retry_after_seconds_cabecera_cuerpo_y_techo[None-5.5-None]` |
+| **Y5.** `_server_fields` le pasa `{}` a `_retry_after_seconds` en vez del cuerpo (sobrevivía: la tabla prueba la función, no la llamada) | **1 rojo**: `test_un_retry_after_sin_cabecera_llega_del_cuerpo_de_punta_a_punta` |
+| **PA1–PA3.** 🔴 sin `AttributeError` en `parse_breakdown`, `parse_agent_reputation` o `parse_history` (P2-a del auto-refutador) | **1 rojo** cada una: `test_un_200_pagado_con_JSON_valido_de_forma_inesperada_sale_marcado[wallet_breakdown-AttributeError]`, `[agent-AttributeError]` y `[wallet_history-AttributeError]` |
+| **PA4–PA6.** 🔴 sin `OverflowError` en esos tres | **1 rojo** cada una: los `[…-OverflowError]` del mismo test |
 
 Las de SDKPY-503 (M1–M29 con M12a/b, R1–R15 de la ronda 1 del refutador,
-R2k, R2l, R4b y D1 de la vuelta 2, y X1–X5, X4b y L1–L6 de la ronda 1 del
-refutador X2),
+R2k, R2l, R4b y D1 de la vuelta 2, y X1–X5, X4b, L1–L6, Y4, Y5, Y7 y PA1–PA6
+de la ronda 1 del refutador X2),
 con su `viejo`/`nuevo`/comando, van en JSON en el cuerpo del PR; las que no están
 arriba también caen, cada una en su test con nombre. ⚠️ Tres mutantes del
 refutador sobrevivían a la primera versión (R7, R8, R9: `presented` en el
@@ -748,9 +767,9 @@ refutador sobrevivían a la primera versión (R7, R8, R9: `presented` en el
 cada uno.
 
 **Las cifras de las filas de SDKPY-503 se re-midieron el 2026-11-16 sobre
-`46384dc`** (la ronda 1 del refutador X2), corriendo `tests/test_503_tras_pagar.py`
-y `tests/test_r6_pago_x402.py` (150 tests) con cada mutante: las 49 del JSON
-caen y en cada una cae el test que cita. Donde decía otra cifra se deja la vieja
+`8ee24d1`** (la ronda 1 del refutador X2 y su auto-refutación), corriendo
+`tests/test_503_tras_pagar.py` y `tests/test_r6_pago_x402.py` (158 tests) con
+cada mutante: las 49 del JSON caen y en cada una cae el test que cita. Donde decía otra cifra se deja la vieja
 al lado: casi todas crecieron porque los tests nuevos también las ven, y R3, R4,
 R7 y M0 ya estaban mal en `dbedc78` (P3-4 del refutador).
 
