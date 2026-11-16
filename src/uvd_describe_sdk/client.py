@@ -216,6 +216,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 import traceback
 from dataclasses import replace
@@ -503,6 +504,14 @@ def _scrub_frames(exc: BaseException) -> None:
         vistas.add(id(actual))
         if actual.__traceback__ is not None:
             traceback.clear_frames(actual.__traceback__)
+        if isinstance(actual, httpx.HTTPError):
+            # 🔴 Ronda 1 del refutador, P1-b: la excepción de httpx encadenada en
+            # `__cause__` guarda el `Request` entero, headers incluidos, y
+            # `repr(exc.__cause__.request.headers)` imprimía el `X-PAYMENT`
+            # (httpx sólo tapa `authorization`). `_request` es el atributo detrás
+            # de `HTTPError.request` (httpx 0.24-0.28); si cambia de nombre, el
+            # test que recorre `vars()` de toda la cadena se pone rojo.
+            actual._request = None
         for encadenada in (actual.__cause__, actual.__context__):
             if encadenada is not None:
                 pendientes.append(encadenada)
@@ -660,7 +669,18 @@ class DescribeClient:
         )
         #: URL exacta del recurso (la que arma httpx, query incluida) → el
         #: `X-PAYMENT` firmado que todavía puede reenviarse. Ver `_paid`.
+        #: Sin tope a propósito: desalojar una entrada viva es olvidar un header
+        #: que todavía puede ejecutarse, o sea habilitar la segunda firma. Crece
+        #: una entrada por recurso con un fallo posterior a la firma, y se vacía
+        #: al vencer; sólo un payer cuyo `validBefore` no se puede leer la deja
+        #: hasta `close()`.
         self._pending: Dict[str, _PendingAuthorization] = {}
+        #: 🔴 Guarda las operaciones sobre `_pending` (ronda 1 del refutador,
+        #: P1-a: dos hilos que compartían el cliente se pisaban la entrada y uno
+        #: terminaba firmando una TERCERA autorización para una compra que la
+        #: segunda pudo haber pagado). Nunca se tiene tomado mientras se firma o
+        #: se manda: sólo alrededor de leer, guardar y borrar.
+        self._pending_lock = threading.Lock()
 
     #: El reloj del `validBefore`. Atributo de clase para que un test lo
     #: reemplace en UNA instancia sin tocar `time.time` del proceso.
@@ -677,8 +697,14 @@ class DescribeClient:
         instead of signing another (see `_paid`). Closing drops them: whoever
         closes a client after a 503 and builds a new one has chosen, in their own
         code, to be able to sign again before the old one expires.
+
+        ⚠️ That includes leaving a `with DescribeClient(...)` block: an `except`
+        written OUTSIDE the block runs after `close()`. To be able to re-send
+        after a failure, keep the client alive (one per process, shared) and
+        catch inside the block.
         """
-        self._pending.clear()
+        with self._pending_lock:
+            self._pending.clear()
         self._http.close()
 
     def __enter__(self) -> DescribeClient:
@@ -827,7 +853,10 @@ class DescribeClient:
     def _json(response: httpx.Response, path: str) -> Any:
         try:
             return response.json()
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
+            # `RecursionError` (2026-11-16, refutador de SDKPY-503, P2-3): un
+            # cuerpo con 200.000 `[` anidados no es un `ValueError`, y en un 200
+            # PAGADO salía sin `payment_sent`. Es protocolo: no es JSON legible.
             raise DescribeUnparseable(f"GET {path} did not return JSON") from exc
 
     @staticmethod
@@ -1231,7 +1260,7 @@ class DescribeClient:
         """
         clave = self._resource_key(path, params)
         self._purge_dead_pending()
-        if clave in self._pending:
+        if self._has_pending(clave):
             # ══ REENVÍO: hay un header firmado que todavía puede ejecutarse ══════
             # Se va DIRECTO al pedido pagado con el MISMO header. Ni otro 402 (el
             # servidor acepta un header que matchee un `accepts[]` sin haber
@@ -1323,17 +1352,53 @@ class DescribeClient:
         # con `accepts[].amount`, esa función ya habría levantado `DoNotPayError`
         # sin firmar. O sea que acá el valor es el que se firmó, no una
         # aproximación. String y no float: es plata.
-        self._pending[clave] = _PendingAuthorization(
-            build_payment_header(
-                self._payer,
-                challenge,
+        #
+        # 🔴 DOS LLAMADAS AL MISMO RECURSO A LA VEZ (ronda 1 del refutador,
+        # P1-a). Mientras este hilo pedía el 402, otro pudo haber firmado y
+        # guardado el suyo: se vuelve a mirar ANTES de firmar, y si hay uno se
+        # reenvía ése. Y si los dos firmaron a la vez, `_store_pending` guarda el
+        # PRIMERO y descarta el segundo — que nunca salió del proceso, así que no
+        # puede ejecutarse — y este hilo manda el que quedó. Antes, el segundo
+        # pisaba al primero: uno de los dos se perdía con su plata quizás
+        # liquidada, y el reintento firmaba una tercera.
+        if self._has_pending(clave):
+            return self._paid_stretch(clave, path, params, parse)
+        self._store_pending(
+            clave,
+            _PendingAuthorization(
+                build_payment_header(
+                    self._payer,
+                    challenge,
+                    network=self._pay_network,
+                    treasury=self._treasury,
+                ),
+                amount_usd=_signed_amount(challenge),
                 network=self._pay_network,
-                treasury=self._treasury,
             ),
-            amount_usd=_signed_amount(challenge),
-            network=self._pay_network,
         )
         return self._paid_stretch(clave, path, params, parse)
+
+    def _has_pending(self, clave: str) -> bool:
+        with self._pending_lock:
+            return clave in self._pending
+
+    def _store_pending(self, clave: str, nuevo: _PendingAuthorization) -> None:
+        """Keep `nuevo` for `clave` UNLESS one is already there: the first one wins.
+
+        The loser was signed but never sent, so it cannot execute anywhere.
+        """
+        with self._pending_lock:
+            self._pending.setdefault(clave, nuevo)
+
+    def _forget_pending(self, clave: str, pendiente: _PendingAuthorization) -> None:
+        """Drop `clave` only if it still holds THIS authorization (by identity).
+
+        Another call may have answered the same resource in between; what that
+        one left there is not this one's to drop.
+        """
+        with self._pending_lock:
+            if self._pending.get(clave) is pendiente:
+                del self._pending[clave]
 
     def _resource_key(self, path: str, params: Optional[Dict[str, Any]]) -> str:
         """The resource a pending header belongs to: the URL httpx sends.
@@ -1354,15 +1419,15 @@ class DescribeClient:
 
         Dead = past `validBefore` + `SIGN_AGAIN_MARGIN_S`. One with no readable
         `validBefore` never dies here: it goes only on its answer or `close()`.
-        `list(...)` first so another thread inserting cannot break the walk.
         """
         ahora = self._clock()
-        for clave, pendiente in list(self._pending.items()):
-            if (
-                pendiente.valid_before is not None
-                and ahora >= pendiente.valid_before + SIGN_AGAIN_MARGIN_S
-            ):
-                self._pending.pop(clave, None)
+        with self._pending_lock:
+            for clave, pendiente in list(self._pending.items()):
+                if (
+                    pendiente.valid_before is not None
+                    and ahora >= pendiente.valid_before + SIGN_AGAIN_MARGIN_S
+                ):
+                    del self._pending[clave]
 
     def _paid_stretch(
         self,
@@ -1397,8 +1462,19 @@ class DescribeClient:
         Here the header DOES live in locals (`pendiente`, the request headers,
         the response), and that is why this is its own method: it finishes
         before anyone can keep its frame. See `_paid_stretch`.
+
+        The entry is read ONCE and that object is the one sent, marked and, on a
+        terminal answer, forgotten — by identity, never by key alone.
         """
-        pendiente = self._pending[clave]
+        with self._pending_lock:
+            pendiente = self._pending.get(clave)
+        if pendiente is None:
+            # Otra llamada al mismo recurso lo resolvió (un 2xx o un 402 de la
+            # lista blanca) entre que se guardó y este envío: no queda nada que
+            # reenviar, y lo que sigue es una compra nueva, con su propio 402.
+            # Fuera del `try` de abajo a propósito: una excepción de esa compra
+            # ya sale marcada por SU `_send_pending`, y no se marca dos veces.
+            return self._paid(path, parse, params=params)
         presentada = pendiente.presented
         recuperacion = RESEND_SAME_HEADER
         servidor: Dict[str, Any] = {}
@@ -1467,10 +1543,9 @@ class DescribeClient:
                         "signs a new authorization."
                     )
                 else:
-                    codigo = servidor["server_error"]
-                    mensaje = f"GET {path} → HTTP {paid.status_code} AFTER paying" + (
-                        f" (error={codigo})." if codigo else "."
-                    )
+                    # Sin `(error=…)` acá: `server_reason` ya lo agrega, con el
+                    # `message` del cuerpo, y repetirlo sólo alarga la línea.
+                    mensaje = f"GET {path} → HTTP {paid.status_code} AFTER paying."
                 raise DescribeHTTPError(
                     mensaje,
                     status_code=paid.status_code,
@@ -1479,7 +1554,7 @@ class DescribeClient:
             pagado = parse(self._json(paid, path), self._receipt(paid))
             # Llegó y se leyó: el header ya cumplió. Se olvida ANTES de observar,
             # para que ni un `on_error` que explote lo deje vivo.
-            self._pending.pop(clave, None)
+            self._forget_pending(clave, pendiente)
             # Observar DESPUÉS de parsear y ANTES de devolver: si el observador
             # de quien llama explota, `_notify` ya lo aísla — pero además nada de
             # esto puede impedir que la respuesta PAGADA llegue a sus manos.
@@ -1487,7 +1562,7 @@ class DescribeClient:
             return pagado
         except DescribeError as exc:
             if recuperacion == RESEND_NEW_CHALLENGE_OK:
-                self._pending.pop(clave, None)
+                self._forget_pending(clave, pendiente)
             mark_payment_sent(
                 exc,
                 amount_usd=pendiente.amount_usd,

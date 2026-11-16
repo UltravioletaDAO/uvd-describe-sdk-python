@@ -735,6 +735,10 @@ def mark_payment_sent(
             ", and the server refused it BEFORE moving anything: signing again is "
             "safe here, and this client already dropped the old one."
         )
+        # Sin la frase del recibo: «no proof either way» contradiría lo de
+        # arriba, y esta rama sólo existe sin recibo declarado (el cliente no la
+        # elige si llegó un `X-Payment-Receipt`).
+        prueba = ""
         consejo = ""
     else:
         estado = (
@@ -753,14 +757,21 @@ def mark_payment_sent(
             if retry_after_seconds is not None
             else "respect `Retry-After` when the server sends one"
         )
+        guardado = (
+            "until its `validBefore` has passed"
+            if valid_before is not None
+            else "until the client is closed (its `validBefore` could not be read)"
+        )
         consejo = (
             f"{cerrada} Do NOT sign another authorization: call this method again "
-            "for the same resource — this client re-sends the SAME `X-PAYMENT`, "
-            "which it holds in memory until its `validBefore`, and the same "
-            f"authorization never charges twice; {espera}. Before giving up, "
-            "reconcile with `GET /payments/status` (free): `unpaid` there is NOT "
-            "enough to sign another. This client signs a new one for this "
-            "resource only once the old one is past its `validBefore`."
+            "for the same resource ON THIS SAME CLIENT, while it stays open — it "
+            f"re-sends the SAME `X-PAYMENT`, which it keeps in memory {guardado}, "
+            "and the same authorization never charges twice; a new client, or "
+            "leaving a `with` block, forgets it and would sign a new one. "
+            f"{espera[0].upper()}{espera[1:]}. Before giving up, reconcile with "
+            "`GET /payments/status` (free): `unpaid` there is NOT enough to sign "
+            "another. This client signs a new one for this resource only once the "
+            "old one can no longer execute."
         )
     base = str(exc.args[0]) if exc.args else str(exc)
     exc.args = (

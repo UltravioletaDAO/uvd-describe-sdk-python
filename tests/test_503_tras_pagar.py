@@ -379,12 +379,16 @@ def test_dos_llamadas_al_mismo_recurso_firman_una_sola_vez_salvo_la_lista_blanca
     if caso.resend == RESEND_NEW_CHALLENGE_OK:
         assert "ask for a new challenge" in mensaje
         assert "Do NOT sign another" not in mensaje
+        # El refutador (ronda 1, P3): «refused it BEFORE moving anything» seguido
+        # de «no proof either way» se contradecía en la misma línea.
+        assert "no proof either way" not in mensaje
         assert payer.firmas == 2
         assert pagados == payer.headers and pagados[0] != pagados[1]
         assert segunda.receipt is not None and segunda.receipt.reused is False
     else:
         assert "new challenge" not in mensaje
         assert "Do NOT sign another authorization" in mensaje
+        assert "ON THIS SAME CLIENT, while it stays open" in mensaje
         assert "GET /payments/status" in mensaje
         assert "`unpaid` there is NOT enough" in mensaje
         assert payer.firmas == 1
@@ -408,7 +412,7 @@ def test_los_503_traen_lo_que_dijo_el_servidor_como_dato(caso: Caso) -> None:
     assert exc.payment["retryable"] is True
     assert "MISMO header" in exc.payment["next_action"]
     assert exc.payment["valid_before"] == int(AHORA) + VALIDEZ_S
-    assert "wait the 5 s of `Retry-After` first" in str(exc)
+    assert "Wait the 5 s of `Retry-After` first" in str(exc)
 
 
 def test_el_next_action_del_servidor_viaja_pero_resend_manda() -> None:
@@ -506,7 +510,11 @@ _FUGAS = [c for c in CASOS if c.nombre in {
     "503-facilitator_unavailable", "409-authorization_spent", "402-FACILITATOR_ERROR",
     "402-PAYMENT_VERIFICATION_FAILED", "500-con-recibo", "timeout", "socket-muerto",
     "200-ilegible",
-}] + [Caso("503-con-eco-del-header", _eco(503), RESEND_SAME_HEADER)]
+}] + [
+    Caso("503-con-eco-del-header", _eco(503), RESEND_SAME_HEADER),
+    Caso("protocolo-roto", _lanza(httpx.RemoteProtocolError("server disconnected")),
+         RESEND_SAME_HEADER, excepcion=DescribeUnreachable),
+]
 
 
 def _contiene(valor: Any, aguja: str, profundidad: int = 0) -> bool:
@@ -539,9 +547,9 @@ def _contiene(valor: Any, aguja: str, profundidad: int = 0) -> bool:
     return False
 
 
-def _frames(exc: BaseException) -> List[Any]:
-    """Todos los frames del traceback de `exc` y de su cadena (`__cause__`/`__context__`)."""
-    frames: List[Any] = []
+def _cadena(exc: BaseException) -> List[BaseException]:
+    """`exc` y toda su cadena (`__cause__`/`__context__`), sin repetir."""
+    cadena: List[BaseException] = []
     vistas: set = set()
     pendientes: List[BaseException] = [exc]
     while pendientes:
@@ -549,11 +557,19 @@ def _frames(exc: BaseException) -> List[Any]:
         if id(e) in vistas:
             continue
         vistas.add(id(e))
+        cadena.append(e)
+        pendientes.extend(x for x in (e.__cause__, e.__context__) if x is not None)
+    return cadena
+
+
+def _frames(exc: BaseException) -> List[Any]:
+    """Todos los frames del traceback de `exc` y de su cadena (`__cause__`/`__context__`)."""
+    frames: List[Any] = []
+    for e in _cadena(exc):
         tb = e.__traceback__
         while tb is not None:
             frames.append(tb.tb_frame)
             tb = tb.tb_next
-        pendientes.extend(x for x in (e.__cause__, e.__context__) if x is not None)
     return frames
 
 
@@ -586,6 +602,17 @@ def test_el_header_no_sale_por_la_excepcion_ni_por_su_traceback(caso: Caso) -> N
     )
     assert "_send_pending" in formateado or "_paid" in formateado  # el traceback está entero
     assert header not in formateado
+
+    # 🔴 Ronda 1 del refutador, P1-b: la excepción de httpx en `__cause__`
+    # guardaba el `Request` entero, y `exc.__cause__.request.headers` tenía el
+    # header. Se mira cada eslabón: sus atributos, su repr y su pickle.
+    for eslabon in _cadena(exc):
+        assert header not in repr(eslabon)
+        for nombre, valor in vars(eslabon).items():
+            assert not _contiene(valor, header), (
+                f"el header está en `{type(eslabon).__name__}.{nombre}`"
+            )
+        assert header.encode("ascii") not in pickle.dumps(eslabon)
 
     frames = _frames(exc)
     assert len(frames) >= 3
@@ -931,3 +958,221 @@ def test_ask_for_a_new_challenge_aparece_UNA_vez_en_src_y_en_la_rama_de_la_lista
     lineas = Path(modulo_cliente.__file__).read_text(encoding="utf-8").splitlines()
     contexto = "\n".join(lineas[max(0, numero - 8) : numero])
     assert "if recuperacion == RESEND_NEW_CHALLENGE_OK:" in contexto
+
+
+# ---------------------------------------------------------------------------
+# 8. Ronda 1 del refutador externo (2026-11-16): lo que sobrevivía o faltaba
+# ---------------------------------------------------------------------------
+
+
+def test_dos_llamadas_a_la_vez_no_pierden_la_autorizacion_que_recibio_el_503() -> None:
+    """🔴 P1-a. Dos llamadas al MISMO recurso se cruzan: B corre entera MIENTRAS A
+    espera su 402 (el doble la dispara desde adentro del transporte, así que el
+    cruce es determinista y en un solo hilo; el lock nunca se tiene durante la
+    E/S). B firma #1, manda, recibe 503. Después A recibe su 402.
+
+    Antes del arreglo A firmaba #2 y PISABA la entrada de B; el 200 de A la
+    borraba, y la siguiente llamada de B firmaba #3 con #1 quizás liquidada: tres
+    autorizaciones mandadas para dos lecturas. Ahora A ve la de B antes de firmar
+    y la reenvía: cada header MANDADO pagó, a lo sumo, una lectura."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    caja: Dict[str, Any] = {}
+
+    def a_pide_el_402_y_b_corre_entera(request: httpx.Request) -> httpx.Response:
+        assert "X-PAYMENT" not in request.headers
+        caja["b"] = _falla(caja["c"])  # B: 402 → firma #1 → 503
+        return json_response(CHALLENGE_402, status=402)
+
+    no_hay = _r(503, _503("facilitator_unavailable"), _RA)
+    guion = Guion(
+        a_pide_el_402_y_b_corre_entera,  # A, sin header
+        sin_header_402, pagado(no_hay),  # B, adentro: 402 y 503 con #1
+        pagado(ok_reusado),  # A: reenvía #1 (no firma) → 200
+        sin_header_402, pagado(ok_nuevo),  # B otra vez: #1 ya resolvió → compra nueva
+    )
+    with cliente(guion, payer, reloj) as c:
+        caja["c"] = c
+        c.wallet_breakdown(WALLET)  # A
+        c.wallet_breakdown(WALLET)  # B, de nuevo
+    guion.consumido()
+    assert caja["b"].payment["resend"] == RESEND_SAME_HEADER
+    enviados = guion.pagados()
+    assert enviados == [payer.headers[0], payer.headers[0], payer.headers[1]]
+    assert payer.firmas == 2  # A nunca firmó: reusó la de B
+
+
+def test_si_dos_firmaron_a_la_vez_gana_la_primera_y_la_otra_nunca_sale() -> None:
+    """El otro lado de P1-a: el re-chequeo antes de firmar no cierra la carrera
+    entre dos hilos que firman a la vez. `_store_pending` guarda la PRIMERA y la
+    segunda —que no salió del proceso, así que no puede ejecutarse— se descarta."""
+    reloj = Reloj()
+    c = DescribeClient(transport=httpx.MockTransport(Guion()), jitter=0)
+    c._clock = reloj  # type: ignore[method-assign]
+    payer = PayerConSobre(reloj)
+    clave = c._resource_key("/x", None)
+    primera = modulo_cliente._PendingAuthorization(
+        payer.create_authorization("0x", Decimal("0.01")), amount_usd="0.01", network="base"
+    )
+    segunda = modulo_cliente._PendingAuthorization(
+        payer.create_authorization("0x", Decimal("0.01")), amount_usd="0.01", network="base"
+    )
+    c._store_pending(clave, primera)
+    c._store_pending(clave, segunda)
+    assert c._pending[clave] is primera
+    c._forget_pending(clave, segunda)  # no es la suya: no la borra
+    assert c._pending[clave] is primera
+    c._forget_pending(clave, primera)
+    assert clave not in c._pending
+    c.close()
+
+
+def test_si_otra_llamada_resolvio_la_entrada_antes_del_envio_es_una_compra_nueva() -> None:
+    """La rama defensiva de `_send_pending`: entre guardar el header y mandarlo,
+    otra llamada lo resolvió (un 2xx) y lo borró. No queda nada que reenviar: lo
+    que sigue es una compra nueva, con su 402 y su firma, y no un `KeyError`."""
+    from uvd_describe_sdk.models import parse_breakdown
+
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    guion = Guion(sin_header_402, pagado(ok_nuevo))
+    with cliente(guion, payer, reloj) as c:
+        ruta = "/reputation/wallet/" + WALLET
+        br = c._paid_stretch(c._resource_key(ruta, None), ruta, None, parse_breakdown)
+    guion.consumido()
+    assert br.receipt is not None and payer.firmas == 1
+
+
+def test_un_payment_required_tras_un_TIMEOUT_no_deja_firmar() -> None:
+    """Del refutador (su M1 sobrevivía): la 1ª presentación muere por timeout —pudo
+    llegar y liquidarse— y el reenvío recibe un 402 `payment_required` (un
+    intermediario que se comió el header). `presented` tiene que valer True
+    también cuando la 1ª salida terminó en excepción: por eso va en un `finally`."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    guion = Guion(
+        sin_header_402, pagado(_lanza(httpx.ReadTimeout("settle lento"))),
+        pagado(_r(402, CHALLENGE_402)),
+        pagado(ok_reusado),
+    )
+    with cliente(guion, payer, reloj) as c:
+        _falla(c)
+        exc = _falla(c)
+        c.wallet_breakdown(WALLET)
+    guion.consumido()
+    assert exc.payment is not None and exc.payment["resend"] == RESEND_SAME_HEADER
+    assert payer.firmas == 1
+
+
+def test_un_402_de_la_lista_con_recibo_PENDING_no_deja_firmar() -> None:
+    """Del refutador (su M3 sobrevivía): `X-Payment-Receipt: pending` dice que el
+    vendedor cobró y el hash no llegó; de punta a punta, no sólo en la función."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    guion = Guion(
+        sin_header_402,
+        pagado(_r(402, _402("PAYMENT_VERIFICATION_FAILED", "x"),
+                  {"X-Payment-Receipt": "pending"})),
+        pagado(ok_reusado),
+    )
+    with cliente(guion, payer, reloj) as c:
+        exc = _falla(c)
+        c.wallet_breakdown(WALLET)
+    guion.consumido()
+    assert exc.payment is not None and exc.payment["resend"] == RESEND_SAME_HEADER
+    assert payer.firmas == 1
+
+
+class _Corte(KeyboardInterrupt):
+    pass
+
+
+def test_un_KeyboardInterrupt_a_mitad_del_pedido_no_deja_el_header_en_los_frames() -> None:
+    """Del refutador (su M2 sobrevivía): un Ctrl-C —o cualquier `BaseException`
+    que no es `DescribeError`— adentro del transporte. El frame de `_request`
+    tiene `headers={'X-PAYMENT': …}`, y `_paid_stretch` limpia con `except
+    BaseException` justamente por esto. El header queda pendiente."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+
+    def corta(_r: httpx.Request) -> httpx.Response:
+        raise _Corte()
+
+    guion = Guion(sin_header_402, pagado(corta))
+    capturada: Any = None
+    with cliente(guion, payer, reloj) as c:
+        try:
+            c.wallet_breakdown(WALLET)
+        except _Corte as e:
+            capturada = e
+        assert len(c._pending) == 1
+    guion.consumido()
+    assert capturada is not None
+    formateado = "".join(
+        traceback.TracebackException.from_exception(capturada, capture_locals=True).format()
+    )
+    assert "_request" in formateado
+    assert payer.headers[0] not in formateado
+
+
+def test_la_clave_del_recurso_es_exacta_con_mayusculas() -> None:
+    """El refutador (P3): «exacta, con mayúsculas» no tenía test. `…/0x97CD…` y
+    `…/0x97cd…` son dos compras para el servidor (`canonical_resource` no pliega
+    el path) y dos claves acá; y plegar rompería un id de Solana."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    no_hay = _r(503, _503("facilitator_unavailable"), _RA)
+    mayusculas = "0x97CD97CFE21799BACBF39D0A53469E5F82F30996"
+    guion = Guion(
+        sin_header_402, pagado(no_hay),  # WALLET: firma #1
+        sin_header_402, pagado(ok_nuevo),  # en mayúsculas: otra compra, #2
+        pagado(ok_reusado),  # WALLET otra vez: #1
+    )
+    with cliente(guion, payer, reloj) as c:
+        _falla(c)
+        c.wallet_breakdown(mayusculas)
+        c.wallet_breakdown(WALLET)
+    guion.consumido()
+    assert guion.pagados() == [payer.headers[0], payer.headers[1], payer.headers[0]]
+
+
+def test_un_header_valido_pasado_el_tope_no_se_decodifica() -> None:
+    """El refutador (P3): el caso `"A" * 16388` daba `None` también sin el tope.
+    Éste es un sobre VÁLIDO, con su `validBefore`, inflado pasado los 16 KiB: sin
+    el tope se leería."""
+    relleno = "x" * 13000
+    header = _b64({"relleno": relleno, "payload": {"authorization": {"validBefore": "42"}}})
+    assert len(header) > modulo_cliente._MAX_HEADER_LEIBLE
+    assert modulo_cliente._valid_before_of(header) is None
+    chico = _b64({"payload": {"authorization": {"validBefore": "42"}}})
+    assert modulo_cliente._valid_before_of(chico) == 42
+
+
+def test_un_200_pagado_con_JSON_anidado_sin_fin_sale_marcado_y_se_reenvia() -> None:
+    """El refutador (P2-3): 200.000 `[` en un 200 PAGADO escapaba como
+    `RecursionError`, sin `payment_sent`. Ahora es `DescribeUnparseable` marcada,
+    y la llamada siguiente reenvía el mismo header."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    guion = Guion(
+        sin_header_402, pagado(_r(200, b"[" * 200_000)),
+        pagado(ok_reusado),
+    )
+    with cliente(guion, payer, reloj) as c:
+        exc = _falla(c)
+        c.wallet_breakdown(WALLET)
+    guion.consumido()
+    assert isinstance(exc, DescribeUnparseable) and exc.payment_sent is True
+    assert exc.payment is not None and exc.payment["resend"] == RESEND_SAME_HEADER
+    assert payer.firmas == 1
+
+
+def test_el_mensaje_dice_que_no_se_puede_leer_el_valid_before_cuando_no_se_puede() -> None:
+    """El refutador (P3): «holds in memory until its `validBefore`» era falso con
+    un `validBefore` ilegible, que se guarda hasta `close()`."""
+    guion = Guion(sin_header_402, pagado(_r(503, _503("facilitator_unavailable"), _RA)))
+    with cliente(guion, PayerOpaco(), Reloj()) as c:
+        exc = _falla(c)
+    guion.consumido()
+    assert "until the client is closed (its `validBefore` could not be read)" in str(exc)
+    assert "until its `validBefore` has passed" not in str(exc)

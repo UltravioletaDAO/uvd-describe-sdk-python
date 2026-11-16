@@ -234,6 +234,12 @@ It never re-sends on its own, and the header is never in the exception (not in
 its text, `payment`, pickle or traceback locals). Up to 0.7.0 the message said
 the opposite and a second call signed a second authorization.
 
+⚠️ **The header lives in THAT client instance.** `close()` forgets it, and so
+does leaving a `with DescribeClient(...)` block — an `except` written outside the
+block runs after `close()`, and a new client would sign a new authorization. For
+metered routes, keep one long-lived client per process (it is safe to share
+between threads) and catch inside the block.
+
 ⚠️ **Known limit, and it is written down because it matters:**
 `payment_sent=True` proves the credential **left**, not that settlement happened.
 The latter is only proved if `payment["transaction_hash"]` comes back filled — that
