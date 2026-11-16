@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 860 pasan, ~28-32 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-11-16 en py3.12.12, py3.11.14 y py3.9.24 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras SDKPY-503 y su ronda 1 — suma `test_503_tras_pagar.py`, 114 tests; eran 746 en `32a99ca`; eran 666 el 2026-09-30, re-medido en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 867 pasan, ~28-32 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-11-16 en py3.12.12, py3.11.14 y py3.9.24 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras SDKPY-503 y las dos vueltas de su refutador — suma `test_503_tras_pagar.py`, 121 tests; eran 746 en `32a99ca`; eran 666 el 2026-09-30, re-medido en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -445,6 +445,14 @@ levantando siempre; esto cambia QUÉ dicen y qué pasa al volver a llamarlas.
    `httpx.HTTPError` (P1-b). Mutación R4.
 9. **El header vive en ESA instancia**: salir de un `with` la cierra y lo olvida
    (P2-1). El mensaje y el README lo dicen.
+10. 🔴 **`presented` se marca ANTES de mandar** (vuelta 2, V6): con dos envíos
+    superpuestos del mismo header, un `payment_required` al segundo no puede
+    leerse como primera presentación. Y los dos sitios que olvidan el header (el
+    2xx y la lista blanca) usan `_forget_pending`, por identidad: R2k y R2l lo
+    atan. Mutaciones M18, R7, R2k, R2l.
+11. **`httpx.DecodingError` es `DescribeUnparseable`** (vuelta 2, ya estaba en
+    0.7.0): un gzip roto cruzaba la frontera del módulo sin marca tras pagar y
+    rompía R5 en las gratis. Mutación D1.
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
@@ -674,6 +682,10 @@ docstrings:
 | **R3.** olvidar por clave, sin identidad | **1 rojo**: el mismo de R2 |
 | **R4.** 🔴 no soltar el `Request` de httpx en la cadena (P1-b) | **3 rojos**: timeout, socket muerto y protocolo roto |
 | **R8.** limpiar sólo `DescribeError` (M2 del refutador; sobrevivía) | **1 rojo**: el `KeyboardInterrupt` a mitad del pedido |
+| **R2k.** 🔴 tras un 2xx, `self._pending.pop(clave)` en vez de `_forget_pending` (vuelta 2; sobrevivía con 860 verdes) | **1 rojo**: `test_la_respuesta_tardia_de_una_llamada_no_borra_la_entrada_que_dejo_otra[200]` |
+| **R2l.** lo mismo tras un 402 de la lista blanca | **1 rojo**: el mismo test, `[PAYMENT_VERIFICATION_FAILED]` |
+| **R7.** `presented` marcado al VOLVER del envío (V6 de la vuelta 2) | **1 rojo**: `test_un_payment_required_a_un_reenvio_SUPERPUESTO_no_deja_firmar` |
+| **D1.** sin el `except httpx.DecodingError` de `_request` | **3 rojos**: el gzip roto pagado (200 y 503) y el de `wallet()` con `fail_open=True` |
 | **M1.** 🔴 la lista blanca ampliada a cualquier 402 con código | **10 rojos**: el `FACILITATOR_ERROR` y el `PAYMENT_SETTLEMENT_FAILED` de punta a punta, y los de la clasificación exacta |
 | **M2.** comparar el `error` sin mayúsculas | **2 rojos**: `payment_verification_failed` y `PAYMENT_REQUIRED` |
 | **M3.** 🔴 sin reenvío (`if clave in self._pending:` → `if False:`, el bug de 0.7.0) | **21 rojos**: todos los casos que no son de la lista blanca firman 2 |
@@ -688,7 +700,8 @@ docstrings:
 | **M27.** limpiar frames sin la cadena `__cause__` | **3 rojos**: timeout, socket muerto y 200 ilegible — los frames de httpx guardan el header |
 | **M29.** un 409 deja firmar otra | **5 rojos** |
 
-Las 45 de SDKPY-503 (M1–M29 con M12a/b, y R1–R15 de la ronda 1 del refutador),
+Las de SDKPY-503 (M1–M29 con M12a/b, R1–R15 de la ronda 1 del refutador, y R2k,
+R2l, R4b y D1 de la vuelta 2),
 con su `viejo`/`nuevo`/comando, van en JSON en el cuerpo del PR; las que no están
 arriba también caen, cada una en su test con nombre. ⚠️ Tres mutantes del
 refutador sobrevivían a la primera versión (R7, R8, R9: `presented` en el

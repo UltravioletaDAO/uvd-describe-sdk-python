@@ -504,14 +504,19 @@ def _scrub_frames(exc: BaseException) -> None:
         vistas.add(id(actual))
         if actual.__traceback__ is not None:
             traceback.clear_frames(actual.__traceback__)
-        if isinstance(actual, httpx.HTTPError):
+        if isinstance(actual, httpx.HTTPError) and actual._request is not None:
             # 🔴 Ronda 1 del refutador, P1-b: la excepción de httpx encadenada en
             # `__cause__` guarda el `Request` entero, headers incluidos, y
             # `repr(exc.__cause__.request.headers)` imprimía el `X-PAYMENT`
-            # (httpx sólo tapa `authorization`). `_request` es el atributo detrás
-            # de `HTTPError.request` (httpx 0.24-0.28); si cambia de nombre, el
+            # (httpx sólo tapa `authorization`). Se reemplaza por uno con el
+            # MISMO método y URL y sin los headers de la llamada: la URL del
+            # tramo pagado no lleva secretos (el riel de partner firma el primer
+            # pedido, nunca éste), y así `exc.__cause__.request.url` sigue
+            # andando para quien la lea (vuelta 2: con `None`, esa lectura
+            # levantaba `RuntimeError`). `_request` es el atributo detrás de
+            # `HTTPError.request` (httpx 0.24-0.28); si cambia de nombre, el
             # test que recorre `vars()` de toda la cadena se pone rojo.
-            actual._request = None
+            actual._request = httpx.Request(actual._request.method, actual._request.url)
         for encadenada in (actual.__cause__, actual.__context__):
             if encadenada is not None:
                 pendientes.append(encadenada)
@@ -848,6 +853,15 @@ class DescribeClient:
             raise DescribeTimeout(f"GET {path} outlived the {self._timeout}s timeout") from exc
         except httpx.TransportError as exc:
             raise DescribeUnreachable(f"GET {path} unreachable: {exc}") from exc
+        except httpx.DecodingError as exc:
+            # ⚠️ Ya estaba en 0.7.0, lo midió la vuelta 2 del refutador de
+            # SDKPY-503: `DecodingError` es un `RequestError` que NO es
+            # `TransportError`, y un `Content-Encoding: gzip` sobre un cuerpo
+            # que no es gzip (un proxy mal configurado) cruzaba la frontera
+            # como `httpx.DecodingError` — sin `payment_sent` en el tramo pagado,
+            # y levantando con `fail_open=True` en una ruta gratis (R5). La
+            # respuesta llegó y no se puede leer: es `DescribeUnparseable`.
+            raise DescribeUnparseable(f"GET {path} sent a body that could not be decoded") from exc
 
     @staticmethod
     def _json(response: httpx.Response, path: str) -> Any:
@@ -1476,6 +1490,12 @@ class DescribeClient:
             # ya sale marcada por SU `_send_pending`, y no se marca dos veces.
             return self._paid(path, parse, params=params)
         presentada = pendiente.presented
+        # 🔴 Se marca ANTES de mandar, no al volver (vuelta 2 del refutador, V6):
+        # con dos llamadas que reenvían el mismo header a la vez, la que todavía
+        # no volvió ya lo presentó, y un `payment_required` a la otra no puede
+        # leerse como «primera presentación» y borrarlo con la primera quizás
+        # liquidada. Desde acá un timeout tampoco dice si llegó: cuenta igual.
+        pendiente.presented = True
         recuperacion = RESEND_SAME_HEADER
         servidor: Dict[str, Any] = {}
         # 🔴 Sólo un hash CITABLE cuenta como prueba de settlement, y esto no es
@@ -1502,22 +1522,17 @@ class DescribeClient:
         recibo: Optional[str] = None
         liquidacion_pendiente = False
         try:
-            try:
-                # 🔴 `disperse=False`: NO se duerme entre firmar la autorización
-                # EIP-3009 y despacharla. El jitter dispersa un rebaño, y este
-                # rebaño ya se dispersó en el primer tramo; dormir acá sólo
-                # quema ventana de settlement (`maxTimeoutSeconds: 120`) con la
-                # credencial firmada en la mano. Ver la cabecera del módulo.
-                paid = self._request(
-                    path,
-                    params=params,
-                    headers={"X-PAYMENT": pendiente.header},
-                    disperse=False,
-                )
-            finally:
-                # Salió (o pudo salir: un timeout no dice si llegó). Desde acá
-                # un `payment_required` ya no habla por la primera presentación.
-                pendiente.presented = True
+            # 🔴 `disperse=False`: NO se duerme entre firmar la autorización
+            # EIP-3009 y despacharla. El jitter dispersa un rebaño, y este
+            # rebaño ya se dispersó en el primer tramo; dormir acá sólo quema
+            # ventana de settlement (`maxTimeoutSeconds: 120`) con la credencial
+            # firmada en la mano. Ver la cabecera del módulo.
+            paid = self._request(
+                path,
+                params=params,
+                headers={"X-PAYMENT": pendiente.header},
+                disperse=False,
+            )
             cabecera = paid.headers.get("X-Payment-Receipt")
             liquidacion_pendiente = (
                 cabecera is not None and str(cabecera) == SETTLEMENT_PENDING

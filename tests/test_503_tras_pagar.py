@@ -1176,3 +1176,162 @@ def test_el_mensaje_dice_que_no_se_puede_leer_el_valid_before_cuando_no_se_puede
     guion.consumido()
     assert "until the client is closed (its `validBefore` could not be read)" in str(exc)
     assert "until its `validBefore` has passed" not in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# 9. Vuelta 2 del refutador externo (2026-11-16)
+# ---------------------------------------------------------------------------
+
+
+class Programable:
+    """Transporte que el propio test reprograma desde adentro de un pedido en
+    vuelo (para cruzar llamadas en un solo hilo). Anota cada header pagado.
+    Una request de más es rojo, como en `Guion`."""
+
+    def __init__(self) -> None:
+        self.pasos: List[Paso] = []
+        self.pagados: List[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if "X-PAYMENT" in request.headers:
+            self.pagados.append(request.headers["X-PAYMENT"])
+        assert self.pasos, f"request de más: {request.url}"
+        return self.pasos.pop(0)(request)
+
+
+def _pvf(_r: httpx.Request) -> httpx.Response:
+    return json_response(_402("PAYMENT_VERIFICATION_FAILED", "NADA se gastó."), status=402)
+
+
+@pytest.mark.parametrize("respuesta_tardia", ["200", "PAYMENT_VERIFICATION_FAILED"])
+def test_la_respuesta_tardia_de_una_llamada_no_borra_la_entrada_que_dejo_otra(
+    respuesta_tardia: str,
+) -> None:
+    """Vuelta 2 (R2k/R2l sobrevivían: los sitios de llamada podían volver a borrar
+    por clave y la suite seguía verde). A manda #1 y queda en vuelo. Mientras:
+    B reenvía #1 y lo resuelve (se borra #1); C compra de nuevo, firma #2 y
+    recibe 503 (#2 pudo liquidarse). Recién ahí vuelve la respuesta de A a #1, y
+    esa respuesta NO puede borrar #2. C vuelve a llamar: reenvía #2."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    srv = Programable()
+    resuelve = ok_reusado if respuesta_tardia == "200" else _pvf
+    no_hay = _r(503, _503("facilitator_unavailable"), _RA)
+    caja: Dict[str, Any] = {}
+
+    def a_en_vuelo(request: httpx.Request) -> httpx.Response:
+        srv.pasos[0:0] = [resuelve]  # B reenvía #1 y lo resuelve
+        try:
+            caja["b"] = caja["c"].wallet_breakdown(WALLET)
+        except DescribeError as exc:
+            caja["b"] = exc
+        srv.pasos[0:0] = [sin_header_402, no_hay]  # C: compra nueva, #2, 503
+        caja["falla_c"] = _falla(caja["c"])
+        return resuelve(request)
+
+    srv.pasos = [sin_header_402, a_en_vuelo]
+    c = DescribeClient(transport=httpx.MockTransport(srv), payer=payer, jitter=0)
+    c._clock = reloj  # type: ignore[method-assign]
+    caja["c"] = c
+    try:
+        c.wallet_breakdown(WALLET)  # A
+    except DescribeError:
+        pass
+    assert len(c._pending) == 1, "la respuesta tardía de A borró la entrada #2 de C"
+    srv.pasos = [pagado(ok_reusado)]  # C de nuevo: tiene que ser el reenvío de #2
+    c.wallet_breakdown(WALLET)
+    c.close()
+    assert not srv.pasos
+    assert caja["falla_c"].payment["resend"] == RESEND_SAME_HEADER
+    assert payer.firmas == 2
+    assert srv.pagados[-1] == payer.headers[1]
+
+
+def test_un_payment_required_a_un_reenvio_SUPERPUESTO_no_deja_firmar() -> None:
+    """Vuelta 2, V6. A manda #1 (primera presentación) y queda en vuelo; B reenvía
+    #1 mientras tanto y un intermediario le come el header: 402
+    `payment_required`. Con `presented` puesto al VOLVER, B lo leía False, decidía
+    `new-challenge-ok` y BORRABA #1; A recibía 503 y su reintento firmaba #2.
+    paybox paso 7: «that `503` still rules». Ahora se marca ANTES de mandar."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    srv = Programable()
+    caja: Dict[str, Any] = {}
+    no_hay = _r(503, _503("facilitator_unavailable"), _RA)
+
+    def a_en_vuelo(request: httpx.Request) -> httpx.Response:
+        srv.pasos[0:0] = [pagado(_r(402, CHALLENGE_402))]  # B: el header no llegó
+        caja["b"] = _falla(caja["c"])
+        return no_hay(request)
+
+    srv.pasos = [sin_header_402, a_en_vuelo]
+    c = DescribeClient(transport=httpx.MockTransport(srv), payer=payer, jitter=0)
+    c._clock = reloj  # type: ignore[method-assign]
+    caja["c"] = c
+    exc_a = _falla(c)
+    srv.pasos = [pagado(ok_reusado)]  # A sigue SU consejo: reenvía #1
+    c.wallet_breakdown(WALLET)
+    c.close()
+    assert not srv.pasos
+    assert caja["b"].payment["resend"] == RESEND_SAME_HEADER
+    assert exc_a.payment is not None and exc_a.payment["resend"] == RESEND_SAME_HEADER
+    assert payer.firmas == 1
+    assert srv.pagados == [payer.headers[0]] * 3
+
+
+def _gzip_roto(status: int) -> Callable[[httpx.Request], httpx.Response]:
+    def responde(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+            content=b"esto no es gzip" * 10,
+        )
+
+    return responde
+
+
+@pytest.mark.parametrize("status", [200, 503])
+def test_un_cuerpo_gzip_roto_tras_pagar_sale_marcado_y_se_reenvia(status: int) -> None:
+    """Vuelta 2 (ya estaba en 0.7.0): `httpx.DecodingError` no es `TransportError`
+    y cruzaba la frontera del módulo sin `payment_sent`. Ahora es
+    `DescribeUnparseable` marcada, y la llamada siguiente reenvía el mismo header."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    guion = Guion(sin_header_402, pagado(_gzip_roto(status)), pagado(ok_reusado))
+    with cliente(guion, payer, reloj) as c:
+        exc = _falla(c)
+        c.wallet_breakdown(WALLET)
+    guion.consumido()
+    assert isinstance(exc, DescribeUnparseable) and exc.payment_sent is True
+    assert exc.payment is not None and exc.payment["resend"] == RESEND_SAME_HEADER
+    assert payer.firmas == 1
+
+
+def test_un_cuerpo_gzip_roto_en_una_ruta_gratis_es_el_fail_open_y_no_una_excepcion() -> None:
+    """La otra mitad del mismo hueco: con `fail_open=True`, `wallet()` levantaba
+    `httpx.DecodingError` en vez de devolver `None` observado (R5)."""
+    vistos: List[DescribeError] = []
+    guion = Guion(_gzip_roto(200))
+    with DescribeClient(
+        transport=httpx.MockTransport(guion), jitter=0, on_error=vistos.append
+    ) as c:
+        assert c.wallet(WALLET) is None
+    guion.consumido()
+    assert len(vistos) == 1 and isinstance(vistos[0], DescribeUnparseable)
+
+
+def test_la_causa_de_httpx_conserva_la_url_y_pierde_los_headers() -> None:
+    """Vuelta 2, P3: soltar el `Request` (`None`) hacía levantar `RuntimeError` a
+    quien leyera `exc.__cause__.request`. Ahora queda uno con el mismo método y
+    URL, sin el `X-PAYMENT`."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    guion = Guion(sin_header_402, pagado(_lanza(httpx.ReadTimeout("lento"))))
+    with cliente(guion, payer, reloj) as c:
+        exc = _falla(c)
+    guion.consumido()
+    causa = exc.__cause__
+    assert isinstance(causa, httpx.ReadTimeout)
+    assert causa.request.method == "GET"
+    assert str(causa.request.url).endswith("/reputation/wallet/" + WALLET)
+    assert "X-PAYMENT" not in causa.request.headers

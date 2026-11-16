@@ -57,6 +57,21 @@ post-payment answers.
   `TracebackException(capture_locals=True)` printed it from `_paid`'s frame. The
   frames that hold it are cleared before the exception leaves the client, and a
   body that echoes it gets it struck out.
+- **Safe to share between threads**: the pending headers sit behind a lock, a
+  call re-checks before signing, the first of two simultaneous signatures wins
+  (the other never leaves the process), an answer only forgets the header it
+  sent, and the header is marked as presented BEFORE it is sent. Before the
+  external refutation of this change, two calls crossing could end in a third
+  signature for a purchase the second may have paid.
+- **The header lives in THAT client instance**: `close()` forgets it, and so does
+  leaving a `with` block; the message says so.
+- **httpx's exception in `__cause__`** keeps a `Request` with the same method and
+  URL but without the call's headers (it carried the `X-PAYMENT`).
+- **Two holes that were already in 0.7.0**: a body httpx cannot decode
+  (`Content-Encoding: gzip` over something that is not gzip) escaped as
+  `httpx.DecodingError` — unmarked after paying, and raising from `wallet()` even
+  with `fail_open=True` —, and a JSON nested past the recursion limit escaped as
+  `RecursionError`. Both are `DescribeUnparseable` now.
 - The test that pinned the old rule (`test_un_4xx_despues_de_pagar_dice_que_no_se_reintente`)
   is inverted, not deleted. `tests/test_503_tras_pagar.py` covers the cases.
 
