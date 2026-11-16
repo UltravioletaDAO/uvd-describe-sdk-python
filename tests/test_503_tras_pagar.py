@@ -609,6 +609,26 @@ def test_el_eco_del_header_en_el_cuerpo_se_tacha() -> None:
     assert exc.payment["next_action"] == "reenviá [x-payment-redacted]"
 
 
+def test_next_action_se_tacha_las_urls_y_se_trunca_y_retryable_es_un_bool_o_None() -> None:
+    """`next_action` es prosa del servidor: mismo trato que `_server_reason`
+    (URL tachada ANTES de truncar), con un tope de 1.000. Y `retryable` sólo si
+    es un bool de verdad: `"true"` como string no es la palabra del servidor."""
+    largo = "https://rpc.example/LLAVE-SECRETA reintentá " + "x" * 5000
+    guion = Guion(
+        sin_header_402,
+        pagado(_r(503, _503("facilitator_unavailable", next_action=largo, retryable="true"),
+                  _RA)),
+    )
+    with cliente(guion, PayerConSobre(Reloj()), Reloj()) as c:
+        exc = _falla(c)
+    guion.consumido()
+    assert exc.payment is not None
+    texto = exc.payment["next_action"]
+    assert "LLAVE-SECRETA" not in texto and texto.startswith("[url-redacted] reintentá ")
+    assert len(texto) == modulo_cliente._MAX_NEXT_ACTION + 1 and texto.endswith("…")
+    assert exc.payment["retryable"] is None
+
+
 def test_el_registro_del_cliente_no_se_muestra_ni_se_picklea() -> None:
     reloj = Reloj()
     payer = PayerConSobre(reloj)
