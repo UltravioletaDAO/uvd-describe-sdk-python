@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import pickle
+import threading
 import traceback
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -375,6 +376,11 @@ def test_dos_llamadas_al_mismo_recurso_firman_una_sola_vez_salvo_la_lista_blanca
     assert exc.payment["resend"] == caso.resend
     mensaje = str(exc)
     assert "do not resend" not in mensaje
+    # Ronda 1 del refutador X2 (P3-2; su X4, que borraba la frase, sobrevivía):
+    # POR QUÉ reenviar ante un 409 no vuelve a cobrar va sólo en `reconcile`.
+    assert ("The server CLOSED this authorization" in mensaje) is (
+        caso.resend == RESEND_RECONCILE
+    )
     pagados = guion.pagados()
     if caso.resend == RESEND_NEW_CHALLENGE_OK:
         assert "ask for a new challenge" in mensaje
@@ -453,6 +459,10 @@ def test_el_next_action_del_servidor_viaja_pero_resend_manda() -> None:
         ("cinco", None, None),
         (None, 7, 7),
         (None, 120, 30),
+        # Un cero en el cuerpo es «no esperes», no «ilegible»: el mismo borde que
+        # ("0", None, 0) en la cabecera (ronda 1 del refutador X2, P3-1; su X3,
+        # `valor >= 0` → `valor > 0`, sobrevivía).
+        (None, 0, 0),
         ("basura", 9, 9),  # cabecera ilegible → el campo del cuerpo
         (None, True, None),  # un bool no es un número de segundos
         (None, -1, None),
@@ -1047,7 +1057,15 @@ def test_un_payment_required_tras_un_TIMEOUT_no_deja_firmar() -> None:
     """Del refutador (su M1 sobrevivía): la 1ª presentación muere por timeout —pudo
     llegar y liquidarse— y el reenvío recibe un 402 `payment_required` (un
     intermediario que se comió el header). `presented` tiene que valer True
-    también cuando la 1ª salida terminó en excepción: por eso va en un `finally`."""
+    también cuando la 1ª salida terminó en excepción: por eso se marca ANTES de
+    mandar (`_send_pending`), y una excepción a mitad del envío ya lo encuentra
+    en True.
+
+    ⚠️ Corregido en la ronda 1 del refutador X2 (P3-6) y se deja escrito: esto
+    decía «por eso va en un `finally`», que era la primera versión. Desde la
+    vuelta 2 (V6) no hay `finally`: marcarlo al VOLVER dejaba que un reenvío
+    superpuesto leyera False (ver
+    `test_un_payment_required_a_un_reenvio_SUPERPUESTO_no_deja_firmar`)."""
     reloj = Reloj()
     payer = PayerConSobre(reloj)
     guion = Guion(
@@ -1165,6 +1183,51 @@ def test_un_200_pagado_con_JSON_anidado_sin_fin_sale_marcado_y_se_reenvia() -> N
     assert isinstance(exc, DescribeUnparseable) and exc.payment_sent is True
     assert exc.payment is not None and exc.payment["resend"] == RESEND_SAME_HEADER
     assert payer.firmas == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "resend"),
+    [(503, RESEND_SAME_HEADER), (409, RESEND_RECONCILE), (402, RESEND_SAME_HEADER)],
+)
+def test_un_error_pagado_con_JSON_anidado_sin_fin_sale_marcado_y_se_reenvia(
+    status: int, resend: str
+) -> None:
+    """Ronda 1 del refutador X2 (P2-1). El 200 de arriba pasa por `_json`; un
+    status >= 400 pagado pasa por `_server_fields` y `_server_reason`, que leen
+    el MISMO cuerpo y tampoco pueden dejar escapar un `RecursionError` (no es un
+    `ValueError`): saldría sin `payment_sent`, y quien lo atrape como «no pagué»
+    y reintente con un cliente nuevo firma otra. Sacar la guarda de cualquiera
+    de los dos (X1, X2 del refutador) dejaba los 144 tests de pago en verde.
+
+    Un 402 ilegible no es de la lista blanca: sin `error` legible no hay
+    «nada se liquidó», así que es `same-header` como el 503.
+    """
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    guion = Guion(
+        sin_header_402, pagado(_r(status, b"[" * 200_000, _RA)),
+        pagado(ok_reusado),
+    )
+    with cliente(guion, payer, reloj) as c:
+        try:
+            c.wallet_breakdown(WALLET)
+        except Exception as error:  # el mutante saca un RecursionError, no un DescribeError
+            exc = error
+        else:
+            raise AssertionError("no levantó")
+        segunda = c.wallet_breakdown(WALLET)
+    guion.consumido()
+    assert isinstance(exc, DescribeHTTPError), (
+        f"salió {type(exc).__name__} después de pagar, sin `payment_sent`"
+    )
+    assert exc.status_code == status
+    assert exc.payment_sent is True and exc.payment is not None
+    assert exc.payment["resend"] == resend
+    assert exc.payment["server_error"] is None and exc.server_reason is None
+    assert exc.payment["retry_after_seconds"] == 5
+    assert payer.firmas == 1
+    assert guion.pagados() == [payer.headers[0], payer.headers[0]]
+    assert segunda.receipt is not None and segunda.receipt.reused is True
 
 
 def test_el_mensaje_dice_que_no_se_puede_leer_el_valid_before_cuando_no_se_puede() -> None:
@@ -1335,3 +1398,150 @@ def test_la_causa_de_httpx_conserva_la_url_y_pierde_los_headers() -> None:
     assert causa.request.method == "GET"
     assert str(causa.request.url).endswith("/reputation/wallet/" + WALLET)
     assert "X-PAYMENT" not in causa.request.headers
+
+
+# ---------------------------------------------------------------------------
+# 10. Ronda 1 del refutador X2 (2026-11-16): el lock de `_pending`
+# ---------------------------------------------------------------------------
+#
+# Su X5 (el lock cambiado por `contextlib.nullcontext()`) dejaba los 144 tests de
+# pago en verde, y el cuerpo del PR lo descartaba con «bajo el GIL no afecta la
+# plata». Era falso: `_forget_pending` es «mirar y después borrar», y una purga en
+# otro hilo cabe entre las dos operaciones. Los dos tests de abajo lo atan.
+
+
+class _PurgaEnMedio(dict):  # type: ignore[type-arg]
+    """`_pending` que, armado, corre `_purge_dead_pending` en OTRO hilo justo
+    entre el `get` y el `del` de `_forget_pending`: el intercalado que el GIL no
+    impide. Con el lock, esa purga ESPERA (`espero`); sin él, borra la entrada y
+    el `del` de después levanta `KeyError`."""
+
+    def __init__(self, c: DescribeClient) -> None:
+        super().__init__()
+        self.c = c
+        self.armado = False
+        self.hilo: Optional[threading.Thread] = None
+        self.espero: Optional[bool] = None
+
+    def get(self, *args: Any) -> Any:
+        valor = super().get(*args)
+        if self.armado:
+            self.armado = False
+            self.hilo = threading.Thread(target=self.c._purge_dead_pending, daemon=True)
+            self.hilo.start()
+            self.hilo.join(0.3)
+            self.espero = self.hilo.is_alive()
+        return valor
+
+
+def test_una_purga_en_otro_hilo_no_rompe_el_200_pagado_que_se_esta_olvidando() -> None:
+    """El pedido pagado tardó y vuelve con su 200 cuando ya pasó `validBefore` +
+    el margen; justo entonces otro hilo que usa el mismo cliente purga los
+    vencidos. Sin el lock, la purga borra la entrada entre el `get` y el `del` de
+    `_forget_pending` y la lectura PAGADA se pierde en un `KeyError`, que no es
+    un `DescribeError` y sale sin `payment_sent` (lo que el refutador predijo
+    sin medir; acá se mide)."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    caja: Dict[str, _PurgaEnMedio] = {}
+
+    def vuelve_tarde(request: httpx.Request) -> httpx.Response:
+        reloj.t = AHORA + VALIDEZ_S + modulo_cliente.SIGN_AGAIN_MARGIN_S
+        caja["pending"].armado = True
+        return ok_nuevo(request)
+
+    guion = Guion(sin_header_402, pagado(vuelve_tarde))
+    c = cliente(guion, payer, reloj)
+    caja["pending"] = c._pending = _PurgaEnMedio(c)  # type: ignore[assignment]
+    try:
+        br = c.wallet_breakdown(WALLET)
+    finally:
+        hilo = caja["pending"].hilo
+        if hilo is not None:
+            hilo.join(5)
+    guion.consumido()
+    assert br.receipt is not None and br.receipt.reused is False
+    assert hilo is not None and not hilo.is_alive()
+    assert caja["pending"].espero is True, "la purga del otro hilo no esperó al lock"
+    assert len(c._pending) == 0 and payer.firmas == 1
+    c.close()
+
+
+class _SoloConElLock(dict):  # type: ignore[type-arg]
+    """`_pending` que exige `_pending_lock` tomado en CADA operación que el
+    cliente le hace, y anota cuáles vio (para que el test no pase sin recorrerlas)."""
+
+    def __init__(self, lock: Any) -> None:
+        super().__init__()
+        self.lock = lock
+        self.vistas: List[str] = []
+
+    def _exige(self, op: str) -> None:
+        assert self.lock.locked(), f"`_pending.{op}` sin `_pending_lock` tomado"
+        self.vistas.append(op)
+
+    def get(self, *args: Any) -> Any:
+        self._exige("get")
+        return super().get(*args)
+
+    def setdefault(self, *args: Any) -> Any:
+        self._exige("setdefault")
+        return super().setdefault(*args)
+
+    def pop(self, *args: Any) -> Any:
+        self._exige("pop")
+        return super().pop(*args)
+
+    def items(self) -> Any:
+        self._exige("items")
+        return super().items()
+
+    def clear(self) -> None:
+        self._exige("clear")
+        super().clear()
+
+    def __contains__(self, clave: object) -> bool:
+        self._exige("__contains__")
+        return super().__contains__(clave)
+
+    def __setitem__(self, clave: Any, valor: Any) -> None:
+        self._exige("__setitem__")
+        super().__setitem__(clave, valor)
+
+    def __delitem__(self, clave: Any) -> None:
+        self._exige("__delitem__")
+        super().__delitem__(clave)
+
+
+def test_toda_operacion_sobre_pending_toma_el_lock() -> None:
+    """El de arriba prueba el intercalado que más cuesta; éste, que ningún método
+    toque `_pending` sin el lock (`_has_pending`, `_store_pending`, el `get` de
+    `_send_pending`, `_forget_pending`, `_purge_dead_pending` y `close()`).
+    Con `nullcontext()`, `locked` ni existe."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    guion = Guion(
+        sin_header_402, pagado(_r(503, _503("facilitator_unavailable"), _RA)),
+        pagado(ok_reusado),
+    )
+    c = cliente(guion, payer, reloj)
+    vigilado = _SoloConElLock(c._pending_lock)
+    c._pending = vigilado  # type: ignore[assignment]
+    _falla(c)  # purga, mira, guarda y manda: 503, la entrada queda
+    c.wallet_breakdown(WALLET)  # la reenvía: 200, se olvida
+    guion.consumido()
+    vencida = modulo_cliente._PendingAuthorization(
+        _b64({"payload": {"authorization": {"validBefore": str(int(AHORA))}}}),
+        amount_usd="0.01",
+        network="base",
+    )
+    c._store_pending("vencida", vencida)
+    reloj.t = AHORA + modulo_cliente.SIGN_AGAIN_MARGIN_S
+    c._purge_dead_pending()  # la borra la purga
+    assert "vencida" not in dict(vigilado)
+    c._store_pending("viva", vencida)
+    c.close()  # la borra close()
+    assert dict(vigilado) == {}
+    assert {"get", "setdefault", "items", "clear", "__contains__", "__delitem__"} <= set(
+        vigilado.vistas
+    )
