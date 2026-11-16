@@ -15,6 +15,51 @@ this file starts with 0.6.0, the first release that asked for one.
 Changes merged since the last release accumulate here, each with its label
 (`[security]`, `[money]`, `[feature]`, `[internal]`), and ship together.
 
+## 0.8.0 — prepared 2026-11-16; not published yet (by hand, `publish.yml`)
+
+The two entries after the first one were merged after 0.7.0 and ship here.
+
+### [money] After paying, only a 402 of the allow-list lets you sign again; calling again re-sends the SAME header (SDKPY-503)
+
+Up to 0.7.0 every status >= 400 to a request that carried `X-PAYMENT` raised with
+"The credential is already consumed: …, do not resend this one", followed by a
+tail that said the opposite, and calling the method again signed a NEW
+authorization. describe's server says a 503 has no verdict yet and the SAME header
+is what recovers the read without charging twice, while a new signature is a new
+valid payment (`describe-net` `paywall.py@f68cc96`, `site/auth.md`). Measured
+without network by the 2026-11-16 refutation: two signatures in 11 of 11
+post-payment answers.
+
+- **The allow-list of `site/paybox.md` step 7**: only a 402 whose `error` is
+  `payment_required` or `PAYMENT_VERIFICATION_FAILED` says nothing settled and
+  tells you to get a fresh challenge. Every other answer — the five 503s, every
+  409, a 402 `FACILITATOR_ERROR` or `PAYMENT_SETTLEMENT_FAILED`, a 500 with or
+  without a receipt, a 504, a timeout, a dead socket, an unreadable body — says
+  do NOT sign another, re-send the same request, respect `Retry-After`, reconcile
+  with `GET /payments/status` (where `unpaid` is not enough to sign again).
+  Exact match: `payment_verification_failed` in lower case is not on the list.
+  `payment_required` on a RE-SEND is not on it either (paybox step 7: the earlier
+  503 still rules).
+- **The header lives in the client**, per resource (the exact URL, query
+  included), stored right after signing and before sending. Calling the method
+  again for that resource re-sends it byte for byte, straight to the paid request,
+  until its `validBefore` (read from the signed header) plus 15 s — the
+  `MARGEN_FIRMA_MS` of `site/dn-pay.js`. It is forgotten on a 2xx that parses, on
+  a 402 of the allow-list, after that margin, or on `close()`. A header whose
+  `validBefore` cannot be read keeps being re-sent. Nothing is re-sent on its own.
+- **`exc.payment` gains** `resend` (`RESEND_SAME_HEADER`, `RESEND_RECONCILE`,
+  `RESEND_NEW_CHALLENGE_OK`, exported: this is what to branch on),
+  `server_error`, `retryable`, `next_action` (the server's words, verbatim;
+  where they disagree with `resend`, `resend` wins), `retry_after_seconds`
+  (`Retry-After` or the body's, capped at 30 s) and `valid_before`.
+- **The header never reaches the exception**: not in `str`, `repr`,
+  `pickle.dumps`, `exc.payment`, nor in the locals of the traceback — on 0.7.0
+  `TracebackException(capture_locals=True)` printed it from `_paid`'s frame. The
+  frames that hold it are cleared before the exception leaves the client, and a
+  body that echoes it gets it struck out.
+- The test that pinned the old rule (`test_un_4xx_despues_de_pagar_dice_que_no_se_reintente`)
+  is inverted, not deleted. `tests/test_503_tras_pagar.py` covers the cases.
+
 ### [security] Publishing to PyPI is manual only, from `main`, with a reviewer (DN-PUB-02)
 
 `publish.yml` no longer runs on a `v*` tag: the runs for v0.1.0, v0.2.0, v0.4.0,

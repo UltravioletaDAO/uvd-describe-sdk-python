@@ -88,6 +88,9 @@ from .client import (
 from .display import NO_SCORE_PLACEHOLDER, format_score
 from .errors import (
     HTTP_5XX_LEGACY_KIND,
+    RESEND_NEW_CHALLENGE_OK,
+    RESEND_RECONCILE,
+    RESEND_SAME_HEADER,
     DescribeError,
     DescribeHTTPError,
     DescribeMalformedHash,
@@ -200,6 +203,11 @@ __all__ = [
     "PartnerSigningError",
     "PartnerRejectedError",
     "HTTP_5XX_LEGACY_KIND",
+    # `exc.payment["resend"]` after a failure AFTER paying (SDKPY-503): branch on
+    # these, never on the message. Only NEW_CHALLENGE_OK lets you sign again.
+    "RESEND_SAME_HEADER",
+    "RESEND_RECONCILE",
+    "RESEND_NEW_CHALLENGE_OK",
     # models
     "WalletReputation",
     "ChainReputation",

@@ -211,10 +211,13 @@ fourth file.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import random
 import re
 import time
+import traceback
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 from urllib.parse import quote
@@ -223,6 +226,9 @@ import httpx
 
 from .badge import badge_url as _badge_url
 from .errors import (
+    RESEND_NEW_CHALLENGE_OK,
+    RESEND_RECONCILE,
+    RESEND_SAME_HEADER,
     DescribeError,
     DescribeHTTPError,
     DescribeMalformedHash,
@@ -309,6 +315,228 @@ def _jitter_seconds(jitter: float) -> float:
 #: let it through). Used by `_server_reason`; see its docstring for why the
 #: redaction runs BEFORE the truncation.
 _URL_EN_CUERPO = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+
+# ════════════════════════════════════════════════════════════════════════════
+# 🔴 DESPUÉS DE PAGAR: QUÉ RESPUESTA DEJA FIRMAR OTRA (SDKPY-503, 2026-11-16)
+# ════════════════════════════════════════════════════════════════════════════
+# Hasta 0.7.0, TODO status >= 400 después de mandar `X-PAYMENT` salía con
+# «pedí un desafío nuevo, no reenvíes éste», y volver a llamar al método firmaba
+# una autorización NUEVA (medido sin red por la refutación RA del 2026-11-16:
+# `firmas=2` en los 11 casos). El servidor dice lo contrario: ante un 503 el
+# MISMO header es lo que recupera la lectura sin cobrar otra vez (el nonce
+# EIP-3009 deja pasar una sola transferencia), y una firma nueva es un pago
+# NUEVO y válido que el nonce de la primera no frena (`describe-net`
+# `describenet/paywall.py@f68cc96`, `site/auth.md:350-372`).
+#
+# La regla es una LISTA BLANCA y no una de excepciones, y es la de
+# `describe-net site/paybox.md:151-163`: «Only two answers to a replay mean that
+# nothing was settled, and both are a `402` whose `error` says so». La lista de
+# excepciones de `site/api.md:236-240` —de donde salió la regla vieja— deja del
+# lado «firmá» al 402 `FACILITATOR_ERROR` de un `/settle` rechazado DESPUÉS de un
+# `/verify` aceptado (describe-net BACKLOG :106), que pudo haberse ejecutado.
+#
+# La comparación es EXACTA a propósito: `payment_verification_failed` en
+# minúsculas, un código con espacios o uno que no es `str` caen del lado «NO
+# firmes». Equivocarse hacia ese lado cuesta esperar el `validBefore`;
+# equivocarse hacia el otro cuesta un segundo cobro.
+_NADA_SE_LIQUIDO = frozenset({"payment_required", "PAYMENT_VERIFICATION_FAILED"})
+
+#: Segundos DESPUÉS del `validBefore` recién a partir de los cuales este cliente
+#: firma OTRA autorización para el mismo recurso. Es el `MARGEN_FIRMA_MS = 15000`
+#: de `describe-net site/dn-pay.js:714`, heredado con su razón: el `validBefore`
+#: sale del reloj de quien firmó pero se ejecuta contra el `block.timestamp`, y
+#: con el reloj local adelantado X s la autorización vieja todavía puede minarse
+#: X s después de que acá parezca vencida. El margen se SUMA, no se resta.
+SIGN_AGAIN_MARGIN_S = 15
+
+#: Techo de `retry_after_seconds`: el de `paywall.py:179`
+#: (`RETRY_AFTER_CEILING_SECONDS = 30`) del servidor que lo manda. Un
+#: `Retry-After: 3600` de un intermediario no le dice al llamador que espere una
+#: hora con una autorización que vence antes.
+RETRY_AFTER_CEILING_S = 30
+
+#: `Retry-After` en su forma `delay-seconds` (RFC 9110 §10.2.3). La forma
+#: HTTP-date no se lee: el paywall manda segundos, y una fecha da `None`.
+_RETRY_AFTER = re.compile(r"\s*([0-9]+)\s*")
+
+#: Un `error` del cuerpo se publica sólo si TIENE FORMA de código. Es texto que
+#: escribe el servidor (o un intermediario), y en `payment` viaja como dato para
+#: ramificar, no como prosa.
+_CODIGO_DE_ERROR = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+
+#: Tope de `next_action`, que es prosa del servidor: los de `paywall.py@f68cc96`
+#: miden hasta ~600 caracteres. Como `_server_reason`, se trunca DESPUÉS de tachar.
+_MAX_NEXT_ACTION = 1000
+
+#: Un `X-PAYMENT` real mide ~1 KB (base64 de un JSON con el accept y la firma).
+#: Pasado esto no se decodifica: el `validBefore` queda `None`, que acá quiere
+#: decir «se sigue reenviando», nunca «venció».
+_MAX_HEADER_LEIBLE = 16384
+
+_TACHADO_X_PAYMENT = "[x-payment-redacted]"
+
+
+def _valid_before_of(header: str) -> Optional[int]:
+    """The `validBefore` of a signed `X-PAYMENT`, in unix seconds, or `None`.
+
+    Read from the header that was SIGNED, never recomputed from the challenge:
+    `uvd-x402-sdk` signs `now + valid_duration` (3600 s by default,
+    `client.py:3529`), and repeating that sum here would be a second copy of the
+    window that drifts the day it changes there. The same choice as
+    `describe-net site/dn-pay.js::firmaDe`. The header is `base64(JSON)` with the
+    authorization at `payload.authorization` (v1 and v2 alike).
+
+    `None` means **unknown, not expired**: a client that cannot read when it
+    expires keeps re-sending it, because signing another for want of a date is
+    the double charge again (`dn-pay.js::firmaVigente`, same reasoning).
+    """
+    if not isinstance(header, str) or len(header) > _MAX_HEADER_LEIBLE:
+        return None
+    try:
+        sobre = json.loads(base64.b64decode(header, validate=True))
+    except (ValueError, RecursionError):
+        # `binascii.Error` y `UnicodeDecodeError` son `ValueError`.
+        return None
+    payload = sobre.get("payload") if isinstance(sobre, dict) else None
+    autorizacion = payload.get("authorization") if isinstance(payload, dict) else None
+    valor = autorizacion.get("validBefore") if isinstance(autorizacion, dict) else None
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, int):
+        numero = valor
+    elif isinstance(valor, str) and re.fullmatch(r"[0-9]{1,20}", valor):
+        numero = int(valor)
+    else:
+        return None
+    return numero if numero > 0 else None
+
+
+def _retry_after_seconds(response: httpx.Response, body: Any) -> Optional[int]:
+    """`Retry-After` (or the body's `retry_after_seconds`), capped at 30 s.
+
+    The header first, because it is what HTTP defines; the body's field when the
+    header is missing or unreadable (the paywall sends both, same number). A
+    negative, a bool, a date or garbage is `None` — the server named no wait
+    this SDK can read, which is not the same as «zero».
+    """
+    crudo = response.headers.get("Retry-After")
+    if crudo is not None:
+        hallado = _RETRY_AFTER.fullmatch(crudo)
+        if hallado:
+            digitos = hallado.group(1)
+            # Más de 4 dígitos ya es más que el techo: no hace falta `int()`, que
+            # con 4.300+ dígitos levanta `ValueError` en py3.11+.
+            if len(digitos) > 4:
+                return RETRY_AFTER_CEILING_S
+            return min(int(digitos), RETRY_AFTER_CEILING_S)
+    valor = body.get("retry_after_seconds") if isinstance(body, dict) else None
+    if isinstance(valor, int) and not isinstance(valor, bool) and valor >= 0:
+        return min(valor, RETRY_AFTER_CEILING_S)
+    return None
+
+
+def _classify_after_paying(
+    status_code: int,
+    server_error: Optional[str],
+    *,
+    presented_before: bool,
+    receipt_declared: bool,
+) -> str:
+    """`payment["resend"]` for an HTTP answer to a request that carried `X-PAYMENT`.
+
+    The allow-list is two codes on a 402, and two more conditions narrow it:
+
+    * **A receipt declared on the same answer** (a citable `X-Payment-Receipt` or
+      `pending`) contradicts «nothing was settled»: it is not on the list.
+    * **`payment_required` on a RE-SEND is not on the list either.** It says this
+      API saw no payment header on THIS request, and paybox.md step 7 is literal:
+      «if you presented that authorization earlier and got a `503`, that `503`
+      still rules». `PAYMENT_VERIFICATION_FAILED` on a re-send does stay: the
+      facilitator refused that authorization before moving anything, and the
+      paywall never answers 402 to a header whose binding was already presented
+      (`dn-pay.js:555-560`).
+    """
+    if (
+        status_code == 402
+        and server_error in _NADA_SE_LIQUIDO
+        and not receipt_declared
+        and not (server_error == "payment_required" and presented_before)
+    ):
+        return RESEND_NEW_CHALLENGE_OK
+    if status_code == 409:
+        return RESEND_RECONCILE
+    return RESEND_SAME_HEADER
+
+
+def _signed_amount(challenge: Dict[str, Any]) -> Optional[str]:
+    """The USD amount that `build_payment_header` signed, as a STRING (money).
+
+    The same expression as `payment._amount_usd`, which already refused with
+    `DoNotPayError` if it did not reconcile with `accepts[].amount`.
+    """
+    firmado = challenge.get("price_usd", challenge.get("amount"))
+    return str(firmado) if firmado is not None else None
+
+
+def _scrub_frames(exc: BaseException) -> None:
+    """Drop the locals of every FINISHED frame in `exc`'s traceback and its chain.
+
+    🔴 Why, measured by the RA refutation (2026-11-16) on 0.7.0: the header left
+    through the traceback, in `_paid:header` and `_paid:paid.request.headers`,
+    and `TracebackException(capture_locals=True)` — what an error tracker with
+    local variables does — printed it. A header that never reached the server (a
+    connect timeout) is money to the bearer until its `validBefore`.
+
+    The frames that held it (`_send_pending`, `_request`, httpx's own inside the
+    `__cause__`) have already finished when this runs, so their locals can go.
+    The frame that calls this is still executing and `frame.clear()` refuses it
+    (`RuntimeError`, which `traceback.clear_frames` swallows): that is why the
+    frames above this one never bind the header to a local. The file and line
+    survive: a cleared frame still formats.
+    """
+    vistas: set = set()
+    pendientes: List[BaseException] = [exc]
+    while pendientes:
+        actual = pendientes.pop()
+        if id(actual) in vistas:
+            continue
+        vistas.add(id(actual))
+        if actual.__traceback__ is not None:
+            traceback.clear_frames(actual.__traceback__)
+        for encadenada in (actual.__cause__, actual.__context__):
+            if encadenada is not None:
+                pendientes.append(encadenada)
+
+
+class _PendingAuthorization:
+    """A signed `X-PAYMENT` this client may still have to re-send. PRIVATE.
+
+    It lives in the CLIENT and never in an exception: `BaseException` pickles its
+    `__dict__` (measured: `payment` travels in `pickle.dumps(exc)`), and an
+    exception gets logged, shipped to a tracker, queued. The `repr` does not show
+    the header, and pickling refuses: it is a bearer credential until its
+    `validBefore`.
+    """
+
+    __slots__ = ("header", "valid_before", "amount_usd", "network", "presented")
+
+    def __init__(self, header: str, *, amount_usd: Optional[str], network: str) -> None:
+        self.header = header
+        self.valid_before = _valid_before_of(header)
+        self.amount_usd = amount_usd
+        self.network = network
+        #: Was it sent at least once BEFORE the request in flight? It is what
+        #: tells a first `payment_required` from one on a re-send.
+        self.presented = False
+
+    def __repr__(self) -> str:
+        return (
+            f"<pending X-PAYMENT {_TACHADO_X_PAYMENT} valid_before={self.valid_before} "
+            f"presented={self.presented}>"
+        )
+
+    def __reduce__(self) -> Any:
+        raise TypeError("a pending X-PAYMENT is a bearer credential and is never pickled")
 
 #: Called with the exception being swallowed. See `_observe`.
 ErrorObserver = Callable[[DescribeError], None]
@@ -430,12 +658,27 @@ class DescribeClient:
             headers={"User-Agent": self._user_agent, "Accept": "application/json"},
             transport=transport,
         )
+        #: URL exacta del recurso (la que arma httpx, query incluida) → el
+        #: `X-PAYMENT` firmado que todavía puede reenviarse. Ver `_paid`.
+        self._pending: Dict[str, _PendingAuthorization] = {}
+
+    #: El reloj del `validBefore`. Atributo de clase para que un test lo
+    #: reemplace en UNA instancia sin tocar `time.time` del proceso.
+    _clock: Callable[[], float] = staticmethod(time.time)
 
     # ------------------------------------------------------------------
     # Ciclo de vida
     # ------------------------------------------------------------------
 
     def close(self) -> None:
+        """Close the HTTP client and FORGET every pending payment header.
+
+        A pending header is a signed authorization this client would re-send
+        instead of signing another (see `_paid`). Closing drops them: whoever
+        closes a client after a 503 and builds a new one has chosen, in their own
+        code, to be able to sign again before the old one expires.
+        """
+        self._pending.clear()
         self._http.close()
 
     def __enter__(self) -> DescribeClient:
@@ -588,7 +831,9 @@ class DescribeClient:
             raise DescribeUnparseable(f"GET {path} did not return JSON") from exc
 
     @staticmethod
-    def _server_reason(response: httpx.Response) -> Optional[str]:
+    def _server_reason(
+        response: httpx.Response, *, ocultar: Optional[str] = None
+    ) -> Optional[str]:
         """What the server SAID, not just the number it said it with.
 
         Contributed by Execution Market (verified additive, 2026-08-31): the
@@ -613,10 +858,16 @@ class DescribeClient:
 
         Nothing here is ever interpolated into `recovery`: that stays the class
         constant `tests/test_recovery.py` pins by object identity.
+
+        `ocultar` (2026-11-16, SDKPY-503) is the `X-PAYMENT` that went out on
+        this request: if the body echoes it, it is struck out BEFORE the URL
+        redaction and the truncation — a truncated header is still most of a
+        bearer credential. And a body nested deeper than the parser's recursion
+        limit is `None` too (`RecursionError` is not a `ValueError`).
         """
         try:
             body = response.json()
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
         if not isinstance(body, dict):
             return None
@@ -627,7 +878,10 @@ class DescribeClient:
                 partes.append(f"{clave}={valor}")
         if not partes:
             return None
-        razon = _URL_EN_CUERPO.sub("[url-redacted]", " · ".join(partes))
+        texto = " · ".join(partes)
+        if ocultar:
+            texto = texto.replace(ocultar, _TACHADO_X_PAYMENT)
+        razon = _URL_EN_CUERPO.sub("[url-redacted]", texto)
         if len(razon) > 300:
             razon = razon[:300] + "…"
         return razon
@@ -926,12 +1180,41 @@ class DescribeClient:
            against the pinned treasury, sign with the payer.
         3. Replay **the identical request** with `X-PAYMENT`.
 
-        There is no retry after the second attempt, and that is deliberate: the
-        nonce is consumed at settlement, so resending the same credential does not
-        pay again — a 4xx after paying is almost always a spent credential or one
-        signed for a different amount, and the remedy is to ask for a NEW
-        challenge, not to repeat the old one. A `retries=3` here would burn
-        credentials.
+        There is no AUTOMATIC retry after the second attempt — nothing here is
+        re-sent on its own, and there is no `retries=`. What changed on
+        2026-11-16 (SDKPY-503) is what happens when YOU call the method again:
+
+        4. **The signed header is kept in the CLIENT** (`self._pending`, keyed by
+           the exact URL httpx built, query included), stored right after
+           signing and BEFORE sending: if the send never comes back, that header
+           is the only thing that can recover the read without paying twice. It
+           is the design of `describe-net site/dn-pay.js:534-599`.
+        5. **Calling the method again for the same resource re-sends that SAME
+           header**, byte for byte, straight to the paid request (no new 402, no
+           new signature), for as long as it can still execute — until its
+           `validBefore` plus `SIGN_AGAIN_MARGIN_S`. The same authorization never
+           charges twice (one EIP-3009 nonce, one transfer); a new one is a NEW
+           valid payment the first one's nonce does not stop.
+        6. It is forgotten on a 2xx that parses, on a 402 of the allow-list
+           (`_classify_after_paying`), past `validBefore` + margin, or on
+           `close()`. A 409 does NOT forget it: re-sending it gives the same
+           answer or, inside the server's window, the read — never a charge.
+
+        ⚠️ CORRECTION (2026-11-16, left written): up to 0.7.0 this paragraph said
+        that «a 4xx after paying is almost always a spent credential or one
+        signed for a different amount», that the remedy was a NEW challenge and
+        not repeating the old header. That sentence came from the exception list
+        of describe's own `site/api.md:236-240`, and it is wrong in the direction
+        that costs money: the paywall charges BEFORE the handler runs
+        (`paywall.py:2160`, `:3164`), so a 5xx or a 4xx after the header can sit
+        on top of a settled payment, and every 503 asks for the SAME header. The
+        allow-list of `site/paybox.md:151-163` replaced it. What survives is the
+        half about `retries=3`: an automatic retry is still not written.
+
+        🔴 **The header never reaches an exception**: not in its message, not in
+        `payment`, not in a local variable of a frame its traceback keeps (see
+        `_scrub_frames`). The exception carries `payment["resend"]`, which is what
+        to branch on.
 
         🔴 **Parsing happens in here, not in the public method.** That is what
         makes there be ONE single "from here on there is money in flight" boundary
@@ -943,6 +1226,17 @@ class DescribeClient:
         🔴 **None of this is swallowed by the fail-open, whatever it is worth.**
         See the module header: the line is whether there was money in flight.
         """
+        clave = self._resource_key(path, params)
+        self._purge_dead_pending()
+        if clave in self._pending:
+            # ══ REENVÍO: hay un header firmado que todavía puede ejecutarse ══════
+            # Se va DIRECTO al pedido pagado con el MISMO header. Ni otro 402 (el
+            # servidor acepta un header que matchee un `accepts[]` sin haber
+            # pedido el desafío antes, `paybox.md:140-143`) ni otra firma, que es
+            # la decisión entera de SDKPY-503. Sin jitter: es el tramo posterior
+            # a la firma, y la cabecera del módulo lo prohíbe ahí.
+            return self._paid_stretch(clave, path, params, parse)
+
         # ── Tramo PRE-PAGO: no se firmó nada, no se gastó nada ───────────────
         #
         # La firma del RIEL DE PARTNER (que no es una firma de pago: no mueve
@@ -1007,26 +1301,104 @@ class DescribeClient:
                 challenge=challenge,
             )
 
-        header = build_payment_header(
-            self._payer,
-            challenge,
-            network=self._pay_network,
-            treasury=self._treasury,
-        )
-
         # ══ FRONTERA. Arriba no se gastó un centavo; abajo la autorización ══
         # EIP-3009 ya está FIRMADA. Todo lo que falle de acá para abajo sale
         # marcado con `payment_sent=True` — un `DescribeTimeout` pelado no
         # distingue «se cayó antes de pagar» de «se cayó después», y esa
         # distinción es la que decide si al llamador le toca reconciliar.
         #
+        # 🔴 El header va DIRECTO al registro del cliente, sin pasar por una
+        # variable local: este frame queda en el traceback de cualquier fallo
+        # posterior, y una local con el header es lo que la refutación RA midió
+        # saliendo por `capture_locals` (ver `_scrub_frames`). Se guarda ANTES
+        # de mandarlo, como `dn-pay.js:608-613`: si el envío no vuelve, es lo
+        # único que recupera ese pago sin cobrarlo dos veces.
+        #
         # El monto se lee del challenge con la MISMA expresión que
         # `payment._amount_usd`, y se lee DESPUÉS de que `build_payment_header`
-        # volvió: si `price_usd` no cerraba con `accepts[].amount`, esa función
-        # ya habría levantado `DoNotPayError` sin firmar. O sea que acá el valor
-        # es el que se firmó, no una aproximación. String y no float: es plata.
-        firmado = challenge.get("price_usd", challenge.get("amount"))
-        monto = str(firmado) if firmado is not None else None
+        # volvió (los argumentos se evalúan en orden): si `price_usd` no cerraba
+        # con `accepts[].amount`, esa función ya habría levantado `DoNotPayError`
+        # sin firmar. O sea que acá el valor es el que se firmó, no una
+        # aproximación. String y no float: es plata.
+        self._pending[clave] = _PendingAuthorization(
+            build_payment_header(
+                self._payer,
+                challenge,
+                network=self._pay_network,
+                treasury=self._treasury,
+            ),
+            amount_usd=_signed_amount(challenge),
+            network=self._pay_network,
+        )
+        return self._paid_stretch(clave, path, params, parse)
+
+    def _resource_key(self, path: str, params: Optional[Dict[str, Any]]) -> str:
+        """The resource a pending header belongs to: the URL httpx sends.
+
+        Exact, case included. The server's identity of a purchase
+        (`describe-net describenet/pricing.py::canonical_resource`) is
+        case-sensitive on the path too, so `…/0xABC` and `…/0xabc` are two
+        purchases there and two keys here — and a Solana id is case-SENSITIVE
+        base58, where folding the case would name another key. The query is part
+        of it: `snapshot=true` is another resource at another price.
+        """
+        return str(
+            self._http.build_request("GET", f"{self._base_url}{path}", params=params).url
+        )
+
+    def _purge_dead_pending(self) -> None:
+        """Forget the pending headers that can no longer execute on-chain.
+
+        Dead = past `validBefore` + `SIGN_AGAIN_MARGIN_S`. One with no readable
+        `validBefore` never dies here: it goes only on its answer or `close()`.
+        `list(...)` first so another thread inserting cannot break the walk.
+        """
+        ahora = self._clock()
+        for clave, pendiente in list(self._pending.items()):
+            if (
+                pendiente.valid_before is not None
+                and ahora >= pendiente.valid_before + SIGN_AGAIN_MARGIN_S
+            ):
+                self._pending.pop(clave, None)
+
+    def _paid_stretch(
+        self,
+        clave: str,
+        path: str,
+        params: Optional[Dict[str, Any]],
+        parse: Callable[[Any, PaymentReceipt], _Parsed],
+    ) -> _Parsed:
+        """The post-signature stretch, and the frame that scrubs the ones below.
+
+        `_send_pending` is the only frame that binds the header; it has finished
+        by the time its exception lands here, so `_scrub_frames` can empty it.
+        `BaseException` and not `DescribeError`: a bug in a parser, or a
+        `KeyboardInterrupt` mid-request, would carry the same frames out.
+        Nothing is swallowed — it re-raises.
+        """
+        try:
+            return self._send_pending(clave, path, params, parse)
+        except BaseException as exc:
+            _scrub_frames(exc)
+            raise
+
+    def _send_pending(
+        self,
+        clave: str,
+        path: str,
+        params: Optional[Dict[str, Any]],
+        parse: Callable[[Any, PaymentReceipt], _Parsed],
+    ) -> _Parsed:
+        """Send `self._pending[clave]` and read the answer. Its frame is scrubbed.
+
+        Here the header DOES live in locals (`pendiente`, the request headers,
+        the response), and that is why this is its own method: it finishes
+        before anyone can keep its frame. See `_paid_stretch`.
+        """
+        pendiente = self._pending[clave]
+        presentada = pendiente.presented
+        recuperacion = RESEND_SAME_HEADER
+        servidor: Dict[str, Any] = {}
         # 🔴 Sólo un hash CITABLE cuenta como prueba de settlement, y esto no es
         # celo: `mark_payment_sent` dice, textual, «HAY RECIBO … el settlement
         # ocurrió, el gasto está confirmado y es citable». Esa frase es FALSA
@@ -1049,44 +1421,126 @@ class DescribeClient:
         # gemelo. La basura sigue cayendo a «no hay prueba», que para ella sí
         # es la rama honesta.
         recibo: Optional[str] = None
-        pendiente = False
+        liquidacion_pendiente = False
         try:
-            # 🔴 `disperse=False`: NO se duerme entre firmar la autorización
-            # EIP-3009 y despacharla. El jitter dispersa un rebaño, y este
-            # rebaño ya se dispersó en el primer tramo; dormir acá sólo quema
-            # ventana de settlement (`maxTimeoutSeconds: 120`) con la credencial
-            # firmada en la mano. Ver la cabecera del módulo.
-            paid = self._request(
-                path, params=params, headers={"X-PAYMENT": header}, disperse=False
-            )
+            try:
+                # 🔴 `disperse=False`: NO se duerme entre firmar la autorización
+                # EIP-3009 y despacharla. El jitter dispersa un rebaño, y este
+                # rebaño ya se dispersó en el primer tramo; dormir acá sólo
+                # quema ventana de settlement (`maxTimeoutSeconds: 120`) con la
+                # credencial firmada en la mano. Ver la cabecera del módulo.
+                paid = self._request(
+                    path,
+                    params=params,
+                    headers={"X-PAYMENT": pendiente.header},
+                    disperse=False,
+                )
+            finally:
+                # Salió (o pudo salir: un timeout no dice si llegó). Desde acá
+                # un `payment_required` ya no habla por la primera presentación.
+                pendiente.presented = True
             cabecera = paid.headers.get("X-Payment-Receipt")
-            pendiente = cabecera is not None and str(cabecera) == SETTLEMENT_PENDING
+            liquidacion_pendiente = (
+                cabecera is not None and str(cabecera) == SETTLEMENT_PENDING
+            )
             if cabecera is not None and looks_like_onchain_id(str(cabecera)):
                 recibo = str(cabecera)
             if paid.status_code >= 400:
+                servidor = self._server_fields(paid, ocultar=pendiente.header)
+                recuperacion = _classify_after_paying(
+                    paid.status_code,
+                    servidor["server_error"],
+                    presented_before=presentada,
+                    receipt_declared=recibo is not None or liquidacion_pendiente,
+                )
+                if recuperacion == RESEND_NEW_CHALLENGE_OK:
+                    # 🔴 La ÚNICA rama donde este SDK manda a firmar otra: un
+                    # 402 de la lista blanca de `paybox.md:151-163`.
+                    mensaje = (
+                        f"GET {path} → HTTP 402 AFTER sending `X-PAYMENT`, and the "
+                        f"server says nothing was settled "
+                        f"(error={servidor['server_error']}): "
+                        "ask for a new challenge — call this method again and it "
+                        "signs a new authorization."
+                    )
+                else:
+                    codigo = servidor["server_error"]
+                    mensaje = f"GET {path} → HTTP {paid.status_code} AFTER paying" + (
+                        f" (error={codigo})." if codigo else "."
+                    )
                 raise DescribeHTTPError(
-                    f"GET {path} → HTTP {paid.status_code} AFTER paying. The "
-                    "credential is already consumed: ask for a new challenge, do "
-                    "not resend this one.",
+                    mensaje,
                     status_code=paid.status_code,
-                    server_reason=self._server_reason(paid),
+                    server_reason=self._server_reason(paid, ocultar=pendiente.header),
                 )
             pagado = parse(self._json(paid, path), self._receipt(paid))
+            # Llegó y se leyó: el header ya cumplió. Se olvida ANTES de observar,
+            # para que ni un `on_error` que explote lo deje vivo.
+            self._pending.pop(clave, None)
             # Observar DESPUÉS de parsear y ANTES de devolver: si el observador
             # de quien llama explota, `_notify` ya lo aísla — pero además nada de
             # esto puede impedir que la respuesta PAGADA llegue a sus manos.
             self._check_hashes(pagado, path)
             return pagado
         except DescribeError as exc:
+            if recuperacion == RESEND_NEW_CHALLENGE_OK:
+                self._pending.pop(clave, None)
             mark_payment_sent(
                 exc,
-                amount_usd=monto,
-                network=self._pay_network,
+                amount_usd=pendiente.amount_usd,
+                network=pendiente.network,
                 resource=path,
                 transaction_hash=recibo,
-                settlement_pending=pendiente,
+                settlement_pending=liquidacion_pendiente,
+                resend=recuperacion,
+                valid_before=pendiente.valid_before,
+                **servidor,
             )
             raise
+
+    @staticmethod
+    def _server_fields(response: httpx.Response, *, ocultar: str) -> Dict[str, Any]:
+        """What the paywall's body said about the next move, as typed data.
+
+        `_server_reason` reads `error`/`code`/`message` for the MESSAGE; this
+        reads the four fields it threw away (`client.py:624` at 0.7.0, measured
+        by the 2026-11-16 review) for `exc.payment`. Tolerant like it: a body that
+        is not a JSON object gives four `None`s, never a second exception.
+
+        All four are the SERVER's words. `server_error` only if it is shaped like
+        a code; `retryable` only if it is a real bool; `next_action` with the
+        header struck out, URLs redacted and truncated — in that order, the same
+        as `_server_reason`. ⚠️ Where `next_action` disagrees with the SDK's
+        `resend` (today, a 402 `FACILITATOR_ERROR` says «sign a new one»:
+        describe-net BACKLOG :106), `resend` wins.
+        """
+        try:
+            body = response.json()
+        except (ValueError, RecursionError):
+            body = None
+        if not isinstance(body, dict):
+            body = {}
+        codigo = body.get("error")
+        retryable = body.get("retryable")
+        texto = body.get("next_action")
+        next_action: Optional[str] = None
+        if isinstance(texto, str) and texto:
+            if ocultar:
+                texto = texto.replace(ocultar, _TACHADO_X_PAYMENT)
+            texto = _URL_EN_CUERPO.sub("[url-redacted]", texto)
+            if len(texto) > _MAX_NEXT_ACTION:
+                texto = texto[:_MAX_NEXT_ACTION] + "…"
+            next_action = texto
+        return {
+            "server_error": (
+                codigo
+                if isinstance(codigo, str) and _CODIGO_DE_ERROR.fullmatch(codigo)
+                else None
+            ),
+            "retryable": retryable if isinstance(retryable, bool) else None,
+            "retry_after_seconds": _retry_after_seconds(response, body),
+            "next_action": next_action,
+        }
 
     def wallet_breakdown(self, address: str, *, snapshot: bool = False) -> Breakdown:
         """`GET /reputation/wallet/{wallet}` — **$0.01** ($0.05 with `snapshot`).

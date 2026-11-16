@@ -251,11 +251,22 @@ def _amount_usd(challenge: Dict[str, Any], accept: Dict[str, Any]) -> Decimal:
     `Decimal`, never `float`: a `float("0.01")` is no longer 0.01 and this is
     money.
 
-    The reconciliation exists because of a failure mode the published guide names:
-    *"A 4xx after paying is almost always a spent credential or one signed for a
-    different amount"*. If `price_usd` and `accepts[].amount` do not match, signing
-    anyway produces a payment the server rejects **after** the credential has been
-    consumed. We would rather refuse first.
+    The reconciliation exists because a refusal that arrives AFTER the credential
+    left is one this SDK cannot recover by signing again: from the outside it is
+    indistinguishable from a payment that settled, and a second authorization is
+    a second valid payment (`client._paid`). If `price_usd` and
+    `accepts[].amount` do not match, signing anyway hands the server an
+    authorization for an amount other than the one it asked for. We would rather
+    refuse first, before anything is signed.
+
+    ⚠️ CORRECTION (2026-11-16, SDKPY-503, left written): this paragraph used to
+    quote describe's `site/api.md` — *"A 4xx after paying is almost always a
+    spent credential or one signed for a different amount"* — and that same
+    sentence was the root of the old post-payment rule in `client.py`, which
+    told the caller to get a fresh challenge after ANY status >= 400. The
+    server charges before the handler runs, so that rule could make you pay
+    twice; the allow-list of `site/paybox.md` step 7 replaced it. The reason
+    for reconciling here did not change: refusing before signing.
 
     Reconciliation only happens when the declared token is USDC (6 decimals on
     today's six chains). With another token no scale is invented: it signs for
