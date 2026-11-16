@@ -629,6 +629,26 @@ def test_next_action_se_tacha_las_urls_y_se_trunca_y_retryable_es_un_bool_o_None
     assert exc.payment["retryable"] is None
 
 
+def test_un_payer_que_devuelve_bytes_no_revienta_despues_de_pagar() -> None:
+    """El `Protocol` promete `str`; httpx acepta `bytes`. Con un cuerpo que trae
+    `message` y `next_action`, el tachado del eco no puede levantar `TypeError`
+    con la credencial ya mandada: sale la `DescribeHTTPError` marcada."""
+
+    class PayerDeBytes:
+        firmas = 0
+
+        def create_authorization(self, *args: Any, **kwargs: Any) -> bytes:
+            PayerDeBytes.firmas += 1
+            return b"HEADER-EN-BYTES"
+
+    guion = Guion(sin_header_402, pagado(_r(503, _503("facilitator_unavailable"), _RA)))
+    with cliente(guion, PayerDeBytes(), Reloj()) as c:
+        exc = _falla(c)
+    guion.consumido()
+    assert isinstance(exc, DescribeHTTPError) and exc.payment_sent is True
+    assert exc.payment is not None and exc.payment["resend"] == RESEND_SAME_HEADER
+
+
 def test_el_registro_del_cliente_no_se_muestra_ni_se_picklea() -> None:
     reloj = Reloj()
     payer = PayerConSobre(reloj)

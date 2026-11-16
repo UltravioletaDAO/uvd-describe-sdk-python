@@ -879,7 +879,10 @@ class DescribeClient:
         if not partes:
             return None
         texto = " · ".join(partes)
-        if ocultar:
+        # `isinstance`: el `Protocol` del payer promete `str`, pero httpx acepta
+        # `bytes` y un payer que los devuelva no puede convertir esto en un
+        # `TypeError` después de pagar.
+        if isinstance(ocultar, str) and ocultar:
             texto = texto.replace(ocultar, _TACHADO_X_PAYMENT)
         razon = _URL_EN_CUERPO.sub("[url-redacted]", texto)
         if len(razon) > 300:
@@ -1525,7 +1528,7 @@ class DescribeClient:
         texto = body.get("next_action")
         next_action: Optional[str] = None
         if isinstance(texto, str) and texto:
-            if ocultar:
+            if isinstance(ocultar, str) and ocultar:
                 texto = texto.replace(ocultar, _TACHADO_X_PAYMENT)
             texto = _URL_EN_CUERPO.sub("[url-redacted]", texto)
             if len(texto) > _MAX_NEXT_ACTION:
@@ -1568,7 +1571,9 @@ class DescribeClient:
             `DoNotPayError` if the 402 asks to pay a different address.
             `DescribeError` on any service failure. If it fell AFTER signing, it
             comes out with `exc.payment_sent is True` and `exc.payment` carrying
-            the amount, the network and the `X-Payment-Receipt` if there was one.
+            the amount, the network and the `X-Payment-Receipt` if there was one
+            — and `exc.payment["resend"]`: unless it is `RESEND_NEW_CHALLENGE_OK`,
+            calling this method again re-sends the SAME header (see `_paid`).
         """
         path = f"/reputation/wallet/{quote(str(address), safe='')}"
         params = {"snapshot": "true"} if snapshot else None
