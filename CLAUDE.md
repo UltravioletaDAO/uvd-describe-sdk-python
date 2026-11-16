@@ -496,7 +496,16 @@ levantando siempre; esto cambia QUÉ dicen y qué pasa al volver a llamarlas.
     401 dígitos (`OverflowError`) escapaban del tramo pagado sin
     `payment_sent`. Las dos clases entraron SÓLO en `parse_breakdown`,
     `parse_agent_reputation` y `parse_history`; en los parsers gratis es la
-    fila aparte del P3-8. Mutaciones PA1–PA6.
+    fila aparte del P3-8, y está MEDIDO (vuelta 2 del auto-refutador):
+    `wallet()` con `total_reviews: 1e400` y `leaderboard()` con `rank: 1e400`
+    levantan `OverflowError` aun con `fail_open=True`, o sea que rompen R5.
+    Mutaciones PA1–PA6. Un fuzz de 2324 formas por versión dio 0 escapes con
+    las dos clases y 225 sin ellas, todos de esas dos.
+    ⚠️ Lo que NO cubre, medido por la misma vuelta: un `on_error` o un filtro
+    de logging DEL CONSUMIDOR que levante dentro de `_check_hashes`, que corre
+    después de `_forget_pending`, sale sin `payment_sent` y la llamada
+    siguiente firma otra. Sólo se corrigieron los dos comentarios de
+    `client.py` que lo negaban; el comportamiento queda para otra fila.
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 

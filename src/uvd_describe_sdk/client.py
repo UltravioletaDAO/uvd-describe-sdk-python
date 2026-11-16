@@ -1352,9 +1352,12 @@ class DescribeClient:
         # abajo sale marcado con `payment_sent=True` — un `DescribeTimeout`
         # pelado no distingue «se cayó antes de pagar» de «se cayó después», y
         # esa distinción es la que decide si al llamador le toca reconciliar.
-        # Por eso nada de este tramo puede levantar OTRA clase: `_json`,
-        # `_server_fields`, `_server_reason` y los parsers pagos convierten en
-        # `DescribeUnparseable` las formas ilegibles que conocen.
+        # Por eso lo que este SDK lee en este tramo no levanta OTRA clase:
+        # `_json`, `_server_fields`, `_server_reason` y los parsers pagos
+        # convierten en `DescribeUnparseable` las formas ilegibles que conocen.
+        # Lo que NO controla —el `on_error` o un filtro de logging del
+        # consumidor, que corren en `_check_hashes` después de olvidar el
+        # header— sí puede salir sin marca (ver el comentario de ahí).
         # ⚠️ Corregido el 2026-11-16 (auto-refutación de la ronda 1 de X2) y se
         # deja escrito: esto decía «Todo lo que falle de acá para abajo sale
         # marcado», y era falso — un 200 pagado con `per_chain: [1]` salía como
@@ -1579,8 +1582,16 @@ class DescribeClient:
             # para que ni un `on_error` que explote lo deje vivo.
             self._forget_pending(clave, pendiente)
             # Observar DESPUÉS de parsear y ANTES de devolver: si el observador
-            # de quien llama explota, `_notify` ya lo aísla — pero además nada de
-            # esto puede impedir que la respuesta PAGADA llegue a sus manos.
+            # de quien llama explota, `_notify` ya lo aísla.
+            # ⚠️ Corregido el 2026-11-16 (vuelta 2 de la auto-refutación de la
+            # ronda 1 de X2) y se deja escrito: esto seguía con «pero además nada
+            # de esto puede impedir que la respuesta PAGADA llegue a sus manos», y
+            # era de más. Medido por el refutador: un `logging.Filter` del
+            # consumidor que levanta, o un `on_error` que levanta
+            # `KeyboardInterrupt`, sale de acá SIN `payment_sent`, y con el header
+            # ya olvidado la llamada siguiente firma otra. Hace falta un
+            # consumidor que levante en su propio observador; queda como fila
+            # aparte, no se cambió el comportamiento.
             self._check_hashes(pagado, path)
             return pagado
         except DescribeError as exc:

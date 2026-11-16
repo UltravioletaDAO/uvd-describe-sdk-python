@@ -79,8 +79,10 @@ post-payment answers.
   `RecursionError`, on a paid 200 and on a paid 503, 409 or 402 alike; and a paid
   200 with VALID JSON of an unexpected shape (`per_chain: [1]`,
   `total_reviews: 1e400`) escaped from `wallet_breakdown()`, `wallet_history()`
-  and `agent()` as `AttributeError` or `OverflowError`. All of them are
-  `DescribeUnparseable` now, marked `payment_sent=True` after paying.
+  and `agent()` as `AttributeError` or `OverflowError`. Now they are
+  `DescribeUnparseable` — except the paid 503, 409 or 402, which keeps its
+  `DescribeHTTPError` with the status — and every one of them is marked
+  `payment_sent=True` after paying.
 - The test that pinned the old rule (`test_un_4xx_despues_de_pagar_dice_que_no_se_reintente`)
   is inverted, not deleted. `tests/test_503_tras_pagar.py` covers the cases.
 
