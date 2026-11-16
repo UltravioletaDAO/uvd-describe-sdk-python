@@ -234,6 +234,17 @@ It never re-sends on its own, and the header is never in the exception (not in
 its text, `payment`, pickle or traceback locals). Up to 0.7.0 the message said
 the opposite and a second call signed a second authorization.
 
+⚠️ **That clock assumes a payer that signs for longer than describe replays a
+read.** describe re-serves a settled read from its receipt for a window between
+`IDEMPOTENCY_WINDOW_FLOOR_SECONDS` and `IDEMPOTENCY_WINDOW_CEILING_SECONDS`
+(300 s and 1800 s in `describenet/paywall.py`, read on 2026-11-16), whatever the
+`validBefore` says. `uvd-x402-sdk`'s payer signs for
+3600 s by default, so the client lets go after that window has closed. A payer
+of your own that signs for less (say 60 s) makes the client sign again while
+describe would still have returned the read for the old header: measured, a
+second signature 76 s after a 500 that carried a receipt. If yours does, keep
+its validity at 1800 s or more.
+
 ⚠️ **The header lives in THAT client instance.** `close()` forgets it, and so
 does leaving a `with DescribeClient(...)` block — an `except` written outside the
 block runs after `close()`, and a new client would sign a new authorization. For

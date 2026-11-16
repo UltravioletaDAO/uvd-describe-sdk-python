@@ -463,6 +463,9 @@ def test_el_next_action_del_servidor_viaja_pero_resend_manda() -> None:
         # ("0", None, 0) en la cabecera (ronda 1 del refutador X2, P3-1; su X3,
         # `valor >= 0` → `valor > 0`, sobrevivía).
         (None, 0, 0),
+        # Un float tampoco es un número de segundos que este SDK publique: el
+        # campo es `Optional[int]` (auto-refutación de la ronda 1 de X2, su Y4).
+        (None, 5.5, None),
         ("basura", 9, 9),  # cabecera ilegible → el campo del cuerpo
         (None, True, None),  # un bool no es un número de segundos
         (None, -1, None),
@@ -477,6 +480,22 @@ def test_retry_after_seconds_cabecera_cuerpo_y_techo(
     body = {"retry_after_seconds": cuerpo} if cuerpo is not None else {}
     respuesta = httpx.Response(503, headers=headers)
     assert modulo_cliente._retry_after_seconds(respuesta, body) == esperado
+
+
+def test_un_retry_after_sin_cabecera_llega_del_cuerpo_de_punta_a_punta() -> None:
+    """Sin `Retry-After`, el número del cuerpo (`retry_after_seconds: 7`) llega a
+    `exc.payment` y al mensaje. Los casos de arriba prueban la FUNCIÓN; éste, que
+    `_server_fields` le pasa el cuerpo (auto-refutación de la ronda 1 de X2: su
+    Y5, `_retry_after_seconds(response, {})`, sobrevivía)."""
+    guion = Guion(
+        sin_header_402,
+        pagado(_r(503, _503("facilitator_unavailable", retry_after_seconds=7))),
+    )
+    with cliente(guion, PayerConSobre(Reloj()), Reloj()) as c:
+        exc = _falla(c)
+    guion.consumido()
+    assert exc.payment is not None and exc.payment["retry_after_seconds"] == 7
+    assert "Wait the 7 s of `Retry-After` first" in str(exc)
 
 
 def test_un_retry_after_enorme_llega_al_llamador_con_el_techo() -> None:
@@ -1230,6 +1249,67 @@ def test_un_error_pagado_con_JSON_anidado_sin_fin_sale_marcado_y_se_reenvia(
     assert segunda.receipt is not None and segunda.receipt.reused is True
 
 
+_ENORME = "1" + "0" * 400  # entero de 401 dígitos: `float()` levanta OverflowError
+#: El texto crudo, sin `json.dumps`: `1e400` llega como lo mandaría un servidor.
+_W = '{"wallet": "' + WALLET + '", '
+
+#: (método pago, sus argumentos, un 200 con JSON VÁLIDO de forma inesperada, la
+#: clase que escapaba). Uno por clase y por parser pago.
+_FORMAS_RARAS = [
+    ("wallet_breakdown", (WALLET,), _W + '"final_score": 1.0, "per_chain": [1]}',
+     AttributeError),
+    ("wallet_breakdown", (WALLET,), _W + '"final_score": 1.0, "total_reviews": 1e400}',
+     OverflowError),
+    ("wallet_history", (WALLET,), _W + '"points": [1]}', AttributeError),
+    ("wallet_history", (WALLET,), _W + '"points": [{"score": ' + _ENORME + "}]}",
+     OverflowError),
+    ("agent", ("base", "1"), '{"agent_id": "1", "facets": [1]}', AttributeError),
+    ("agent", ("base", "1"), '{"agent_id": "1", "review_count": 1e400}', OverflowError),
+]
+
+
+@pytest.mark.parametrize(
+    ("metodo", "args", "cuerpo", "escapaba"),
+    _FORMAS_RARAS,
+    ids=[f"{m}-{e.__name__}" for m, _a, _c, e in _FORMAS_RARAS],
+)
+def test_un_200_pagado_con_JSON_valido_de_forma_inesperada_sale_marcado(
+    metodo: str, args: tuple, cuerpo: str, escapaba: type
+) -> None:
+    """Auto-refutación de la ronda 1 de X2 (su P2-a; ya estaba en 0.7.0). El
+    cuerpo PARSEA como JSON, así que `_json` no lo ve; el parser pago lo recorre
+    y levantaba `AttributeError` (`[1].items()`, `1.get`) u `OverflowError`
+    (`int(inf)`, `float()` de 401 dígitos), que no son `DescribeError`: salían
+    del tramo pagado SIN `payment_sent`, y quien las tomara por «no pagué» y
+    reintentara con un cliente nuevo firmaba otra. El comentario de la frontera
+    en `_paid` decía «Todo lo que falle de acá para abajo sale marcado».
+
+    El MISMO cliente reenvía el mismo header las dos veces: una sola firma."""
+    reloj = Reloj()
+    payer = PayerConSobre(reloj)
+    raro = _r(200, cuerpo.encode("ascii"))
+    guion = Guion(sin_header_402, pagado(raro), pagado(raro))
+    salidas: List[BaseException] = []
+    with cliente(guion, payer, reloj) as c:
+        for _ in range(2):
+            try:
+                getattr(c, metodo)(*args)
+            except Exception as error:  # el bug saca una clase que no es DescribeError
+                salidas.append(error)
+            else:
+                raise AssertionError("no levantó")
+    guion.consumido()
+    for exc in salidas:
+        assert isinstance(exc, DescribeUnparseable), (
+            f"salió {type(exc).__name__} después de pagar, sin `payment_sent`"
+        )
+        assert isinstance(exc.__cause__, escapaba)
+        assert exc.payment_sent is True and exc.payment is not None
+        assert exc.payment["resend"] == RESEND_SAME_HEADER
+    assert payer.firmas == 1
+    assert guion.pagados() == [payer.headers[0], payer.headers[0]]
+
+
 def test_el_mensaje_dice_que_no_se_puede_leer_el_valid_before_cuando_no_se_puede() -> None:
     """El refutador (P3): «holds in memory until its `validBefore`» era falso con
     un `validBefore` ilegible, que se guarda hasta `close()`."""
@@ -1477,7 +1557,13 @@ class _SoloConElLock(dict):  # type: ignore[type-arg]
         self.vistas: List[str] = []
 
     def _exige(self, op: str) -> None:
-        assert self.lock.locked(), f"`_pending.{op}` sin `_pending_lock` tomado"
+        # Un `RLock` no tiene `locked()` en 3.9-3.13: se le pregunta
+        # `_is_owned()`, para que cambiar a un `RLock` (que sería correcto) no
+        # dé un rojo falso (el Y7 del auto-refutador de la ronda 1 de X2 lo
+        # daba). `nullcontext()` no tiene ninguno de los dos: rojo.
+        locked = getattr(self.lock, "locked", None)
+        tomado = locked() if locked is not None else self.lock._is_owned()
+        assert tomado, f"`_pending.{op}` sin `_pending_lock` tomado"
         self.vistas.append(op)
 
     def get(self, *args: Any) -> Any:

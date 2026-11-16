@@ -47,6 +47,11 @@ post-payment answers.
   `MARGEN_FIRMA_MS` of `site/dn-pay.js`. It is forgotten on a 2xx that parses, on
   a 402 of the allow-list, after that margin, or on `close()`. A header whose
   `validBefore` cannot be read keeps being re-sent. Nothing is re-sent on its own.
+  ⚠️ That margin assumes a payer that signs for at least the 1800 s describe may
+  replay a settled read for (300 s to 1800 s, regardless of `validBefore`):
+  `uvd-x402-sdk`'s signs for 3600 s by default. A payer that signs for 60 s makes
+  the client sign again at +76 s, while describe would still have re-served the
+  read for the old header.
 - **`exc.payment` gains** `resend` (`RESEND_SAME_HEADER`, `RESEND_RECONCILE`,
   `RESEND_NEW_CHALLENGE_OK`, exported: this is what to branch on),
   `server_error`, `retryable`, `next_action` (the server's words, verbatim;
@@ -67,11 +72,15 @@ post-payment answers.
   leaving a `with` block; the message says so.
 - **httpx's exception in `__cause__`** keeps a `Request` with the same method and
   URL but without the call's headers (it carried the `X-PAYMENT`).
-- **Two holes that were already in 0.7.0**: a body httpx cannot decode
+- **Three holes that were already in 0.7.0**: a body httpx cannot decode
   (`Content-Encoding: gzip` over something that is not gzip) escaped as
   `httpx.DecodingError` — unmarked after paying, and raising from `wallet()` even
-  with `fail_open=True` —, and a JSON nested past the recursion limit escaped as
-  `RecursionError`. Both are `DescribeUnparseable` now.
+  with `fail_open=True` —; a JSON nested past the recursion limit escaped as
+  `RecursionError`, on a paid 200 and on a paid 503, 409 or 402 alike; and a paid
+  200 with VALID JSON of an unexpected shape (`per_chain: [1]`,
+  `total_reviews: 1e400`) escaped from `wallet_breakdown()`, `wallet_history()`
+  and `agent()` as `AttributeError` or `OverflowError`. All of them are
+  `DescribeUnparseable` now, marked `payment_sent=True` after paying.
 - The test that pinned the old rule (`test_un_4xx_despues_de_pagar_dice_que_no_se_reintente`)
   is inverted, not deleted. `tests/test_503_tras_pagar.py` covers the cases.
 

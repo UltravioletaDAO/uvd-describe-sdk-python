@@ -1348,10 +1348,18 @@ class DescribeClient:
             )
 
         # ══ FRONTERA. Arriba no se gastó un centavo; abajo la autorización ══
-        # EIP-3009 ya está FIRMADA. Todo lo que falle de acá para abajo sale
-        # marcado con `payment_sent=True` — un `DescribeTimeout` pelado no
-        # distingue «se cayó antes de pagar» de «se cayó después», y esa
-        # distinción es la que decide si al llamador le toca reconciliar.
+        # EIP-3009 ya está FIRMADA. Todo `DescribeError` que salga de acá para
+        # abajo sale marcado con `payment_sent=True` — un `DescribeTimeout`
+        # pelado no distingue «se cayó antes de pagar» de «se cayó después», y
+        # esa distinción es la que decide si al llamador le toca reconciliar.
+        # Por eso nada de este tramo puede levantar OTRA clase: `_json`,
+        # `_server_fields`, `_server_reason` y los parsers pagos convierten en
+        # `DescribeUnparseable` las formas ilegibles que conocen.
+        # ⚠️ Corregido el 2026-11-16 (auto-refutación de la ronda 1 de X2) y se
+        # deja escrito: esto decía «Todo lo que falle de acá para abajo sale
+        # marcado», y era falso — un 200 pagado con `per_chain: [1]` salía como
+        # `AttributeError`, sin marca. Lo ata
+        # `test_un_200_pagado_con_JSON_valido_de_forma_inesperada_sale_marcado`.
         #
         # 🔴 El header va DIRECTO al registro del cliente, sin pasar por una
         # variable local: este frame queda en el traceback de cualquier fallo
