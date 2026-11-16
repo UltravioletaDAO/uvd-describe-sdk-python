@@ -27,7 +27,7 @@ los dos; **ninguno lo cambia por su cuenta**.
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"    # Windows; en Linux .venv/bin/python
 
-.venv/Scripts/python -m pytest                     # 848 pasan, ~31 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-11-16 en py3.12.12 y py3.9.24 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras SDKPY-503 — suma `test_503_tras_pagar.py`, 102 tests; eran 746 en `32a99ca`; eran 666 el 2026-09-30, re-medido en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
+.venv/Scripts/python -m pytest                     # 860 pasan, ~28-32 s, SIN RED y VERIFICADO por el guard de `tests/conftest.py` (re-medido 2026-11-16 en py3.12.12, py3.11.14 y py3.9.24 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras SDKPY-503 y su ronda 1 — suma `test_503_tras_pagar.py`, 114 tests; eran 746 en `32a99ca`; eran 666 el 2026-09-30, re-medido en py3.11 con HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 1 del PR 9 — `test_publish_workflow.py` pasa de 9 a 12 tests; eran 663 con su primera versión, que midió 29,7 s; eran 654 en `0709428`, tras el sdk-map del PR #8, y 634 el 2026-09-26, re-medido en py3.13, py3.12 y py3.9, con y sin HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:9, tras la ronda 2 del PR 7 — suma `test_names_check_url_numeros.py`, `test_names_abi_offsets.py`, `test_names_tope_de_largo.py` y `test_names_avvy_senales.py`; eran 565 tras la ronda 1 y 551 tras SDK-5 y SDK-6; ⚠️ con la máquina cargada, los de tiempo de las rondas 3 y 4 fallan intermitentes, ver el punto 34 de `names`; los de `test_names_ronda3.py`, `test_names_ronda4.py` y `test_names_ronda5.py` usan un servidor local en 127.0.0.1, y el de trio necesita el extra `dev`; eran 524 tras la ronda 5 del PR #6 de `names`, 495 tras la ronda 4, 487 tras la ronda 3, 476 tras la ronda 2, 448 con el módulo recién llegado, 313 el 2026-09-15 tras `thin-chain` en 0.6.1, 312 ese día tras el guard de lista de `require_full_caveats()`, 306 tras `caveats_not_computed`/`author_class`, 229 el 2026-08-31 y 215 el 2026-08-30)
 .venv/Scripts/python -m ruff check src tests
 .venv/Scripts/python -m mypy src/uvd_describe_sdk
 .venv/Scripts/python -m build
@@ -433,10 +433,18 @@ levantando siempre; esto cambia QUÉ dicen y qué pasa al volver a llamarlas.
 6. ⚠️ **Paridad**: los tres valores de `resend` son los de la fila del gemelo TS
    (F-A2, `'same-header' | 'reconcile' | 'new-challenge-ok'`), que hace otro
    worker. Si el gemelo eligió otra forma, se alinean los dos; ninguno solo.
-7. ⚠️ **Límite conocido**: dos hilos que piden el MISMO recurso a la vez, sin
-   header pendiente, firman uno cada uno (dos llamadas, dos compras, como antes).
-   El header se guarda antes de mandarlo, así que un reintento POSTERIOR a un
-   timeout sí reenvía.
+7. 🔴 **Dos llamadas al mismo recurso a la vez** (ronda 1 del refutador, P1-a):
+   `_pending` va bajo un lock (nunca tomado durante la E/S), se re-chequea antes
+   de firmar, `_store_pending` hace `setdefault` (la firma que no salió se
+   descarta) y `_forget_pending` borra por IDENTIDAD. Antes, una pisaba a la otra
+   y el reintento firmaba una TERCERA para una compra quizás pagada. ⚠️ Se deja
+   escrito: la primera versión de este punto lo llamaba «dos llamadas, dos
+   compras, como antes», y era falso. Mutaciones R1, R2, R3, R12.
+8. 🔴 **La cadena `__cause__` también**: la excepción de httpx guarda el
+   `Request` con el header; `_scrub_frames` suelta `_request` en cada
+   `httpx.HTTPError` (P1-b). Mutación R4.
+9. **El header vive en ESA instancia**: salir de un `with` la cierra y lo olvida
+   (P2-1). El mensaje y el README lo dicen.
 
 ### El riel de PARTNER — la novena superficie, y NO es una regla del contrato
 
@@ -660,7 +668,12 @@ docstrings:
 | **ES.** 🔴 `pypa-mirror/gh-action-pypi-publish@` el mismo SHA (R7, otro repo con el mismo formato) | **1 rojo**: el del job con id-token, que fija sus dos `uses:` exactos. El de SHA queda VERDE: sólo mira el formato |
 | **ET.** `twine` vuelve a correr ANTES de `upload-artifact` (P3-2 deshecho) | **1 rojo**: `test_twine_corre_despues_de_subir_el_artefacto` |
 | **EU.** 🔴 un `run:` en el job que tiene el id-token | **1 rojo**: el del job con id-token. Cualquier paso de ese job puede pedir el token OIDC |
-| **M0.** 🔴 el `src/` entero de `32a99ca` (0.7.0) con sólo las tres constantes `RESEND_*` agregadas (SDKPY-503) — 2026-11-16 | **103 rojos**: los 102 de `test_503_tras_pagar.py` y el 409 invertido de `test_r6_pago_x402.py` |
+| **M0.** 🔴 el `src/` entero de `32a99ca` (0.7.0) con sólo las tres constantes `RESEND_*` agregadas (SDKPY-503) — 2026-11-16 | **103 rojos**: los 102 de `test_503_tras_pagar.py` de entonces y el 409 invertido de `test_r6_pago_x402.py` |
+| **R1.** 🔴 sin re-chequeo antes de firmar (ronda 1 del refutador, P1-a) | **1 rojo**: `test_dos_llamadas_a_la_vez_no_pierden_la_autorizacion_que_recibio_el_503` |
+| **R2.** 🔴 la segunda firma pisa a la primera (`[clave] = nuevo` en vez de `setdefault`) | **1 rojo**: `test_si_dos_firmaron_a_la_vez_gana_la_primera_y_la_otra_nunca_sale`. El de la carrera queda VERDE: el re-chequeo lo tapa, y por eso hay dos tests |
+| **R3.** olvidar por clave, sin identidad | **1 rojo**: el mismo de R2 |
+| **R4.** 🔴 no soltar el `Request` de httpx en la cadena (P1-b) | **3 rojos**: timeout, socket muerto y protocolo roto |
+| **R8.** limpiar sólo `DescribeError` (M2 del refutador; sobrevivía) | **1 rojo**: el `KeyboardInterrupt` a mitad del pedido |
 | **M1.** 🔴 la lista blanca ampliada a cualquier 402 con código | **10 rojos**: el `FACILITATOR_ERROR` y el `PAYMENT_SETTLEMENT_FAILED` de punta a punta, y los de la clasificación exacta |
 | **M2.** comparar el `error` sin mayúsculas | **2 rojos**: `payment_verification_failed` y `PAYMENT_REQUIRED` |
 | **M3.** 🔴 sin reenvío (`if clave in self._pending:` → `if False:`, el bug de 0.7.0) | **21 rojos**: todos los casos que no son de la lista blanca firman 2 |
@@ -675,9 +688,12 @@ docstrings:
 | **M27.** limpiar frames sin la cadena `__cause__` | **3 rojos**: timeout, socket muerto y 200 ilegible — los frames de httpx guardan el header |
 | **M29.** un 409 deja firmar otra | **5 rojos** |
 
-Las 29 de SDKPY-503 (M1–M29, con M12a/b), con su `viejo`/`nuevo`/comando, van en
-JSON en el cuerpo del PR; las que no están arriba (M7, M12a/b, M13, M15–M26, M28)
-también caen, cada una en su test con nombre.
+Las 45 de SDKPY-503 (M1–M29 con M12a/b, y R1–R15 de la ronda 1 del refutador),
+con su `viejo`/`nuevo`/comando, van en JSON en el cuerpo del PR; las que no están
+arriba también caen, cada una en su test con nombre. ⚠️ Tres mutantes del
+refutador sobrevivían a la primera versión (R7, R8, R9: `presented` en el
+`finally`, `except BaseException`, el recibo `pending`): los mató un test nuevo
+cada uno.
 
 Todas las de la ronda 2 se verificaron corriendo su comando `test` del JSON por
 bash (verde sin mutar, rojo mutado) y la suite entera mutada, con los nombres de
