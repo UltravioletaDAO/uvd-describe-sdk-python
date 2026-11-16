@@ -181,6 +181,26 @@ from typing import Any, Dict, List, Optional
 #: migration can compare against both without guessing.
 HTTP_5XX_LEGACY_KIND = "http_5xx"
 
+#: `payment["resend"]` after a failure that came AFTER the credential left.
+#: The three values are the classes of `describe-net` BACKLOG «El contrato de
+#: recuperación del paywall» (2026-11-16) and of the TypeScript twin's row
+#: (`resend: 'same-header' | 'reconcile' | 'new-challenge-ok'`).
+#:
+#: SAME_HEADER — no verdict, or one that a re-send can still turn into the read
+#: (any 503, 5xx, timeout, dead socket, unreadable body, any 4xx outside the
+#: allow-list). Calling the method again re-sends the SAME `X-PAYMENT`.
+RESEND_SAME_HEADER = "same-header"
+#: RECONCILE — a 409: the server closed that authorization (settled for another
+#: request, spent, mined and failed). Re-sending it never charges again and
+#: gives the same answer, or the read while the server's window lasts; what is
+#: left is to check on-chain or `GET /payments/status`.
+RESEND_RECONCILE = "reconcile"
+#: NEW_CHALLENGE_OK — the ONLY one after which signing again is safe: a 402
+#: whose `error` is `payment_required` or `PAYMENT_VERIFICATION_FAILED`, the
+#: allow-list of describe's `site/paybox.md` step 7 («Only two answers to a
+#: replay mean that nothing was settled»).
+RESEND_NEW_CHALLENGE_OK = "new-challenge-ok"
+
 
 class DescribeError(Exception):
     """Base of every transport or protocol failure against describe.
@@ -213,8 +233,26 @@ class DescribeError(Exception):
 
     #: Detail of that credential when `payment_sent` is `True`; `None` otherwise.
     #: Keys: `amount_usd` (what was signed, as a STRING — it is money),
-    #: `network`, `resource` (the route) and `transaction_hash` (the
-    #: `X-Payment-Receipt`, or `None` if the server never answered).
+    #: `network`, `resource` (the route), `transaction_hash` (the
+    #: `X-Payment-Receipt`, or `None` if the server never answered) and
+    #: `settlement_pending`.
+    #:
+    #: Since 0.8.0 (SDKPY-503), what to do next, as data and never as the header:
+    #:
+    #:   * `resend` — **this SDK's decision**, one of `RESEND_SAME_HEADER`,
+    #:     `RESEND_RECONCILE`, `RESEND_NEW_CHALLENGE_OK`. It is the one to branch
+    #:     on. Only `RESEND_NEW_CHALLENGE_OK` lets a new authorization be signed.
+    #:   * `server_error`, `retryable`, `next_action` — what the server's body
+    #:     SAID, verbatim (`next_action` redacted and truncated). They are the
+    #:     server's words: where they disagree with `resend`, `resend` wins.
+    #:   * `retry_after_seconds` — `Retry-After` (or the body's field), capped
+    #:     at 30 s; `None` if the server named no wait.
+    #:   * `valid_before` — unix seconds read from the signed authorization
+    #:     (public; `None` if it could not be read). Until then plus 15 s this
+    #:     client re-sends the SAME header for the resource instead of signing.
+    #:
+    #: 🔴 The `X-PAYMENT` header itself is NEVER here: it is a bearer credential
+    #: until its `validBefore`, and `BaseException` pickles `__dict__`.
     payment: Optional[Dict[str, Any]] = None
 
     #: WHAT TO DO INSTEAD. Text for a human, stable, **a class constant**.
@@ -619,6 +657,12 @@ def mark_payment_sent(
     resource: str,
     transaction_hash: Optional[str] = None,
     settlement_pending: bool = False,
+    resend: str = RESEND_SAME_HEADER,
+    server_error: Optional[str] = None,
+    retryable: Optional[bool] = None,
+    retry_after_seconds: Optional[int] = None,
+    next_action: Optional[str] = None,
+    valid_before: Optional[int] = None,
 ) -> None:
     """Mark an exception as post-signature. Only the client calls this.
 
@@ -643,6 +687,17 @@ def mark_payment_sent(
     Market's INC-2026-08-26, a placeholder in the proof column gets archived
     as proof), but the state now travels in `settlement_pending` and gets its
     own sentence, mirroring `settlementPending` on the TS `PaymentAttempt`.
+
+    ⚠️ CORRECTION (2026-11-16, SDKPY-503, an external review of describe.net):
+    up to 0.7.0 the message closed with «resending this credential does not pay
+    again and asking for a NEW challenge charges you once more», glued after a
+    first half from `client._paid` that said the opposite («do not resend this
+    one») — and it was glued after EVERY status >= 400. describe's server says
+    the second half: on a 503 the SAME header is what recovers the read, and a
+    fresh signature can charge twice (`site/auth.md`, `paywall.py` of
+    `f68cc96`). Now the closing advice depends on `resend`, which the client
+    decides with the allow-list of `site/paybox.md` step 7, and the same text
+    never says both things.
     """
     exc.payment_sent = True
     exc.payment = {
@@ -651,6 +706,12 @@ def mark_payment_sent(
         "resource": resource,
         "transaction_hash": transaction_hash,
         "settlement_pending": settlement_pending,
+        "resend": resend,
+        "server_error": server_error,
+        "retryable": retryable,
+        "retry_after_seconds": retry_after_seconds,
+        "next_action": next_action,
+        "valid_before": valid_before,
     }
     if transaction_hash:
         prueba = (
@@ -669,12 +730,52 @@ def mark_payment_sent(
             " NO `X-Payment-Receipt` arrived, so there is no proof either way: "
             "this SDK cannot claim it settled nor that it did not."
         )
+    if resend == RESEND_NEW_CHALLENGE_OK:
+        estado = (
+            ", and the server refused it BEFORE moving anything: signing again is "
+            "safe here, and this client already dropped the old one."
+        )
+        # Sin la frase del recibo: «no proof either way» contradiría lo de
+        # arriba, y esta rama sólo existe sin recibo declarado (el cliente no la
+        # elige si llegó un `X-Payment-Receipt`).
+        prueba = ""
+        consejo = ""
+    else:
+        estado = (
+            ": this is NOT «I could not ask», it is «I may have paid and I do not "
+            "know what I got»."
+        )
+        cerrada = (
+            " The server CLOSED this authorization (see `server_error`): "
+            "re-sending it never charges again, and it brings back the same "
+            "answer or, while the server's window lasts, the read."
+            if resend == RESEND_RECONCILE
+            else ""
+        )
+        espera = (
+            f"wait the {retry_after_seconds} s of `Retry-After` first"
+            if retry_after_seconds is not None
+            else "respect `Retry-After` when the server sends one"
+        )
+        guardado = (
+            "until its `validBefore` has passed"
+            if valid_before is not None
+            else "until the client is closed (its `validBefore` could not be read)"
+        )
+        consejo = (
+            f"{cerrada} Do NOT sign another authorization: call this method again "
+            "for the same resource ON THIS SAME CLIENT, while it stays open — it "
+            f"re-sends the SAME `X-PAYMENT`, which it keeps in memory {guardado}, "
+            "and the same authorization never charges twice; a new client, or "
+            "leaving a `with` block, forgets it and would sign a new one. "
+            f"{espera[0].upper()}{espera[1:]}. Before giving up, reconcile with "
+            "`GET /payments/status` (free): `unpaid` there is NOT enough to sign "
+            "another. This client signs a new one for this resource only once the "
+            "old one can no longer execute."
+        )
     base = str(exc.args[0]) if exc.args else str(exc)
     exc.args = (
         f"{base} — 🔴 THE PAYMENT CREDENTIAL WAS ALREADY SIGNED AND DISPATCHED "
-        f"({amount_usd or '?'} USD on {network}, {resource}): this is NOT «I could "
-        f"not ask», it is «I may have paid and I do not know what I got»."
-        f"{prueba} Reconcile before retrying: the nonce is consumed at settlement, "
-        "so resending this credential does not pay again and asking for a NEW "
-        "challenge charges you once more.",
+        f"({amount_usd or '?'} USD on {network}, {resource}){estado}"
+        f"{prueba}{consejo}",
     )

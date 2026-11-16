@@ -15,6 +15,77 @@ this file starts with 0.6.0, the first release that asked for one.
 Changes merged since the last release accumulate here, each with its label
 (`[security]`, `[money]`, `[feature]`, `[internal]`), and ship together.
 
+## 0.8.0 — prepared 2026-11-16; not published yet (by hand, `publish.yml`)
+
+The two entries after the first one were merged after 0.7.0 and ship here.
+
+### [money] After paying, only a 402 of the allow-list lets you sign again; calling again re-sends the SAME header (SDKPY-503)
+
+Up to 0.7.0 every status >= 400 to a request that carried `X-PAYMENT` raised with
+"The credential is already consumed: …, do not resend this one", followed by a
+tail that said the opposite, and calling the method again signed a NEW
+authorization. describe's server says a 503 has no verdict yet and the SAME header
+is what recovers the read without charging twice, while a new signature is a new
+valid payment (`describe-net` `paywall.py@f68cc96`, `site/auth.md`). Measured
+without network by the 2026-11-16 refutation: two signatures in 11 of 11
+post-payment answers.
+
+- **The allow-list of `site/paybox.md` step 7**: only a 402 whose `error` is
+  `payment_required` or `PAYMENT_VERIFICATION_FAILED` says nothing settled and
+  tells you to get a fresh challenge. Every other answer — the five 503s, every
+  409, a 402 `FACILITATOR_ERROR` or `PAYMENT_SETTLEMENT_FAILED`, a 500 with or
+  without a receipt, a 504, a timeout, a dead socket, an unreadable body — says
+  do NOT sign another, re-send the same request, respect `Retry-After`, reconcile
+  with `GET /payments/status` (where `unpaid` is not enough to sign again).
+  Exact match: `payment_verification_failed` in lower case is not on the list.
+  `payment_required` on a RE-SEND is not on it either (paybox step 7: the earlier
+  503 still rules).
+- **The header lives in the client**, per resource (the exact URL, query
+  included), stored right after signing and before sending. Calling the method
+  again for that resource re-sends it byte for byte, straight to the paid request,
+  until its `validBefore` (read from the signed header) plus 15 s — the
+  `MARGEN_FIRMA_MS` of `site/dn-pay.js`. It is forgotten on a 2xx that parses, on
+  a 402 of the allow-list, after that margin, or on `close()`. A header whose
+  `validBefore` cannot be read keeps being re-sent. Nothing is re-sent on its own.
+  ⚠️ That margin assumes a payer that signs for at least the 1800 s describe may
+  replay a settled read for (300 s to 1800 s, regardless of `validBefore`):
+  `uvd-x402-sdk`'s signs for 3600 s by default. A payer that signs for 60 s makes
+  the client sign again at +76 s, while describe would still have re-served the
+  read for the old header.
+- **`exc.payment` gains** `resend` (`RESEND_SAME_HEADER`, `RESEND_RECONCILE`,
+  `RESEND_NEW_CHALLENGE_OK`, exported: this is what to branch on),
+  `server_error`, `retryable`, `next_action` (the server's words, verbatim;
+  where they disagree with `resend`, `resend` wins), `retry_after_seconds`
+  (`Retry-After` or the body's, capped at 30 s) and `valid_before`.
+- **The header never reaches the exception**: not in `str`, `repr`,
+  `pickle.dumps`, `exc.payment`, nor in the locals of the traceback — on 0.7.0
+  `TracebackException(capture_locals=True)` printed it from `_paid`'s frame. The
+  frames that hold it are cleared before the exception leaves the client, and a
+  body that echoes it gets it struck out.
+- **Safe to share between threads**: the pending headers sit behind a lock, a
+  call re-checks before signing, the first of two simultaneous signatures wins
+  (the other never leaves the process), an answer only forgets the header it
+  sent, and the header is marked as presented BEFORE it is sent. Before the
+  external refutation of this change, two calls crossing could end in a third
+  signature for a purchase the second may have paid.
+- **The header lives in THAT client instance**: `close()` forgets it, and so does
+  leaving a `with` block; the message says so.
+- **httpx's exception in `__cause__`** keeps a `Request` with the same method and
+  URL but without the call's headers (it carried the `X-PAYMENT`).
+- **Three holes that were already in 0.7.0**: a body httpx cannot decode
+  (`Content-Encoding: gzip` over something that is not gzip) escaped as
+  `httpx.DecodingError` — unmarked after paying, and raising from `wallet()` even
+  with `fail_open=True` —; a JSON nested past the recursion limit escaped as
+  `RecursionError`, on a paid 200 and on a paid 503, 409 or 402 alike; and a paid
+  200 with VALID JSON of an unexpected shape (`per_chain: [1]`,
+  `total_reviews: 1e400`) escaped from `wallet_breakdown()`, `wallet_history()`
+  and `agent()` as `AttributeError` or `OverflowError`. Now they are
+  `DescribeUnparseable` — except the paid 503, 409 or 402, which keeps its
+  `DescribeHTTPError` with the status — and every one of them is marked
+  `payment_sent=True` after paying.
+- The test that pinned the old rule (`test_un_4xx_despues_de_pagar_dice_que_no_se_reintente`)
+  is inverted, not deleted. `tests/test_503_tras_pagar.py` covers the cases.
+
 ### [security] Publishing to PyPI is manual only, from `main`, with a reviewer (DN-PUB-02)
 
 `publish.yml` no longer runs on a `v*` tag: the runs for v0.1.0, v0.2.0, v0.4.0,

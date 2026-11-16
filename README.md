@@ -199,22 +199,57 @@ a false claim about the world. `None` says *I could not ask*.
 ### If a metered route fails, did you spend?
 
 ```python
+from uvd_describe_sdk import RESEND_NEW_CHALLENGE_OK
+
 try:
     br = describe.wallet_breakdown("0x97cd…0996")
 except DescribeError as err:
-    if err.payment_sent:
-        # The EIP-3009 authorization was already signed and dispatched: the USDC
-        # MAY have moved. Reconciling is your job.
-        reconcile(err.payment)   # amount_usd, network, resource, transaction_hash
-    else:
+    if not err.payment_sent:
         # It fell before signing. No credential left, you spent nothing.
         retry()
+    elif err.payment["resend"] == RESEND_NEW_CHALLENGE_OK:
+        # A 402 of the allow-list: the server says nothing settled. Calling again
+        # signs a NEW authorization, and that is safe here.
+        retry()
+    else:
+        # The USDC MAY have moved. Do NOT build a new client to sign again:
+        # calling the method again on THIS client re-sends the SAME X-PAYMENT,
+        # which never charges twice. Wait err.payment["retry_after_seconds"].
+        reconcile(err.payment)   # resend, server_error, next_action, valid_before…
 ```
 
 **Branch on the attribute, never on the text** — same as `err.kind` and as
 `caveats[].code`. The message says it too, because whoever reads a traceback in a
 log at 3 AM does not have the object at hand; but the text is to read and the
 attribute is to decide.
+
+🔴 **After paying, only two answers let you sign again** (SDKPY-503, 0.8.0): a
+402 whose `error` is `payment_required` or `PAYMENT_VERIFICATION_FAILED` — the
+allow-list of describe's `paybox.md`, step 7. Everything else (any 503, any 409,
+a 402 `FACILITATOR_ERROR`, a 5xx, a timeout, a dead socket) may sit on top of a
+settled payment, and a fresh signature is a second valid payment. So the client
+keeps the signed header in memory, per resource, and **calling the method again
+re-sends it** until its `validBefore` plus 15 s; only then does it sign another.
+It never re-sends on its own, and the header is never in the exception (not in
+its text, `payment`, pickle or traceback locals). Up to 0.7.0 the message said
+the opposite and a second call signed a second authorization.
+
+⚠️ **That clock assumes a payer that signs for longer than describe replays a
+read.** describe re-serves a settled read from its receipt for a window between
+`IDEMPOTENCY_WINDOW_FLOOR_SECONDS` and `IDEMPOTENCY_WINDOW_CEILING_SECONDS`
+(300 s and 1800 s in `describenet/paywall.py`, read on 2026-11-16), whatever the
+`validBefore` says. `uvd-x402-sdk`'s payer signs for
+3600 s by default, so the client lets go after that window has closed. A payer
+of your own that signs for less (say 60 s) makes the client sign again while
+describe would still have returned the read for the old header: measured, a
+second signature 76 s after a 500 that carried a receipt. If yours does, keep
+its validity at 1800 s or more.
+
+⚠️ **The header lives in THAT client instance.** `close()` forgets it, and so
+does leaving a `with DescribeClient(...)` block — an `except` written outside the
+block runs after `close()`, and a new client would sign a new authorization. For
+metered routes, keep one long-lived client per process (it is safe to share
+between threads) and catch inside the block.
 
 ⚠️ **Known limit, and it is written down because it matters:**
 `payment_sent=True` proves the credential **left**, not that settlement happened.

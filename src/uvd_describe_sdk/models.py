@@ -959,7 +959,13 @@ def parse_breakdown(payload: Any, receipt: Optional[PaymentReceipt] = None) -> B
             receipt=receipt,
             raw=dict(body),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    # `AttributeError` y `OverflowError` (2026-11-16, auto-refutación de la
+    # ronda 1 de X2 de SDKPY-503): JSON VÁLIDO de forma inesperada —`per_chain`
+    # o `facets` como lista (`.items()`), `total_reviews: 1e400` (`int(inf)`)—
+    # escapaba crudo. Esto es una ruta PAGA: fuera de `DescribeError` la
+    # excepción sale del tramo pagado sin `payment_sent`, y quien la atrapa como
+    # «no pagué» y reintenta con un cliente nuevo firma otra.
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         raise DescribeUnparseable(
             f"GET /reputation/wallet/{{wallet}} did not pass the typed parse: {exc}"
         ) from exc
@@ -1103,7 +1109,9 @@ def parse_agent_reputation(
             receipt=receipt,
             raw=dict(body),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    # `AttributeError` y `OverflowError`: ruta PAGA, el mismo porqué que en
+    # `parse_breakdown` (`facets: [1]`, `review_count: 1e400`).
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         raise DescribeUnparseable(
             f"GET /reputation/agent did not pass the typed parse: {exc}"
         ) from exc
@@ -1449,7 +1457,9 @@ def parse_history(payload: Any, receipt: Optional[PaymentReceipt] = None) -> Wal
             undated_reviews=_opt_int(coverage.get("undated_reviews")),
             raw=dict(body),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    # `AttributeError` y `OverflowError`: ruta PAGA, el mismo porqué que en
+    # `parse_breakdown` (`points: [1]`, un `score` de 401 dígitos).
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         raise DescribeUnparseable(
             f"GET /reputation/wallet/{{wallet}}/history did not pass the typed parse: {exc}"
         ) from exc

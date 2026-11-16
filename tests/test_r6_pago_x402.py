@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from uvd_describe_sdk import (
+    RESEND_RECONCILE,
     SETTLEMENT_PENDING,
     TREASURY_EVM,
     DescribeHTTPError,
@@ -329,9 +330,19 @@ def test_un_caip2_no_evm_no_resuelve_a_nada() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_un_4xx_despues_de_pagar_dice_que_no_se_reintente(make_client) -> None:
-    """El nonce se consume en el settlement: reenviar la misma credencial no
-    vuelve a pagar. El mensaje tiene que mandar a pedir un challenge NUEVO."""
+def test_un_409_despues_de_pagar_dice_que_NO_se_firme_otra(make_client) -> None:
+    """Un 409 tras pagar NO manda a firmar otra: el servidor cerró ESA autorización.
+
+    ⚠️ INVERTIDO el 2026-11-16 (SDKPY-503), y se deja escrito por qué. Este test
+    se llamaba `test_un_4xx_despues_de_pagar_dice_que_no_se_reintente` y exigía
+    `"do not resend" in str(exc)`: fijaba la regla «pedí un desafío nuevo, no
+    reenvíes éste» para TODO status >= 400. Esa regla es la que puede cobrar dos
+    veces. El servidor (describe-net `paywall.py@f68cc96`) contesta 409 a una
+    autorización que ya liquidó, que ya se usó o que se minó y falló, y en los
+    tres casos firmar otra es un pago NUEVO: reenviar la MISMA nunca vuelve a
+    cobrar (un nonce EIP-3009, una transferencia). Ahora el mensaje dice «NO
+    firmes otra», y el atributo para ramificar dice `reconcile`.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "X-PAYMENT" not in request.headers:
@@ -342,7 +353,11 @@ def test_un_4xx_despues_de_pagar_dice_que_no_se_reintente(make_client) -> None:
         with pytest.raises(DescribeHTTPError) as exc:
             c.wallet_breakdown("0xdead")
     assert exc.value.status_code == 409
-    assert "do not resend" in str(exc.value)
+    assert "do not resend" not in str(exc.value)
+    assert "new challenge" not in str(exc.value)
+    assert "Do NOT sign another authorization" in str(exc.value)
+    assert exc.value.payment is not None
+    assert exc.value.payment["resend"] == RESEND_RECONCILE
 
 
 def test_no_hay_reintento_automatico(make_client) -> None:
